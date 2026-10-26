@@ -162,6 +162,8 @@ Groups:
   L  profile discovery: the walk, its $HOME boundary through a real symlink,
      the one-level merge
   M  create payload: shaping, aliases, sentinels, and the sprint refusals
+  N  transition --field: the screen's own fields, encoded by their schema,
+     and refused before any write when unknown or outside allowedValues
 
 Usage:
   python3 tests/test_jira_cli.py
@@ -4573,6 +4575,215 @@ def group_m(suite, mod, workspace):
 
 
 # ---------------------------------------------------------------------------
+# N. transition --field: the screen's own fields, encoded by schema
+# ---------------------------------------------------------------------------
+
+def transition_screen():
+    """One transition whose screen asks for five kinds of field."""
+    return [{"id": "41", "name": "Done", "to": {"name": "Done"}, "fields": {
+        "customfield_22602": {
+            "required": True, "name": "QA required?",
+            "schema": {"type": "option"},
+            "allowedValues": [{"id": "10001", "value": "Yes"},
+                              {"id": "10002", "value": "No"}]},
+        "customfield_22700": {
+            "required": False, "name": "Teams",
+            "schema": {"type": "array", "items": "option"},
+            "allowedValues": [{"id": "1", "value": "Red"},
+                              {"id": "2", "value": "Blue"},
+                              {"id": "3", "value": "Green"}]},
+        "customfield_22800": {"required": False, "name": "Note",
+                              "schema": {"type": "string"}},
+        "customfield_22900": {"required": False, "name": "Points",
+                              "schema": {"type": "number"}},
+        "customfield_23000": {"required": False, "name": "Cascade",
+                              "schema": {"type": "option-with-child"}},
+        "resolution": {"required": False, "name": "Resolution",
+                       "schema": {"type": "resolution"},
+                       "allowedValues": [{"id": "1", "name": "Fixed"}]},
+    }}]
+
+
+def run_transition(mod, tail, listing=None):
+    """(code, transport, refusal text) for `transition STR-7 41 <tail>`.
+
+    The script is the listing, then a 204.  A refusal is a SetupError caught
+    here, and the transport shows what was sent before it.
+    """
+    listing = transition_screen() if listing is None else listing
+    client, transport = client_with(
+        mod, [response(mod, 200, {"transitions": listing}),
+              response(mod, 204)], deployment=mod.SERVER)
+    args = parse_args(mod, connected(["transition", "STR-7", "41"]
+                                     + list(tail)))
+    refusal = None
+    code = None
+    with captured() as (_out, _err):
+        try:
+            code = mod.cmd_transition(args, client)
+        except mod.SetupError as exc:
+            refusal = str(exc)
+    return code, transport, refusal
+
+
+def posts(transport):
+    return [c for c in transport.calls if c.method == "POST"]
+
+
+def group_n(suite, mod):
+    GN = "N. transition --field"
+
+    def sent_fields(tail):
+        code, transport, refusal = run_transition(mod, tail)
+        problems = []
+        if code != 0 or refusal:
+            problems.append("exit %r, refusal %r" % (code, refusal))
+        sent = posts(transport)
+        if len(sent) != 1:
+            problems.append("%d POST(s), want 1" % len(sent))
+            return None, problems
+        return sent[0].body, problems
+
+    body, problems = sent_fields(["--field", "customfield_22602=Yes"])
+    if body is not None and body != {
+            "transition": {"id": "41"},
+            "fields": {"customfield_22602": {"value": "Yes"}}}:
+        problems.append("body %r" % body)
+    suite.record(GN, "an-option-is-sent-as-a-value-object", problems,
+                 detail=["the reported failure: STR-13756 41 needs "
+                         "customfield_22602 = Yes / No"])
+
+    body, problems = sent_fields(["--field", "customfield_22602=id:10002"])
+    if body is not None and body.get("fields") != {
+            "customfield_22602": {"id": "10002"}}:
+        problems.append("body %r" % body)
+    suite.record(GN, "id-prefix-is-sent-as-an-id-object", problems)
+
+    body, problems = sent_fields(["--field", "customfield_22700=Red, Blue"])
+    if body is not None and body.get("fields") != {
+            "customfield_22700": [{"value": "Red"}, {"value": "Blue"}]}:
+        problems.append("body %r" % body)
+    suite.record(GN, "a-multi-select-is-a-list-of-value-objects", problems)
+
+    body, problems = sent_fields(["--field", "customfield_22800=a=b c",
+                                  "--field", "resolution=Fixed"])
+    if body is not None and body.get("fields") != {
+            "customfield_22800": "a=b c", "resolution": {"name": "Fixed"}}:
+        problems.append("body %r" % body)
+    suite.record(GN, "a-string-stays-a-string-and-resolution-is-named",
+                 problems)
+
+    body, problems = sent_fields(["--field", "customfield_22900=3.5"])
+    if body is not None and body.get("fields") != {"customfield_22900": 3.5}:
+        problems.append("body %r" % body)
+    code, transport, refusal = run_transition(
+        mod, ["--field", "customfield_22900=3"])
+    if posts(transport) and posts(transport)[0].body["fields"] != {
+            "customfield_22900": 3}:
+        problems.append("an integer was not sent as one: %r"
+                        % posts(transport)[0].body)
+    code, transport, refusal = run_transition(
+        mod, ["--field", "customfield_22900=lots"])
+    if refusal is None or posts(transport):
+        problems.append("a non-number was not refused before the write")
+    suite.record(GN, "a-number-is-sent-as-a-number", problems)
+
+    problems = []
+    code, transport, refusal = run_transition(
+        mod, ["--field", "customfield_22602=Yes", "--field", "nope=1"])
+    if refusal is None:
+        problems.append("an unknown field was not refused")
+    else:
+        problems += ["the refusal omits %r: %r" % (t, refusal)
+                     for t in missing_tokens(refusal, [
+                         "nope", "customfield_22602", "customfield_22700",
+                         "resolution"])]
+    if posts(transport):
+        problems.append("a POST was made before the refusal")
+    code, transport, refusal = run_transition(
+        mod, ["--field", "customfield_23000=x"])
+    if refusal is None or "option-with-child" not in refusal \
+            or posts(transport):
+        problems.append("an unencodable schema type was not refused by name: "
+                        "%r" % refusal)
+    suite.record(GN, "an-unknown-field-is-refused-before-any-write", problems,
+                 detail=[refusal or "<no refusal>"])
+
+    problems = []
+    code, transport, refusal = run_transition(
+        mod, ["--field", "customfield_22602=Maybe"])
+    if refusal is None:
+        problems.append("a value outside allowedValues was not refused")
+    else:
+        problems += ["the refusal omits %r: %r" % (t, refusal)
+                     for t in missing_tokens(refusal, ["Maybe", "Yes", "No"])]
+    if posts(transport):
+        problems.append("a POST was made before the refusal")
+    code, transport, refusal = run_transition(
+        mod, ["--field", "customfield_22700=Red,Purple"])
+    if refusal is None or "Purple" not in refusal or posts(transport):
+        problems.append("one bad element of a multi-select was not refused: "
+                        "%r" % refusal)
+    suite.record(GN, "a-value-outside-allowedValues-is-refused-listing-them",
+                 problems, detail=[refusal or "<no refusal>"])
+
+    code, transport, refusal = run_transition(mod, [])
+    problems = []
+    sent = posts(transport)
+    if refusal or code != 0 or len(sent) != 1:
+        problems.append("plain transition: code %r refusal %r" % (code, refusal))
+    elif sent[0].body != {"transition": {"id": "41"}}:
+        problems.append("body %r gained something" % sent[0].body)
+    elif len(transport.calls) != 1:
+        problems.append("a numeric id with no --field made %d requests; it "
+                        "used to make one" % len(transport.calls))
+    code, transport, refusal = run_transition(mod, ["--comment", "ok"])
+    sent = posts(transport)
+    if not sent or sent[0].body != {
+            "transition": {"id": "41"},
+            "update": {"comment": [{"add": {"body": "ok"}}]}}:
+        problems.append("the --comment body changed")
+    suite.record(GN, "without-field-the-body-is-what-it-always-was", problems,
+                 detail=["ANTI-VACUITY: a numeric id still costs no GET"])
+
+    code, transport, refusal = run_transition(
+        mod, ["--field", "customfield_22602=Yes"])
+    problems = []
+    first = transport.calls[0] if transport.calls else None
+    if first is None or first.method != "GET" \
+            or query_of(first).get("expand") != "transitions.fields":
+        problems.append("the transitions GET did not carry "
+                        "expand=transitions.fields: %r" % first)
+    suite.record(GN, "the-expand-parameter-is-sent", problems)
+
+    client, transport = client_with(
+        mod, [response(mod, 200, {"transitions": transition_screen()})],
+        deployment=mod.SERVER)
+    args = parse_args(mod, connected(["transitions", "STR-7"]))
+    with captured() as (out, _err):
+        mod.cmd_transitions(args, client)
+    text = out.getvalue()
+    problems = ["the listing omits %r" % t for t in missing_tokens(
+        text, ["Fields", "customfield_22602", "QA required?", "(required)",
+               "Yes, No"])]
+    suite.record(GN, "transitions-lists-each-screen-field", problems,
+                 detail=text.splitlines())
+
+    skill = os.path.join(os.path.dirname(os.path.dirname(TARGET)), "SKILL.md")
+    try:
+        with open(skill, "r", encoding="utf-8") as handle:
+            doc = handle.read()
+    except OSError as exc:
+        doc = ""
+        problems = ["cannot read SKILL.md: %s" % exc]
+    else:
+        problems = ["SKILL.md omits %r" % t for t in missing_tokens(
+            doc, ["--field", "Please select", "transitions.fields"])]
+    suite.record(GN, "skill-md-documents-field", problems)
+    mod.reset_deployment_cache()
+
+
+# ---------------------------------------------------------------------------
 # I. hygiene
 # ---------------------------------------------------------------------------
 
@@ -4654,6 +4865,7 @@ def run(opts=None):
             group_k(suite, mod)
             group_l(suite, mod, workspace.path)
             group_m(suite, mod, workspace.path)
+            group_n(suite, mod)
         finally:
             mod.reset_deployment_cache()
         # group_i LAST, always: it asserts the repo tree is exactly as this run

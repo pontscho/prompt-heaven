@@ -449,8 +449,10 @@ SUITES = [
      "$HOME either, which is the macOS default -- both halves now gated, the "
      "symlinked one against a real symlink, each with a control beside it, "
      "and the case-folding residue realpath cannot close MEASURED rather "
-     "than claimed",
-     232),
+     "than claimed, plus `transition --field`: the transition screen's own "
+     "fields encoded by schema, refused before any write when unknown or "
+     "outside allowedValues",
+     243),
     # TYPED, and the count is a fixed case table plus ONE derived row: group C
     # sweeps every entry in the CLI's HANDLERS dict, but it records three cases
     # regardless of how many subcommands it finds, so adding a subcommand moves

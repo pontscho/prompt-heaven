@@ -61,6 +61,7 @@ Usage:
     jira.py comment PROJ-1234 -            # body from stdin
     jira.py transition PROJ-1234 'In Progress' --comment 'picking this up'
     jira.py transition PROJ-1234 31 --dry-run
+    jira.py transition PROJ-1234 41 --field customfield_22602=Yes --field resolution=Done
     jira.py worklog PROJ-1234 '3h 20m' --comment 'pairing' --started 2026-08-26T09:00:00.000+0000
     jira.py attach PROJ-1234 ./build.log --name failing-build.log
 
@@ -1542,16 +1543,48 @@ def _transition_target(transition: dict) -> str:
 	return _text((transition.get("to") or {}).get("name"))
 
 
+def _transition_fields_cell(transition: dict) -> str:
+	"""What the transition's own screen asks for, as one table cell.
+
+	`id "name" (required) [allowed, ...]` per field.  The expand that fetches
+	this is already on the transitions request, so showing it costs nothing --
+	and it is the only place a caller can learn which `--field` ids `transition`
+	will accept.
+	"""
+	meta = transition.get("fields")
+	if not isinstance(meta, dict):
+		return ""
+	parts = []
+	for field_id in sorted(meta):
+		blob = meta[field_id] if isinstance(meta[field_id], dict) else {}
+		part = "%s \"%s\"" % (field_id, _flat(blob.get("name"), ""))
+		if blob.get("required"):
+			part += " (required)"
+		allowed = _allowed_preview(blob.get("allowedValues"))
+		if allowed:
+			part += " [%s]" % allowed
+		parts.append(part)
+	return "; ".join(parts)
+
+
 def _transitions_document(available: Sequence[dict]) -> str:
 	"""The transition table, shared by `transitions` and by the failed lookup.
 
 	`transition` prints this same table when a name resolves to nothing, and a
 	second copy of the rendering here is a second place for the two to drift.
+	The Fields column appears only when some transition carries a screen, so a
+	workflow with no transition screens keeps the three-column table.
 	"""
-	return "%s\n\n%s" % (md_heading(2, "Transitions"),
-		md_table(("Id", "Name", "To"),
-			[[_text(t.get("id")), _text(t.get("name")), _transition_target(t)]
-				for t in available]))
+	with_fields = any(_transition_fields_cell(t) for t in available)
+	headers = ("Id", "Name", "To", "Fields") if with_fields \
+		else ("Id", "Name", "To")
+	rows = []
+	for t in available:
+		row = [_text(t.get("id")), _text(t.get("name")), _transition_target(t)]
+		if with_fields:
+			row.append(_transition_fields_cell(t))
+		rows.append(row)
+	return "%s\n\n%s" % (md_heading(2, "Transitions"), md_table(headers, rows))
 
 
 def cmd_transitions(args: argparse.Namespace, client: Jira) -> int:
@@ -1696,6 +1729,147 @@ def _resolve_transition(client: Jira, key: str,
 	return None, available
 
 
+# Schema types of a transition-screen field whose value is a NAMED object --
+# the same {"name": VALUE} shape `create` gives priority, but chosen here by the
+# schema the server reported for THIS screen instead of by a table of names.
+TRANSITION_NAMED_TYPES = ("priority", "resolution")
+TRANSITION_NAMED_ITEMS = ("component", "version")
+
+
+def _allowed_listing(allowed: Sequence[Any]) -> str:
+	"""Permitted values for a refusal: the spelling to type, and the id form."""
+	out = []
+	for item in allowed:
+		if not isinstance(item, dict):
+			continue
+		label = _text(item, "")
+		ident = _text(item.get("id"), "")
+		if label:
+			out.append("%s (id:%s)" % (label, ident) if ident else label)
+	return ", ".join(out)
+
+
+def _transition_object(field: str, raw: str, key: str,
+		allowed: Sequence[Any]) -> Dict[str, str]:
+	"""One option/named value: {key: VALUE}, or {"id": N} for `id:N`.
+
+	A value is checked against the field's allowedValues whenever the server
+	listed any, because the server's own answer to a wrong option is a 400 that
+	names the field and not the permitted values.  A value that matches no
+	value/name is still accepted if it is an ID in the list, and sent as one.
+	"""
+	listed = [a for a in allowed if isinstance(a, dict)]
+	raw = raw.strip()
+	if raw.startswith("id:"):
+		ident = raw[3:].strip()
+		if not ident:
+			raise SetupError("--field %s=%s: nothing after \"id:\"" % (field, raw))
+		if listed and not any(str(a.get("id")) == ident for a in listed):
+			raise SetupError("--field %s: no allowed value has id %s — allowed: "
+				"%s" % (field, ident, _allowed_listing(listed)))
+		return {"id": ident}
+	if listed:
+		for item in listed:
+			if raw in (str(item.get("value") or ""), str(item.get("name") or "")):
+				return {key: raw}
+		for item in listed:
+			if str(item.get("id")) == raw:
+				return {"id": raw}
+		raise SetupError("--field %s=%s: not an allowed value — allowed: %s"
+			% (field, raw, _allowed_listing(listed)))
+	return {key: raw}
+
+
+def _encode_transition_field(client: Jira, field: str, raw: str,
+		blob: Any) -> Any:
+	"""VALUE in the shape the transition screen's schema for `field` wants.
+
+	The schema comes from the server's own `transitions.fields` expand, so no
+	table of custom-field ids lives here -- which is why `create` needed a
+	profile and this does not.  What the schema cannot be encoded from a bare
+	string is REFUSED with its type named, never guessed.
+	"""
+	blob = blob if isinstance(blob, dict) else {}
+	schema = blob.get("schema") if isinstance(blob.get("schema"), dict) else {}
+	kind = str(schema.get("type") or "")
+	items = str(schema.get("items") or "")
+	allowed = blob.get("allowedValues")
+	allowed = allowed if isinstance(allowed, list) else []
+
+	if kind == "option":
+		return _transition_object(field, raw, "value", allowed)
+	if kind in TRANSITION_NAMED_TYPES:
+		return _transition_object(field, raw, "name", allowed)
+	if kind == "array" and items in ("option", "string") \
+			+ TRANSITION_NAMED_ITEMS:
+		parts = _csv(raw)
+		if not parts:
+			raise SetupError("--field %s: an empty list" % field)
+		if items == "string":
+			return parts
+		key = "value" if items == "option" else "name"
+		return [_transition_object(field, part, key, allowed) for part in parts]
+	if kind == "string":
+		return raw
+	if kind == "number":
+		try:
+			number = float(raw.strip())
+		except ValueError:
+			raise SetupError("--field %s=%s: the field is a number" % (field, raw))
+		if number != number or number in (float("inf"), float("-inf")):
+			raise SetupError("--field %s=%s: the field is a number" % (field, raw))
+		return int(number) if number.is_integer() and "." not in raw \
+			and "e" not in raw.lower() else number
+	if kind == "user":
+		if raw.strip() == SENTINEL_ME:
+			return client.user_ref()
+		if client._deployment() == CLOUD:
+			raise SetupError("--field %s=%s cannot be sent to Cloud: it "
+				"addresses a user by accountId and has hidden \"name\" — use "
+				"\"%s\" for yourself" % (field, raw, SENTINEL_ME))
+		return {"name": raw.strip()}
+	shown = "%s<%s>" % (kind, items) if items else (kind or "unknown")
+	raise SetupError("--field %s: the schema type %s cannot be set from a bare "
+		"value by this script" % (field, shown))
+
+
+def _transition_fields(args: argparse.Namespace, client: Jira,
+		transition_id: str, available: Sequence[dict]) -> Dict[str, Any]:
+	"""The `fields` object for the transition, or {} when no --field was given.
+
+	Everything is checked BEFORE any write: the key against the fields THIS
+	transition's screen declares, then the value against that field's schema
+	and allowed values.  Only fields the screen itself asks for can be set --
+	this is not a general field edit of an existing issue.
+	"""
+	if not args.field:
+		return {}
+	if not available:
+		available = client.transitions(args.key)
+	chosen = None
+	for candidate in available:
+		if _text(candidate.get("id")) == str(transition_id):
+			chosen = candidate
+			break
+	if chosen is None:
+		raise SetupError("transition %s is not available on %s, so its fields "
+			"are unknown — available: %s" % (transition_id, args.key,
+				", ".join(_text(t.get("id")) for t in available) or "none"))
+	meta = chosen.get("fields")
+	meta = meta if isinstance(meta, dict) else {}
+	out = {}		# type: Dict[str, Any]
+	for raw in args.field:
+		name, value = _split_assignment(raw)
+		if name in out:
+			raise SetupError("--field %s given more than once" % name)
+		if name not in meta:
+			raise SetupError("transition %s on %s does not accept field %s — "
+				"it accepts: %s" % (transition_id, args.key, name,
+					", ".join(sorted(meta)) or "no fields"))
+		out[name] = _encode_transition_field(client, name, value, meta[name])
+	return out
+
+
 def cmd_transition(args: argparse.Namespace, client: Jira) -> int:
 	_validate_issue_key(args.key)
 	transition_id, available = _resolve_transition(client, args.key, args.target)
@@ -1708,6 +1882,9 @@ def cmd_transition(args: argparse.Namespace, client: Jira) -> int:
 		return FINDING
 
 	body = {"transition": {"id": str(transition_id)}}
+	fields = _transition_fields(args, client, str(transition_id), available)
+	if fields:
+		body["fields"] = fields
 	if args.comment:
 		body["update"] = {"comment": [{"add": {"body": args.comment}}]}
 	path = API + "/issue/%s/transitions" % args.key
@@ -2370,6 +2547,12 @@ def build_parser() -> argparse.ArgumentParser:
 		"exact name (case-insensitive)")
 	transition.add_argument("--comment", help="comment to add with the "
 		"transition")
+	transition.add_argument("--field", action="append", metavar="KEY=VALUE",
+		help="set a field the transition's own screen asks for, repeatable. "
+			"KEY is a field id (customfield_NNNNN, resolution, ...) listed by "
+			"`transitions`. VALUE is encoded from the field's schema: an "
+			"option is {\"value\": VALUE}, or {\"id\": N} when written id:N; a "
+			"multi-select takes comma-separated values")
 
 	worklog = sub.add_parser("worklog", parents=[common, dry],
 		help="log time against an issue")

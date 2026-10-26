@@ -88,7 +88,7 @@ interceptable channel carrying a Personal Access Token.
 | `whoami` | `GET /myself`. Prints the deployment type, resolved base URL, auth mode, where each config value came from, and the authenticated user. The sanctioned way to answer "is this configured correctly". |
 | `search <JQL>` | Runs a JQL query and streams the matches. `--fields`, `--limit N` (default 50, counted across pages), `--fail-empty` (exit 1 when nothing matched — for use as a gate), `--json`. |
 | `get <KEY>` | Issue detail. `--fields`, `--comments`, `--changelog`, `--json`. |
-| `transitions <KEY>` | The transitions legal from the issue's **current** status, with their numeric IDs. |
+| `transitions <KEY>` | The transitions legal from the issue's **current** status, with their numeric IDs. When a transition has a screen, a `Fields` column lists each field it asks for: ID, name, `(required)`, and the permitted values. Those IDs are what `transition --field` accepts. |
 | `projects` | Every project you can see. |
 | `fields` | Every field, with its ID and whether it is custom. `--grep TEXT` filters by name — this is how you map a display name onto its `customfield_NNNNN` ID. |
 | `createmeta` | What a project's create screen requires and permits, per issue type: field ID, name, `required`, schema type, and the permitted values. `--type Bug` narrows it, `--required` hides everything optional. Run this **before** writing a profile, not after a failed create. |
@@ -111,9 +111,31 @@ Each write honours `JIRA_READ_ONLY` and accepts `--dry-run`.
 |---|---|
 | `create` | Files a new issue. `--summary` is required; `--description` may be `-`, meaning read the body from stdin. Everything else comes from the profile, or from `--field NAME=VALUE` / `--field-json NAME=JSON` which override it. Prints the new key and its browse URL. |
 | `comment <KEY> <TEXT>` | Adds a comment. `TEXT` may be `-`, meaning read the body from stdin. |
-| `transition <KEY> <ID-OR-NAME>` | Moves the issue. A name is resolved to its numeric ID by reading the transition list first; if the name is unknown or ambiguous the legal transitions are printed and the command exits 1. `--comment TEXT` attaches a comment to the transition. |
+| `transition <KEY> <ID-OR-NAME>` | Moves the issue. A name is resolved to its numeric ID by reading the transition list first; if the name is unknown or ambiguous the legal transitions are printed and the command exits 1. `--comment TEXT` attaches a comment to the transition. `--field KEY=VALUE` (repeatable) sets a field the transition's own screen asks for — see below. |
 | `worklog <KEY> <TIMESPENT>` | Logs work, e.g. `'3h 20m'`. `--comment TEXT`, `--started ISO`. |
 | `attach <KEY> <FILE>` | Uploads a file as an attachment. `--name NAME` overrides the displayed filename; it is reduced to a basename either way, so a path cannot be smuggled into it. |
+
+**`transition --field KEY=VALUE`** exists because a workflow screen can *require* a field
+before it lets an issue move (a Data Center 400 reading `Please select whether or not QA is
+required!` is exactly that). The script reads the chosen transition's own field list
+(`transitions.fields`), and encodes each VALUE from the schema Jira reports for that field:
+an option becomes `{"value": VALUE}` (or `{"id": N}` when written `id:N`), a multi-select takes
+comma-separated values, and string, number, user (`{"name": ...}` on Data Center, `@me` for
+yourself), priority and resolution are handled too. Anything else is refused with its schema
+type named. Before anything is sent, a KEY the transition does not list is refused with the
+IDs it does accept, and a VALUE outside the field's allowed values is refused with those
+values. `--dry-run` prints the resulting body. This is **not** a general field edit: only a
+field the transition screen itself asks for can be set, and without `--field` the request body
+is exactly what it always was.
+
+**Runbook — a transition fails with HTTP 400 `Please select ...` or names a required field:**
+run `transitions <KEY>`, read the `Fields` cell of that transition, and pass each required
+field as `--field ID=VALUE` (`--dry-run` first if unsure about the value).
+
+```bash
+python3 $J transitions STR-13756
+python3 $J transition STR-13756 41 --field customfield_22602=Yes --dry-run
+```
 
 **Out of scope on purpose**: deleting anything, and editing arbitrary fields on an issue
 that already exists. Those need `editmeta` round-trips and per-field value shapes that differ
