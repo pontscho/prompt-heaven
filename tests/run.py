@@ -138,6 +138,10 @@ def run_bitbucket_cli(opts):
     return run_python_suite("test_bitbucket_cli", opts)
 
 
+def run_jenkins_job_cli(opts):
+    return run_python_suite("test_jenkins_job_cli", opts)
+
+
 def run_checkpoint(opts):
     return run_python_suite("test_checkpoint", opts)
 
@@ -477,6 +481,17 @@ SUITES = [
      "outside the slice -- then the boundary DRIVEN through a real symlinked "
      "$HOME, because identical text in a file is not the same claim as "
      "identical behaviour in the loaded module", 133),
+    # TYPED: a fixed case table, so a count that moves is the alarm.
+    ("jenkins_job_cli", run_jenkins_job_cli,
+     "Jenkins job CLI offline against a fake Jenkins on loopback: the "
+     "https-only door (the loopback override is test-only) and the job path "
+     "and name rules, get-config with every secret masked and no flag to show "
+     "them, dry runs measured as zero writes, --apply's createItem copy then "
+     "config POST with crumb and session cookie, a fresh webhook token printed "
+     "once and stored nowhere else, and the failure paths -- duplicate name, "
+     "missing trigger or Git source, a half-created job reported by name, a "
+     "failed config POST, a cross-origin redirect, the size cap and hostile "
+     "server text", 49),
     ("checkpoint", run_checkpoint,
      "checkpoint.py section reader + TOC writer: Start/End land on the block "
      "and nothing else, the numbers describe the file AFTER the region was "

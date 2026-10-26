@@ -1,0 +1,1 @@
+<jenkins.plugins.git.traits.DiscoverOtherRefsTrait><ref>pull-requests/*/from</ref><nameMapping>PR-@{1}</nameMapping></jenkins.plugins.git.traits.DiscoverOtherRefsTrait>

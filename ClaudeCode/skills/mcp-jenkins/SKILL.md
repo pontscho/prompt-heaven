@@ -30,6 +30,8 @@ Parameters: `function` (string), `params` (object, optional)
 Short aliases: `f` for `function`, `p` for `params`
 Called without `function` → server status: endpoint, auth, effective project, the answer ceiling and the function list.
 
+Creating or cloning a job, reading or replacing a job's `config.xml`, or wiring a multibranch webhook is not done here: use the `jenkins-job` skill.
+
 ## How to call any function
 
 ```

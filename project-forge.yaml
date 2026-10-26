@@ -181,6 +181,14 @@ test:
     filter:
       grep: 'SUITE|AGGREGATE|cases|ALL|FAIL|INFO|SKIP|DRIFT|declared|READ_ONLY|ORIGIN|VERDICT|UNVERIFIED|control'
 
+  jenkins_job_cli:
+    description: "The Jenkins job CLI (ClaudeCode/skills/jenkins-job), offline against a fake Jenkins on loopback: https-only door with a test-only loopback override, path and name rules, secret masking in get-config, dry runs as zero writes, --apply request sequence with crumb and cookie, a fresh webhook token printed once, and the failure paths (duplicate, missing trigger or Git source, half-created job, failed config POST, cross-origin redirect, size cap, hostile server text)."
+    requires: [syntax]
+    commands:
+      - python3 tests/run.py jenkins_job_cli
+    filter:
+      grep: 'SUITE|AGGREGATE|cases|ALL|FAIL|INFO|SKIP|DRIFT|declared|PROBLEM'
+
   task_scripts:
     description: "The task-script family's explicit --yaml PATH (task-update, task-show-details, task-implementation-plan), each run as a child beside a decoy ./requirements.yaml that must stay untouched: position-independent --yaml / -y / --yaml=, an unreadable file as one stderr line and exit 1 with no fallback to the cwd, and an explicit --yaml without --doc skipping the default plan document with one warning instead of another feature's plan."
     requires: [syntax]
