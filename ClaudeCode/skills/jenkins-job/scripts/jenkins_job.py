@@ -20,14 +20,14 @@ flag that turns the masking off.  `clone` generates the new webhook token with
 URL the Bitbucket webhook needs, and writes it nowhere else.
 
 Usage:
-	jenkins_job.py whoami [--folder sl/ngs-media-server]
-	jenkins_job.py get-config sl/ngs-media-server/ngs-media-server
-	jenkins_job.py clone sl/ngs-media-server/ngs-media-server ngs-webrtc \\
-		--folder sl/ngs-media-server --remote ssh://git@host:7999/sl/ngs-webrtc.git \\
-		--generate-webhook-token ngs-webrtc            # dry run
+	jenkins_job.py whoami [--folder <FOLDER>]
+	jenkins_job.py get-config <FOLDER>/<TEMPLATE>
+	jenkins_job.py clone <FOLDER>/<TEMPLATE> <NAME> \\
+		--folder <FOLDER> --remote ssh://git@<HOST>:<PORT>/<PROJECT>/<REPO>.git \\
+		--generate-webhook-token <NAME>            # dry run
 	jenkins_job.py clone ... --apply
-	jenkins_job.py set-config sl/ngs-media-server/ngs-webrtc --file config.xml [--apply]
-	jenkins_job.py scan sl/ngs-media-server/ngs-webrtc [--apply]
+	jenkins_job.py set-config <FOLDER>/<NAME> --file config.xml [--apply]
+	jenkins_job.py scan <FOLDER>/<NAME> [--apply]
 
 Environment variables:
 	JENKINS_ENDPOINT   base URL, https only (JENKINS_URL is read as a fallback spelling)
@@ -764,10 +764,10 @@ def build_parser() -> argparse.ArgumentParser:
 	sub.required = True
 
 	p = sub.add_parser("whoami", help="who the token is; with --folder, can it create there")
-	p.add_argument("--folder", help="folder path, e.g. sl/ngs-media-server")
+	p.add_argument("--folder", help="folder path, e.g. <FOLDER>")
 
 	p = sub.add_parser("get-config", help="print a job's config.xml with secrets masked")
-	p.add_argument("job", help="job path, e.g. sl/ngs-media-server/ngs-media-server")
+	p.add_argument("job", help="job path, e.g. <FOLDER>/<TEMPLATE>")
 
 	p = sub.add_parser("clone", help="copy a job, patch the copy, print its webhook URL")
 	p.add_argument("source", help="source job path")

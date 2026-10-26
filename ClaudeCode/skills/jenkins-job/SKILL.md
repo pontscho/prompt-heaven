@@ -34,16 +34,16 @@ command line lands in shell history.
 | `JENKINS_TOKEN` | yes | API token (not the UI password). |
 | `JENKINS_JOB_ALLOW_INSECURE_LOOPBACK` | no | **Test-only.** `1` accepts an `http://` endpoint if and only if its host is `127.0.0.1` or `::1`. Never set it against a real Jenkins. |
 
-Job paths are slash-separated names, e.g. `sl/ngs-media-server/ngs-media-server`,
-spelled by the script as `/job/sl/job/ngs-media-server/job/ngs-media-server` with each
+Job paths are slash-separated names, e.g. `<FOLDER>/<TEMPLATE>`,
+spelled by the script as `/job/<FOLDER>/job/<TEMPLATE>` (one `/job/` per segment) with each
 segment URL-quoted. Empty segments, `.` and `..` are refused. A new job name is limited
 to letters, digits, `.`, `_` and `-`.
 
 ## Commands
 
 ```bash
-python3 -B scripts/jenkins_job.py whoami [--folder sl/ngs-media-server]
-python3 -B scripts/jenkins_job.py get-config sl/ngs-media-server/ngs-media-server
+python3 -B scripts/jenkins_job.py whoami [--folder <FOLDER>]
+python3 -B scripts/jenkins_job.py get-config <FOLDER>/<TEMPLATE>
 python3 -B scripts/jenkins_job.py clone SOURCE_JOB_PATH NEW_NAME --folder FOLDER_PATH [options] [--apply]
 python3 -B scripts/jenkins_job.py set-config JOB_PATH --file config.xml [--apply]
 python3 -B scripts/jenkins_job.py scan JOB_PATH [--apply]
@@ -121,11 +121,11 @@ the remote explicitly and confirm it with the user.
    Check the remote, credentials id and script path. Add `--credentials-id`,
    `--script-path`, `--display-name` as the new repository needs.
 4. **Apply:** the same command plus `--apply`. Copy the printed invoke URL; it is shown once.
-5. **Register the webhook on Bitbucket Server** (project SL, repository `ngs-webrtc`)
+5. **Register the webhook on Bitbucket Server** (project `<PROJECT>`, repository `<REPO>`)
    pointing at that invoke URL. Jenkins does **not** register it: the trigger plugin only
    listens. Webhook commands for the `p:bitbucket` skill are **planned**, not available
    yet; until then create it in the Bitbucket UI.
-6. **First indexing.** `scan sl/ngs-media-server/ngs-webrtc --apply`, then check the
+6. **First indexing.** `scan <FOLDER>/<NAME> --apply`, then check the
    result with the `mcp-jenkins` skill. Whether a webhook push alone triggers indexing is
    confirmed by pushing to the repository.
 
@@ -149,8 +149,8 @@ what was observed, not values the script assumes:
 - A multibranch job's own cron only triggers **branch indexing**. A nightly build must set
   its trigger inside the Jenkinsfile (`properties([pipelineTriggers([cron(...)])])`) and
   live in its **own** multibranch job with a different `scriptPath`.
-- The Jenkins user needs Job/Create on the folder; `zoltan.ponekker` was verified able to
-  open `<folder>/newJob`.
+- The Jenkins user needs Job/Create on the folder; check it with `whoami --folder <FOLDER>`
+  (user `<USER>`): HTTP 200 on `<folder>/newJob` means it can.
 
 ## PR discovery
 
