@@ -50,6 +50,7 @@ Groups:
   L  config write-back    -- the atomic, directory-relative rewrite of backends.<n>.oauth
   N  token store          -- refresh, the per-backend lock, one forced refresh per 401 (codex)
   O  login                -- the codex login subcommand: browser callback, paste, device flow
+  P  upstream failure log -- a WARNING line, structure only, for each upstream failure
   I  secret leak          -- no sentinel in stderr, the log, a body or a wrong peer
   J  static and hygiene   -- AST over the router source, writes, bytecode, tree
 """
@@ -16691,6 +16692,171 @@ def group_o(suite, fixture_root):
 
 
 # ---------------------------------------------------------------------------
+# Group P: upstream failures reach the default sink at WARNING
+# ---------------------------------------------------------------------------
+
+GP = "P. upstream failure log"
+GP_CASES = (
+    "pre-head close: WARNING + type",    # P1
+    "stream ended early: WARNING",       # P2
+    "429: WARNING, no body text",        # P3
+    "idle stall: WARNING stalled",       # P4
+)
+GP_IDS = ("P1", "P2", "P3", "P4")
+GP_BACKEND = "tfp"
+GP_BODY_SECRET = "tf-p3-body-SENTINEL-" + secrets.token_hex(8)
+GP_LINE_RE = re.compile(r"^\S+ \S+ \S+ WARNING upstream failed: (?P<fields>.*)$")
+
+
+def gp_scripts():
+    return {
+        "tf-p1": [],       # the request is read, the connection closed before any head
+        "tf-p2": [("respond_sse", AN_HEAD + AN_DELTA)],    # a clean EOF with no message_stop
+        "tf-p3": [("respond_json", 429, {"type": "error", "error": {
+            "type": "rate_limit_error", "message": "tf rate limit: " + GP_BODY_SECRET}})],
+        "tf-p4": [("respond_sse", AN_HEAD + AN_DELTA, (0, 0, 0, 0, 0, 0, 6))],   # a silence past idle_timeout
+    }
+
+
+def gp_dispatch(scripts):
+    def script(_index, request):
+        try:
+            model = json.loads(request["body"].decode("utf-8")).get("model")
+        except (ValueError, AttributeError, UnicodeDecodeError):
+            model = None
+        return scripts.get(model, [])
+    return script
+
+
+def gp_config(peer_url):
+    cfg = {"auth_token": TF_ROUTER_TOKEN,
+           "backends": {GP_BACKEND: {"kind": "passthrough", "base_url": peer_url, "idle_timeout": 2,
+                                     "allow_private": True, "allow_loopback": True,
+                                     "api_key": TF_KEY_PASS, "auth_header": "x-api-key"}},
+           "routes": {}}
+    for name in ("p1", "p2", "p3", "p4"):
+        cfg["routes"]["claude-tf-" + name] = {"backend": GP_BACKEND, "model": "tf-" + name}
+    return cfg
+
+
+def gp_fields(text, route):
+    """{field: value} of the last `upstream failed` WARNING line for *route*, or None."""
+    found = None
+    for line in text.splitlines():
+        m = GP_LINE_RE.match(line)
+        if m and ("route='%s'" % route) in m.group("fields"):
+            found = dict(f.split("=", 1) for f in m.group("fields").split(" ") if "=" in f)
+    return found
+
+
+def gp_wait(proc, route, timeout=8.0):
+    deadline = time.monotonic() + timeout
+    while True:
+        fields = gp_fields(proc.stderr_text(), route)
+        if fields is not None or time.monotonic() > deadline:
+            return fields
+        time.sleep(0.1)
+
+
+def gp_check(proc, route, want):
+    """Problems unless the WARNING line of *route* holds every `field=value` of *want*;
+    a regex value (a re.Pattern) must match."""
+    fields = gp_wait(proc, route)
+    if fields is None:
+        return ["%s: no `WARNING upstream failed:` line for route %s on stderr" % (route, route)], []
+    problems = []
+    for key, expect in want.items():
+        got = fields.get(key)
+        ok = expect.fullmatch(got or "") is not None if hasattr(expect, "fullmatch") else got == expect
+        if not ok:
+            problems.append("%s: field %s is %r, expected %s" % (route, key, got,
+                                                                 getattr(expect, "pattern", repr(expect))))
+    return problems, ["line        : " + " ".join("%s=%s" % kv for kv in sorted(fields.items()))[:200]]
+
+
+def gp_leaks(proc):
+    text = proc.stderr_text()
+    return [("stderr carries %s" % label) for label, value in
+            (("the 429 body text", GP_BODY_SECRET), ("TF_KEY_PASS", TF_KEY_PASS),
+             ("TF_ROUTER_TOKEN", TF_ROUTER_TOKEN)) if value in text]
+
+
+def group_p(suite, fixture_root):
+    """P. upstream failure log: one passthrough router, a scripted peer per model; each
+    case provokes one upstream failure and reads the router's stderr (default sink, no
+    --debug) for the single `upstream failed:` WARNING line, structure only."""
+    results = {}
+    setup = "case did not run"
+    peer = ScriptedPeer(script=gp_dispatch(gp_scripts()))
+    proc = None
+    try:
+        sandbox = new_sandbox(fixture_root, "up-fail")
+        proc = RouterProc(sandbox, write_config(sandbox, gp_config(peer.url())), label="up-fail")
+        port = proc.wait_ready()
+        if port is None:
+            setup = "the router did not start"
+        else:
+            client = proc.client()
+            ident = re.compile(r"'[A-Za-z_]+'")
+            got = {}
+
+            def p1():
+                status, _h, body = client.post(obj=gd_body("claude-tf-p1"))
+                RESPONSE_BODIES.append(("P1", body))
+                problems = answer_status("the client", status, body, 502)
+                more, detail = gp_check(proc, "claude-tf-p1", {
+                    "backend": repr(GP_BACKEND), "kind": "'passthrough'", "endpoint": "'messages'",
+                    "status": "502", "reason": ident})
+                return problems + more, detail
+
+            def p2():
+                conn, resp, problems = open_stream(client, gd_body("claude-tf-p2", stream=True))
+                if problems:
+                    return problems, []
+                try:
+                    read_stream(resp)
+                finally:
+                    close_stream(conn, resp)
+                more, detail = gp_check(proc, "claude-tf-p2", {
+                    "status": "200", "up_status": "200", "reason": "'stream_ended_early'"})
+                return more, detail
+
+            def p3():
+                status, _h, body = client.post(obj=gd_body("claude-tf-p3"))
+                RESPONSE_BODIES.append(("P3", body))
+                problems = answer_status("the client", status, body, 429)
+                more, detail = gp_check(proc, "claude-tf-p3", {
+                    "status": "429", "up_status": "429", "reason": "'upstream_status'"})
+                return problems + more + gp_leaks(proc), detail
+
+            def p4():
+                conn, resp, problems = open_stream(client, gd_body("claude-tf-p4", stream=True))
+                if problems:
+                    return problems, []
+                try:
+                    read_stream(resp)
+                finally:
+                    close_stream(conn, resp)
+                return gp_check(proc, "claude-tf-p4", {"status": "200", "reason": "'stalled'"})
+
+            for cid, fn in zip(GP_CASES, (p1, p2, p3, p4)):
+                try:
+                    got[cid] = fn()
+                except Exception as exc:  # noqa: BLE001 -- a broken case fails, never aborts the group
+                    got[cid] = (["case raised %s: %s" % (type(exc).__name__, gi_redact(str(exc))[:200])], [])
+            results = got
+    except Exception as exc:  # noqa: BLE001 -- a setup failure fails every case not yet run
+        setup = "the group setup raised %s: %s" % (type(exc).__name__, gi_redact(str(exc))[:200])
+    finally:
+        if proc is not None:
+            proc.close()
+        peer.close()
+    for cid, pid in zip(GP_CASES, GP_IDS):
+        problems, detail = results.get(cid, ([setup], []))
+        suite.record(GP, cid, problems, detail=["case        : " + pid] + list(detail))
+
+
+# ---------------------------------------------------------------------------
 # Group I: secret leak
 # ---------------------------------------------------------------------------
 
@@ -20268,7 +20434,7 @@ def group_j_hygiene(suite, fixture_root, pyc_before, tree_before):
 # and repo snapshots taken at the start, so both must run last.
 GROUP_ORDER = ("group_a", "group_b", "group_c", "group_d", "group_e",
                "group_f", "group_g", "group_h", "group_k", "group_l",
-               "group_m", "group_n", "group_o", "group_i", "group_j")
+               "group_m", "group_n", "group_o", "group_p", "group_i", "group_j")
 
 
 def run(opts=None):

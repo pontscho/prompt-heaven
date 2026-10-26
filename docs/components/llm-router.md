@@ -743,7 +743,18 @@ endpoint, route, kind, stream, status, upstream status, bytes in and out,
 timings and how the stream ended, and when they apply `dropped_thinking=`,
 `refreshed=` (an upstream 401 forced a token refresh), `sampling_dropped=` and
 `effort=` `Scripts/llm-router.py:_rt_log_summary`; an
-exception is logged by its type name only. Nothing the token endpoint says
+exception is logged by its type name only. An upstream failure additionally gets
+one WARNING line on the default sink (no `--debug` needed):
+`upstream failed: backend= kind= route= endpoint= status= up_status= reason= up_ms=`
+`Scripts/llm-router.py:_log_upstream_failure`. `status` is what the client was
+answered (a stream that failed after its 200 head: 200, the failure travelling in-band);
+`reason` is a fixed category (`stalled`, `stream_ended_early`, `line_too_long`,
+`upstream_error_event`, `upstream_status`, `stream_failed`, `login_required`,
+`timeout`, `busy`, `upstream_error`) or the type name of the exception that cut the
+connection (`RemoteDisconnected`, `SSLEOFError`, ...), never its message, an upstream
+text or a body; every value goes through `_log_value`, so none can forge a line.
+It is written where the outcome is known — the POST handler, the JSON answer, the
+stream relay — not by the sans-IO translators. Nothing the token endpoint says
 reaches a log line, an exception message or a client envelope except an
 allow-listed OAuth error code `Scripts/_mcp_oauth.py:OAUTH_ERROR_CODES`, and no
 token, code, verifier or URL query is ever logged.
@@ -866,7 +877,9 @@ read before relying on one of them. In brief:
 - **Passthrough request bodies are equal after parsing, not byte for byte**
   (the body is re-serialized after the model rewrite).
 - **No metrics endpoint;** the DEBUG `req` line is the only per-request record,
-  and only a POST gets one.
+  and only a POST gets one. A failed upstream call adds the WARNING
+  `upstream failed:` line described under Logging; a successful request leaves
+  no WARNING and there is no rate limit on that line.
 - **`GET /v1/models` does not paginate.** `limit`, `before_id` and `after_id`
   are accepted and ignored: the whole list comes back with `has_more` false,
   and every entry's `created_at` is the router's start time, not a model's.

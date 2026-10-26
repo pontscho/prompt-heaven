@@ -331,13 +331,17 @@ class ApiError(Exception):
 
 
 class UpstreamError(Exception):
-    """A backend transport failure, one line, status 502 | 504 -> an error envelope or `event: error`."""
+    """A backend transport failure, one line, status 502 | 504 -> an error envelope or `event: error`.
+
+    `cause` is the TYPE NAME of the exception _rt_upstream_refusal converted (or ""): the one
+    thing about the original failure the WARNING line may carry -- never its message."""
 
     def __init__(self, status: int, err_type: str, message: str):
         super().__init__(message)
         self.status = status
         self.err_type = err_type
         self.message = message
+        self.cause = ""
 
 
 # KD-14: the status the router answers -> its Anthropic error type. 414, 431 and
@@ -6667,6 +6671,7 @@ def _rt_send(backend: BackendSpec, path: str, headers: List[Tuple[str, str]],
         refusal = _rt_upstream_refusal(exc, backend.name)
         if refusal is None or refusal is exc:
             raise
+        refusal.cause = type(exc).__name__
         raise refusal from None
     return conn, resp
 
@@ -6699,6 +6704,7 @@ def _rt_read_body(resp: http.client.HTTPResponse, limit: int, backend_name: str 
         refusal = _rt_upstream_refusal(exc, backend_name or "?")
         if refusal is None or refusal is exc:
             raise
+        refusal.cause = type(exc).__name__
         raise refusal from None
     return bytes(body)
 
@@ -7415,6 +7421,23 @@ class _RouterHandler(BaseHTTPRequestHandler):
                   _log_value(rec["in"]), _log_value(rec["out"]), _log_value(int((now - t0) * 1000)),
                   _log_value(up_ms), _log_value(rec["end"]), extra)
 
+    def _log_upstream_failure(self, status: int, reason: str) -> None:
+        """The one structure-only WARNING line of an upstream failure (the default sink).
+
+        status is what the client was answered (a stream: the 200 head it already got, the
+        failure travelling in-band). reason is a FIXED category or an exception TYPE NAME,
+        never an exception message, an upstream text or a body (ADR 0011); every value goes
+        through _log_value, so none can forge a line (CWE-117)."""
+        rec = self._rt_rec
+        now = time.monotonic()
+        up_ms = 0
+        if rec["up_t0"] is not None:
+            up_ms = int(((rec["up_t1"] or now) - rec["up_t0"]) * 1000)
+        log.warning("upstream failed: backend=%s kind=%s route=%s endpoint=%s status=%s up_status=%s reason=%s up_ms=%s",
+                    _log_value(rec["backend"]), _log_value(rec["kind"]), _log_value(rec["route"]),
+                    _log_value(rec["endpoint"]), _log_value(status), _log_value(rec["up_status"]),
+                    _log_value(reason), _log_value(up_ms))
+
     def _precheck(self) -> Optional[str]:
         """The endpoint ("messages" | "count_tokens" | "models" | "model"), or
         None after refusing; for "model" the still-encoded id is _rt_model_id.
@@ -7488,7 +7511,8 @@ class _RouterHandler(BaseHTTPRequestHandler):
         self._rt_rec = {"endpoint": "-", "route": "-", "kind": "-", "stream": 0, "status": 0,
                         "up_status": 0, "in": 0, "out": 0, "up_t0": None, "up_t1": None,
                         "end": "json", "dropped_thinking": None, "refreshed": 0,
-                        "learn_retry": 0, "sampling_dropped": (), "effort": None}
+                        "learn_retry": 0, "sampling_dropped": (), "effort": None,
+                        "backend": "-", "fail_reason": ""}
         self._rt_head_sent = False
         try:
             self._post()
@@ -7571,6 +7595,7 @@ class _RouterHandler(BaseHTTPRequestHandler):
             inbound = _rt_parse_inbound(endpoint, body, self.headers, srv.cfg)
             backend = inbound.backend
             rec["route"], rec["kind"], rec["stream"] = inbound.route.name, backend.kind, int(inbound.stream)
+            rec["backend"] = backend.name
             adapter = ADAPTERS.get(backend.kind)
             if adapter is None:
                 # Unreachable: ADAPTERS and KIND_CLASSES derive from the same
@@ -7666,6 +7691,13 @@ class _RouterHandler(BaseHTTPRequestHandler):
             else:
                 self._relay_json(conn, resp, adapter, inbound)
         except (ApiError, UpstreamError) as exc:
+            if isinstance(exc, UpstreamError) and not srv.closing.is_set():
+                # Transport, TLS, timeout, lock-wait: the type of the converted exception when
+                # there is one, else a fixed category by status (the message is never logged).
+                self._log_upstream_failure(rec["status"] if self._rt_head_sent else exc.status,
+                                           exc.cause or {504: "timeout", 503: "busy"}.get(exc.status, "upstream_error"))
+            elif isinstance(exc, ApiError) and exc.status == 401:
+                self._log_upstream_failure(exc.status, "login_required")   # the KD-16 "needs a login" 401
             if self._rt_head_sent:       # never after the SSE head: _relay_stream answers in-band
                 self.close_connection = True
                 return
@@ -7738,6 +7770,10 @@ class _RouterHandler(BaseHTTPRequestHandler):
         _send_json; a 429's Retry-After relayed when it is all digits."""
         rec = self._rt_rec
         status, obj = adapter.json_response(inbound, up_status, up_body)
+        if status >= 400:
+            # An upstream non-2xx, or a 2xx whose stream failed: the status and a fixed reason,
+            # never the upstream's error text (scrubbed for the client only).
+            self._log_upstream_failure(status, "upstream_status" if not 200 <= up_status < 300 else "stream_failed")
         extra = ()
         if status == 429 and re.fullmatch(r"[0-9]{1,10}", retry_after):
             extra = (("retry-after", retry_after),)
@@ -7819,6 +7855,7 @@ class _RouterHandler(BaseHTTPRequestHandler):
             end = "disconnected"
         except Exception as exc:  # noqa: BLE001 -- type name only; one event: error in-band
             log.warning("stream relay failed: %s", type(exc).__name__)
+            rec["fail_reason"] = type(exc).__name__
             end = "error"
             if self._rt_head_sent:
                 try:
@@ -7855,6 +7892,11 @@ class _RouterHandler(BaseHTTPRequestHandler):
                         pass
             rec["up_t1"] = rec["up_t1"] or time.monotonic()
             rec["end"] = end
+            if end == "error":
+                # In-band failure after the 200 head: the translator is sans-IO, so the relay,
+                # which knows the outcome, logs it (an upstream error / response.failed event
+                # leaves no reason of its own).
+                self._log_upstream_failure(rec["status"], rec["fail_reason"] or "upstream_error_event")
             rec["dropped_thinking"] = getattr(translator, "dropped_thinking", None)
             if end == "disconnected":
                 self._disconnected()
@@ -7888,7 +7930,7 @@ class _RouterHandler(BaseHTTPRequestHandler):
                 # previous pass must not read as a stalled backend).
                 last_line = now
             if now - last_line > backend.idle_timeout:
-                log.debug("backend stalled: %s", _log_value(backend.name))
+                rec["fail_reason"] = "stalled"
                 write(translator.fail("api_error", "backend %s stalled" % backend.name))
                 return "error"
             if item is not None:
@@ -7896,15 +7938,18 @@ class _RouterHandler(BaseHTTPRequestHandler):
                     chunk = translator.feed(item)
                 elif item is _EOF:
                     chunk = translator.finish()
+                    rec["fail_reason"] = "stream_ended_early"   # read only when no message_stop follows
                 elif item is _LINE_TOO_LONG:
+                    rec["fail_reason"] = "line_too_long"
                     chunk = translator.fail("api_error", "backend %s sent an SSE line over %d bytes"
                                             % (backend.name, line_limit))
                 elif isinstance(item, tuple) and item[1] in ("timeout", "TimeoutError"):
                     # The upstream socket's own idle_timeout fired first (3.9 names it "timeout").
-                    log.debug("backend stalled: %s", _log_value(backend.name))
+                    rec["fail_reason"] = "stalled"
                     chunk = translator.fail("api_error", "backend %s stalled" % backend.name)
                 else:
                     # ("exc", type name): a truncated upstream is never a clean end (KD-7, D12).
+                    rec["fail_reason"] = str(item[1])   # a type name from _rt_pump; _log_value-ed when logged
                     chunk = translator.fail("api_error", "backend %s: the stream was cut (%s)"
                                             % (backend.name, _rt_one_line(item[1])))
                 write(chunk)
