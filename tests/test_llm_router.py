@@ -19904,6 +19904,16 @@ def gs_s4(fixture_root, ctx):
         _err, more = ask("400 echoing the tokens", 400, echo, 400, needle="tf s4 bad",
                          absent=(TF_ACCESS_CODEX, TF_REFRESH_CODEX))
         problems += more
+        acct400 = {"error": {"type": "invalid_request_error",
+                             "message": "tf s4 acct " + TF_ACCOUNT_CODEX + " is not entitled"}}
+        _err, more = ask("400 echoing the account id", 400, acct400, 400, needle="tf s4 acct [redacted] is not entitled",
+                         absent=(TF_ACCOUNT_CODEX,))
+        problems += more
+        acct429 = {"error": {"type": "usage_limit_reached",
+                             "message": "tf s4 limit for " + TF_ACCOUNT_CODEX + " reached"}}
+        _err, more = ask("429 echoing the account id", 429, acct429, 429, needle="tf s4 limit for [redacted] reached",
+                         absent=(TF_ACCOUNT_CODEX,))
+        problems += more
         _err, more = ask("500", 500, {"error": {"message": "tf s4 boom " + marker}}, 502, absent=(marker,))
         problems += more
         return problems, ["mapped      : 429 (message, type, code relayed), 403 (fixed login text, 502), 400 (tokens "

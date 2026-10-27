@@ -6906,6 +6906,16 @@ def _rt_scrub_pin(scrub: _RtScrubber, key: str, raws: Tuple[bytes, ...]) -> None
         scrub.pin(key, raws)
 
 
+_RT_ACCOUNT_PIN_MIN = 8     # a shorter account id would redact ordinary words out of every relayed message
+
+
+def _rt_scrub_pin_account(scrub: _RtScrubber, name: str, account: Optional[str]) -> None:
+    """Pin backend *name*'s chatgpt-account-id (sent upstream, so an error text may echo it) under its
+    own key, apart from the tokens' pin (which a refresh replaces). Too short or absent: nothing."""
+    if account is not None and len(account) >= _RT_ACCOUNT_PIN_MIN:
+        _rt_scrub_pin(scrub, "account:" + name, (account.encode("ascii"),))
+
+
 class _RtTokenState:
     """One OAuth backend's live token state, guarded by its own `lock` (KD-11).
 
@@ -6973,6 +6983,7 @@ class _RtTokenStore:
             self._states[name] = state
             if state.refresh:
                 _rt_scrub_pin(cfg.scrub, name, (state.refresh.encode("ascii"),))
+            _rt_scrub_pin_account(cfg.scrub, name, state.account_id)
 
     def __repr__(self) -> str:
         return "<token store>"
@@ -7070,6 +7081,7 @@ class _RtTokenStore:
         state.scope = None              # another grant: its scope is not known yet (F35)
         state.failed = None
         if account is not None:
+            _rt_scrub_pin_account(self.cfg.scrub, backend.name, account)
             state.account_id = account
         if isinstance(client_id, str) and _RT_OAUTH_CLIENT_ID_RE.fullmatch(client_id):
             state.client_id = client_id
@@ -7149,6 +7161,7 @@ class _RtTokenStore:
                 account = claim_account
                 if claim_residency is not None and _rt_header_value_ok(claim_residency, "claim"):
                     residency = claim_residency
+            _rt_scrub_pin_account(self.cfg.scrub, name, account)   # before any header use or write
             if account is None:
                 # Neither a valid claim nor a seed (S5): keep a rotated refresh token, refuse the access one.
                 if new_refresh != refresh:

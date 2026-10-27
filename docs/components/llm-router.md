@@ -997,8 +997,9 @@ the endpoint is private and unstable, not available on Free plans and limited by
 the plan's quota; the JSON and the multipart edit forms are both accepted and
 neither is proven there; the paths and headers are taken from the open-source
 Codex CLI and are **not yet measured live** (live smoke: pending), and the test
-group S uses synthetic fixtures. An account id an upstream error text echoes is
-not scrubbed (only the tokens are).
+group S uses synthetic fixtures. The login's account id (8 or more characters) is
+pinned in the scrubber beside the tokens, so an upstream error text that echoes it
+is relayed with `[redacted]` in its place (S4).
 
 **The `sdcpp` kind: a stable-diffusion.cpp sd-server.** An `sdcpp` backend serves
 image routes only (`MODALITIES` is `{image}`; its chat hooks are the base ones and
