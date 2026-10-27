@@ -11,7 +11,7 @@ sources:
   - tests/test_llm_router.py
   - tests/files/llm_router/README.md
 verified:
-  commit: abdd186
+  commit: 9c2823f
   date: 2026-10-27
 links:
   - 0028-route-by-model-translate-at-the-edge
