@@ -125,6 +125,14 @@ addendum the limits of the codex/openai kinds, OAuth and Mistral reasoning)
     accepted and ignored, the whole list is returned with has_more false, and
     every entry's created_at is the router's start time. A route's
     max_input_tokens / max_tokens are advertised there, never enforced.
+  * Images: the local token estimate (count_tokens, and the usage a backend omits)
+    charges a fixed _RT_IMAGE_TOKEN_ESTIMATE per image and never counts the base64 --
+    a rough figure, the provider's pixel-based price is not computed. A tool_result image
+    reaches a codex/openai backend as a function_call_output list of input_text / input_image
+    parts (ResponsesProfile.output_parts; the list form is not measured live here) and a
+    mistral backend as a tool message whose content is a list of text / image_url parts (the
+    route option tool_result_images, default _RT_MS_TOOL_RESULT_IMAGES; false: "[image omitted]").
+    A route with vision false refuses any image 400.
   * codex sends the omp client's identity to the ChatGPT backend: a
     terms-of-service risk accepted by the user, measured from one omp release.
   * The ID token's claims are checked, its signature is not; the OAuth
@@ -665,6 +673,7 @@ class RouteSpec(NamedTuple):
     display_name: Optional[str] = None   # GET /v1/models's display_name; None -> the route key
     max_input_tokens: Optional[int] = None   # advertised by GET /v1/models only (+ context_window)
     max_tokens: Optional[int] = None         # advertised by GET /v1/models only; never enforced
+    vision: bool = True         # False: a request holding any image block is refused 400, never stripped
 
 
 class _RouterConfigBase(NamedTuple):    # from --config (routing + secrets)
@@ -904,6 +913,13 @@ def _rt_opt_enum(choices: Tuple[str, ...]) -> _RtOptionValidator:
     return check
 
 
+def _rt_opt_bool(value: Any, where: str) -> bool:
+    """A validator for a strict boolean (0, 1 and strings refused)."""
+    if not isinstance(value, bool):
+        raise ConfigError(f"{where}: must be a boolean")
+    return value
+
+
 def _rt_opt_float(lo: float, hi: float) -> _RtOptionValidator:
     """A validator for a number (bool refused) with lo <= x <= hi, returned as float."""
     rule = f"a number from {lo:g} to {hi:g}"
@@ -943,7 +959,7 @@ _RT_BACKEND_KEYS = frozenset({"kind", "base_url", "allow_private", "allow_loopba
                               "idle_timeout", "allow_cleartext_api_key", "oauth", "identity",
                               "auth_base_url"})
 _RT_ROUTE_KEYS = frozenset({"backend", "model", "options", "display_name",
-                            "max_input_tokens", "max_tokens"})
+                            "max_input_tokens", "max_tokens", "vision"})
 _RT_ROUTE_LIMIT_KEYS = ("max_input_tokens", "max_tokens")   # a route's optional advertised caps
 _RT_BACKEND_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")    # the _CHILD_NAME_RE shape
 _RT_AUTH_HEADERS = ("authorization", "x-api-key", "none")
@@ -1285,7 +1301,9 @@ def _rt_cfg_route(name: str, entry: Any, backends: Mapping[str, BackendSpec],
     character (GET /v1/models only; harmless on the default); max_input_tokens
     and max_tokens, when present, are each a JSON integer (bool refused) from
     _RT_TOKEN_LIMIT_MIN to _RT_TOKEN_LIMIT_MAX, independent of each other and
-    only advertised by GET /v1/models, never enforced; options are checked by
+    only advertised by GET /v1/models, never enforced; vision, when present, is
+    a JSON boolean (default true; false makes the router refuse a request that
+    holds any image block with a 400, see _rt_vision_refusal); options are checked by
     the backend kind's validators and an unknown option is refused by name.
     """
     if where is None:
@@ -1315,6 +1333,9 @@ def _rt_cfg_route(name: str, entry: Any, backends: Mapping[str, BackendSpec],
             raise ConfigError(f"{where}.{key}: must be an integer "
                               f"{_RT_TOKEN_LIMIT_MIN}-{_RT_TOKEN_LIMIT_MAX}")
         limits[key] = value
+    vision = entry.get("vision", True)
+    if not isinstance(vision, bool):
+        raise ConfigError(f"{where}.vision: must be a boolean")
     raw = entry.get("options", {})
     if not isinstance(raw, dict):
         raise ConfigError(f"{where}.options: must be an object")
@@ -1329,7 +1350,7 @@ def _rt_cfg_route(name: str, entry: Any, backends: Mapping[str, BackendSpec],
     options = KIND_CLASSES[kind].validate_options(raw, f"{where}.options")
     return RouteSpec(name=name, backend=backend, model=model, options=options,
                      display_name=display_name, max_input_tokens=limits["max_input_tokens"],
-                     max_tokens=limits["max_tokens"])
+                     max_tokens=limits["max_tokens"], vision=vision)
 
 
 _RT_TOKEN_HINT = "generate one with secrets.token_urlsafe(32)"
@@ -1799,9 +1820,42 @@ def _rt_parse_inbound(endpoint: str, body: Any, headers: Any, cfg: RouterConfig)
                 # read it as a header of its own (V29). Refused, the value never shown.
                 raise _rt_bad("header %s" % _log_value(key), "must not contain CR or LF")
             client_headers[key] = value
+    if not route.vision:
+        where = _rt_first_image(body)
+        if where is not None:
+            # Central and kind-independent: a route that declared vision false never
+            # silently loses an image (the defect) -- the request is refused, naming
+            # the path and the route, never the image data.
+            raise _rt_bad(where, "image blocks are not accepted by route %s (vision is false)"
+                          % _log_value(route.name))
     return InboundRequest(endpoint=endpoint, requested_model=model, body=body, stream=stream,
                           route=route, backend=backend, client_headers=client_headers,
                           scrub=cfg.scrub)
+
+
+def _rt_first_image(body: dict) -> Optional[str]:
+    """The path of the first image block in *body* -- the top-level system list, then each
+    message's content, descending one level into a tool_result's content list -- or None.
+    Only the path is returned, never block data."""
+    system = body.get("system")
+    if isinstance(system, list):
+        for j, block in enumerate(system):
+            if isinstance(block, dict) and block.get("type") == "image":
+                return "system.%d" % j
+    for i, message in enumerate(body["messages"]):
+        content = message["content"]
+        if not isinstance(content, list):
+            continue
+        for j, block in enumerate(content):
+            where = "messages.%d.content.%d" % (i, j)
+            if block["type"] == "image":
+                return where
+            inner = block.get("content")
+            if block["type"] == "tool_result" and isinstance(inner, list):
+                for k, nested in enumerate(inner):
+                    if isinstance(nested, dict) and nested.get("type") == "image":
+                        return "%s.content.%d" % (where, k)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -2190,6 +2244,11 @@ class ResponsesProfile(NamedTuple):
     line_limit: int             # SSE line cap -> StreamPolicy.line_limit (the front's pump)
     event_limit: int            # SSE event cap -> read ONLY by the Responses stream translator
     tool_shape: str             # a _RT_RS_TOOL_SHAPES value: "function" or "namespace"
+    # Trailing, defaulted. True: a tool_result holding an image is sent as a function_call_output
+    # whose output is a LIST of input_text / input_image parts; False: the string form with
+    # "[image omitted]" (the pre-vision behaviour). The list form is documented for the OpenAI
+    # Responses API and used by the Codex CLI's own image tool outputs; NOT measured live here.
+    output_parts: bool = True
 
 
 class Adapter:
@@ -2831,6 +2890,10 @@ def _rt_ms_anthropic_id(mistral_id: str) -> str:
 
 _RT_MS_ORPHAN = "[tool result for an earlier call]\n"
 _RT_MS_IMAGE_OMITTED = "[image omitted]"
+# The tool_result_images route option's default. True: a tool_result holding an image is sent as a
+# role "tool" message whose content is a LIST of text / image_url parts (the Mistral OpenAPI spec and
+# mistral-common allow image_url chunks there); False: the string form with "[image omitted]".
+_RT_MS_TOOL_RESULT_IMAGES = True
 _RT_MS_BRIDGE = "Done."
 _RT_MS_TOOL_CHOICE = {"auto": "auto", "any": "any", "none": "none"}
 # reasoning_effort values Mistral's chat-completions API accepts (the reasoning_effort route option).
@@ -2934,6 +2997,36 @@ def _rt_ms_image_part(block: dict, where: str) -> dict:
     if source.get("type") == "url":
         return {"type": "image_url", "image_url": _rt_ms_str(source.get("url"), where + ".source.url")}
     raise _rt_bad(where + ".source.type", "must be base64 or url")
+
+
+def _rt_ms_result_parts(block: dict, where: str) -> Optional[List[dict]]:
+    """A tool_result that holds at least one image block -> the parts of a tool message's
+    content list ({"type":"text","text"} / _rt_ms_image_part), in block order; None when its
+    content is not a list or holds no image (the caller then keeps the plain string form,
+    unchanged). is_error puts "Error: " in front of the first text part, or a leading
+    "Error:" part when the first part is an image (_rt_rs_result_parts' rule)."""
+    content = block.get("content")
+    if not isinstance(content, list) or not any(
+            isinstance(inner, dict) and inner.get("type") == "image" for inner in content):
+        return None
+    parts: List[dict] = []
+    for k, inner in enumerate(content):
+        inner_where = "%s.content.%d" % (where, k)
+        inner_type = inner.get("type") if isinstance(inner, dict) else None
+        if inner_type == "text":
+            parts.append({"type": "text", "text": _rt_ms_str(inner.get("text"), inner_where + ".text")})
+        elif inner_type == "image":
+            parts.append(_rt_ms_image_part(inner, inner_where))
+        elif isinstance(inner_type, str):
+            raise _rt_ms_unsupported(inner_type, inner_where)
+        else:
+            raise _rt_bad(inner_where, "must be an object with a string type")
+    if block.get("is_error") is True:
+        if parts[0]["type"] == "text":
+            parts[0] = {"type": "text", "text": "Error: " + parts[0]["text"]}
+        else:
+            parts.insert(0, {"type": "text", "text": "Error:"})
+    return parts
 
 
 def _rt_ms_user_content(parts: List[dict]) -> Union[str, List[dict]]:
@@ -3048,7 +3141,9 @@ def _rt_ms_translate_counted(body: dict, route: RouteSpec,
     is then a list, else a plain string; every other thinking and every
     redacted_thinking block is dropped and counted in the returned int. User
     tool_result blocks become tool messages, an orphan one (no tool_use in the
-    history) a user text; a tool message directly followed by a user message gets
+    history) a user text; one holding an image becomes a list of text / image_url
+    parts (_rt_ms_result_parts) unless the route's tool_result_images option is
+    false, and an orphan one then a user message of parts; a tool message directly followed by a user message gets
     an assistant "Done." bridge. A block type Mistral cannot take is a 400 naming the type.
     """
     options = route.options
@@ -3148,12 +3243,19 @@ def _rt_ms_translate_counted(body: dict, route: RouteSpec,
             block_type = block["type"]
             if block_type == "tool_result":
                 tool_use_id = block["tool_use_id"]
-                text = _rt_ms_result_text(block, where)
+                result_parts = _rt_ms_result_parts(block, where) \
+                    if options.get("tool_result_images", _RT_MS_TOOL_RESULT_IMAGES) else None
+                text = "" if result_parts is not None else _rt_ms_result_text(block, where)
                 if tool_use_id not in tool_names:
-                    parts.append({"type": "text", "text": _RT_MS_ORPHAN + text})
+                    if result_parts is None:
+                        parts.append({"type": "text", "text": _RT_MS_ORPHAN + text})
+                    else:
+                        parts.append({"type": "text", "text": _RT_MS_ORPHAN.rstrip()})
+                        parts.extend(result_parts)
                     continue
                 messages.append({"role": "tool", "tool_call_id": id_map[tool_use_id],
-                                 "name": tool_names[tool_use_id], "content": text})
+                                 "name": tool_names[tool_use_id],
+                                 "content": text if result_parts is None else result_parts})
             elif block_type == "text":
                 parts.append({"type": "text", "text": _rt_ms_str(block.get("text"), where + ".text")})
             elif block_type == "image":
@@ -3501,12 +3603,49 @@ class MistralStreamTranslator:
         return out + self.encoder.finish(_RT_MS_STOP_REASONS.get(self.finish_reason, "end_turn"), usage)
 
 
+# A ROUGH figure, not a measurement: what one image is charged in the local estimate,
+# in tokens at the default count_divisor of 4 (so 4 bytes per token). Providers price an
+# image by its pixel size, which the router does not decode; the base64 text itself is
+# never counted. It goes through count_divisor like every other byte, so a route that
+# sets count_divisor 8 charges half of it.
+_RT_IMAGE_TOKEN_ESTIMATE = 1500
+_RT_IMAGE_ESTIMATE_BYTES = _RT_IMAGE_TOKEN_ESTIMATE * 4
+_RT_IMAGE_PART_TYPES = ("image_url", "input_image")    # the translated image parts (mistral, responses)
+
+
+def _rt_strip_images(value: Any) -> Tuple[Any, int]:
+    """(a copy of *value* with every translated image part's image_url emptied, the number
+    of image parts found). Strings and numbers are shared, not copied."""
+    if isinstance(value, dict):
+        count = 0
+        out: Dict[Any, Any] = {}
+        is_image = value.get("type") in _RT_IMAGE_PART_TYPES
+        for key, item in value.items():
+            if is_image and key == "image_url":
+                out[key] = ""
+                count += 1
+            else:
+                out[key], found = _rt_strip_images(item)
+                count += found
+        return out, count
+    if isinstance(value, list):
+        items, count = [], 0
+        for item in value:
+            stripped, found = _rt_strip_images(item)
+            items.append(stripped)
+            count += found
+        return items, count
+    return value, 0
+
+
 def _rt_ms_estimate(translated: dict, route: RouteSpec) -> int:
-    """The local input-token estimate (D4): UTF-8 bytes of the translated body //
-    count_divisor (default 4), at least 1. These bytes are never sent, so
-    surrogatepass cannot put invalid UTF-8 on the wire."""
-    size = len(json.dumps(translated, separators=(",", ":"), ensure_ascii=False)
-               .encode("utf-8", "surrogatepass"))
+    """The local input-token estimate (D4): UTF-8 bytes of the translated body, with
+    every image part's data URL or url left out and _RT_IMAGE_ESTIMATE_BYTES charged
+    per image instead, // count_divisor (default 4), at least 1. These bytes are never
+    sent, so surrogatepass cannot put invalid UTF-8 on the wire."""
+    stripped, images = _rt_strip_images(translated)
+    size = len(json.dumps(stripped, separators=(",", ":"), ensure_ascii=False)
+               .encode("utf-8", "surrogatepass")) + images * _RT_IMAGE_ESTIMATE_BYTES
     return max(1, size // route.options.get("count_divisor", 4))
 
 
@@ -3577,6 +3716,7 @@ class MistralAdapter(Adapter):
         "max_tokens_cap": _rt_opt_int(1),
         "reasoning_effort": _rt_opt_enum(_RT_MS_EFFORTS),
         "reasoning_effort_map": _rt_ms_opt_effort_map,
+        "tool_result_images": _rt_opt_bool,
     }
 
     def __init__(self) -> None:
@@ -3799,6 +3939,8 @@ def _rt_check_responses_profiles(profiles: Mapping[str, ResponsesProfile],
             raise RuntimeError(f"profile {key}: limits must be positive with line_limit <= event_limit")
         if row.tool_shape not in _RT_RS_TOOL_SHAPES:
             raise RuntimeError(f"profile {key}: unknown tool_shape {row.tool_shape}")
+        if not isinstance(row.output_parts, bool):
+            raise RuntimeError(f"profile {key}: output_parts must be a bool")
 
 
 _rt_check_responses_profiles(_RT_RESPONSES_PROFILES, None)
@@ -3888,6 +4030,36 @@ def _rt_rs_image_part(block: dict, where: str) -> dict:
     """An Anthropic image block -> {"type":"input_image","image_url": data URL | url},
     validated by _rt_ms_image_part."""
     return {"type": "input_image", "image_url": _rt_ms_image_part(block, where)["image_url"]}
+
+
+def _rt_rs_result_parts(block: dict, where: str) -> Optional[List[dict]]:
+    """A tool_result that holds at least one image block -> the parts of a
+    function_call_output.output list ({"type":"input_text","text"} / _rt_rs_image_part),
+    in block order; None when its content is not a list or holds no image (the caller
+    then keeps the plain string form, unchanged). is_error puts "Error: " in front of
+    the first text part, or a leading "Error:" part when the first part is an image."""
+    content = block.get("content")
+    if not isinstance(content, list) or not any(
+            isinstance(inner, dict) and inner.get("type") == "image" for inner in content):
+        return None
+    parts: List[dict] = []
+    for k, inner in enumerate(content):
+        inner_where = "%s.content.%d" % (where, k)
+        inner_type = inner.get("type") if isinstance(inner, dict) else None
+        if inner_type == "text":
+            parts.append({"type": "input_text", "text": _rt_ms_str(inner.get("text"), inner_where + ".text")})
+        elif inner_type == "image":
+            parts.append(_rt_rs_image_part(inner, inner_where))
+        elif isinstance(inner_type, str):
+            raise _rt_rs_unsupported(inner_type, inner_where)
+        else:
+            raise _rt_bad(inner_where, "must be an object with a string type")
+    if block.get("is_error") is True:
+        if parts[0]["type"] == "input_text":
+            parts[0] = {"type": "input_text", "text": "Error: " + parts[0]["text"]}
+        else:
+            parts.insert(0, {"type": "input_text", "text": "Error:"})
+    return parts
 
 
 def _rt_rs_tool_choice(choice: Any) -> Any:
@@ -4147,12 +4319,18 @@ def _rt_rs_translate(body: dict, route: RouteSpec, backend: str,
                 where = "messages.%d.content.%d" % (i, j)
                 block_type = block["type"]
                 if block_type == "tool_result":
-                    text = _rt_ms_result_text(block, where)
+                    result_parts = _rt_rs_result_parts(block, where) if profile.output_parts else None
+                    text = "" if result_parts is not None else _rt_ms_result_text(block, where)
                     call_id = open_calls.pop(block["tool_use_id"], None)
                     if call_id is None:
-                        parts.append({"type": "input_text", "text": _RT_MS_ORPHAN + text})
+                        if result_parts is None:
+                            parts.append({"type": "input_text", "text": _RT_MS_ORPHAN + text})
+                        else:
+                            parts.append({"type": "input_text", "text": _RT_MS_ORPHAN.rstrip()})
+                            parts.extend(result_parts)
                         continue
-                    outputs.append({"type": "function_call_output", "call_id": call_id, "output": text})
+                    outputs.append({"type": "function_call_output", "call_id": call_id,
+                                    "output": text if result_parts is None else result_parts})
                 elif block_type == "text":
                     parts.append({"type": "input_text", "text": _rt_ms_str(block.get("text"), where + ".text")})
                 elif block_type == "image":
@@ -8166,6 +8344,11 @@ example config (chmod 600; token: python3 -c 'import secrets;print(secrets.token
   routes are keyed by the exact model string Claude Code sends; "default" takes the rest.
   A route's optional max_input_tokens / max_tokens (integers 1-100000000) are only
   advertised by GET /v1/models (context_window too, = max_input_tokens), never enforced.
+  A route's optional "vision" (boolean, default true): false makes the router answer 400
+  to any request holding an image block (messages, a tool_result's content, system), naming
+  the path and the route, never the image -- an image is refused, not silently dropped.
+  A mistral route's option tool_result_images (boolean, default true): an image inside a
+  tool_result goes upstream as image_url parts in the tool message; false sends "[image omitted]".
   Route options temperature (0-2) / top_p (0-1) override the client's; one a backend cannot take
   is dropped (codex, openai oauth: always; an openai api_key model answering 400 "Unsupported
   parameter": learned per backend and model, the request retried once without it).

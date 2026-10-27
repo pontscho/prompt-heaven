@@ -3,7 +3,7 @@ name: llm-router
 type: component
 status: active
 title: llm-router — an Anthropic Messages router for Claude Code
-description: The stdlib-only HTTP server between Claude Code and several kinds of LLM backend -- an Anthropic Messages front that routes each request by its exact model string to a passthrough, llama.cpp, Mistral, codex or openai adapter, the last two speaking the OpenAI Responses API through one profile table; its command line and login subcommand, its 0600 JSON config and the OAuth write-back into it, the per-kind header allow-list and llama.cpp quirk rows, reasoning across kinds, the inbound and outbound security rules, how it is tested and what it declares rather than gates.
+description: The stdlib-only HTTP server between Claude Code and several kinds of LLM backend -- an Anthropic Messages front that routes each request by its exact model string to a passthrough, llama.cpp, Mistral, codex or openai adapter, the last two speaking the OpenAI Responses API through one profile table; its command line and login subcommand, its 0600 JSON config and the OAuth write-back into it, the per-kind header allow-list and llama.cpp quirk rows, reasoning across kinds, images per kind and the route's vision key, the inbound and outbound security rules, how it is tested and what it declares rather than gates.
 sources:
   - Scripts/llm-router.py
   - Scripts/_mcp_oauth.py
@@ -24,6 +24,7 @@ links:
   - 0011-a-truncated-payload-carries-the-first-cookie
   - 0014-a-canonical-source-is-a-domain
   - 0015-ambiguity-is-the-defect
+  - 0017-a-silent-zero-is-the-defect
   - 0024-pure-python-39-and-the-stdlib
   - 0025-generate-do-not-import
   - 0029-the-http-front-is-a-domain
@@ -396,8 +397,9 @@ other key is refused by name `Scripts/llm-router.py:_RT_TOP_KEYS`.
 
 **A route** — `backend` (a configured backend), `model` (the upstream
 model id, 1-256 characters, no control character), `options`, validated by
-the backend kind's `ROUTE_OPTIONS`, and the optional `display_name`; an unknown
-key or option is refused by name `Scripts/llm-router.py:_rt_cfg_route`.
+the backend kind's `ROUTE_OPTIONS`, and the optional `display_name`, token
+limits and `vision`; an unknown key or option is refused by name
+`Scripts/llm-router.py:_rt_cfg_route` `Scripts/llm-router.py:_RT_ROUTE_KEYS`.
 
 | Key | Default | Rule |
 |---|---|---|
@@ -406,6 +408,7 @@ key or option is refused by name `Scripts/llm-router.py:_rt_cfg_route`.
 | `options` | `{}` | an object, checked by the kind's validators (table below) |
 | `display_name` | the route key | a string of 1-`Scripts/llm-router.py:_RT_DISPLAY_NAME_LIMIT` (256) characters with no control character; shown by `GET /v1/models` only. Allowed on `default` too, where it is unused |
 | `max_input_tokens`, `max_tokens` | none | integers from `Scripts/llm-router.py:_RT_TOKEN_LIMIT_MIN` to `Scripts/llm-router.py:_RT_TOKEN_LIMIT_MAX`; advertised by `GET /v1/models` (with `context_window`), never enforced |
+| `vision` | `true` | a JSON boolean (`0`, `1`, `"false"`, `null` are refused by path); `false` makes the router answer 400 to any request holding an image block, never strip it — see *Images* under Backends `Scripts/llm-router.py:RouteSpec`. Allowed on `default` too |
 
 | Kind | Option | Rule |
 |---|---|---|
@@ -509,7 +512,10 @@ as a JSON string or an object; it must amount to a JSON object with finite
 numbers, and the client gets it re-serialized, compact and ASCII-escaped; a
 list or anything else is an `event: error` (in a non-stream answer, a 502).
 count_tokens is never forwarded: it is a local estimate, the translated body's
-UTF-8 bytes divided by `count_divisor` `Scripts/llm-router.py:_rt_ms_estimate`.
+UTF-8 bytes divided by `count_divisor` `Scripts/llm-router.py:_rt_ms_estimate`
+— with every translated image part's data URL or url left out and a fixed
+per-image charge added instead (see *Images* below); the same estimate stands
+in for the usage a backend's stream omits.
 A 422 answer's detail list is flattened to field names, never values
 `Scripts/llm-router.py:_rt_ms_detail_names`. A mid-conversation `system` turn
 is folded into the leading system message.
@@ -575,7 +581,7 @@ message collector over the whole answer `Scripts/llm-router.py:_RtMessageCollect
 A function call naming a tool the request did not offer is refused like a
 malformed one — a 502, or one `event: error` on a stream — and the name is not
 echoed `Scripts/llm-router.py:ResponsesStreamTranslator`. The mistral
-translator applies the same rule (F26, R-0093) to its streamed tool-call deltas
+translator applies the same rule (review finding F26, R-0093) to its streamed tool-call deltas
 before one is buffered and to a non-stream answer's `tool_calls`, so one
 unoffered call refuses the whole answer, offered calls beside it included; the
 offered set and the refusal text are shared
@@ -604,6 +610,66 @@ what they dropped as `sampling_dropped=` on the `req` line. `openai` with an API
 key sends them, and when a model answers 400 "Unsupported parameter" for one,
 the router drops it for that backend and model for the life of the process and
 resends once `Scripts/llm-router.py:_rt_unsupported_sampling`.
+
+**Images.** The router decodes no image and knows nothing of a backend's
+vision support (no mmproj or model probing); what an Anthropic `image` block
+becomes is decided by the route's `vision` key first, then by the kind.
+
+- *`vision: false`* — refused centrally, before any adapter runs, for every
+  kind and on both POST paths (`/v1/messages` and count_tokens): a 400
+  `invalid_request_error` naming the path of the first image — `system.N` in a
+  top-level system list, `messages.I.content.J`, or
+  `messages.I.content.J.content.K` inside a `tool_result` — and the route, never
+  the image data, and no backend is contacted
+  `Scripts/llm-router.py:_rt_parse_inbound`
+  `Scripts/llm-router.py:_rt_first_image`. Refused rather than silently
+  stripped: a route that declares it cannot see images must not answer as if
+  the image had never been sent, the principle of
+  [[0017-a-silent-zero-is-the-defect]].
+- *passthrough and llamacpp* — forwarded untouched, in user turns and inside a
+  `tool_result` alike; the backend takes images natively or refuses them itself
+  `Scripts/llm-router.py:PassthroughAdapter`
+  `Scripts/llm-router.py:LlamacppAdapter`.
+- *mistral* — a user-turn image becomes an `image_url` part
+  `Scripts/llm-router.py:_rt_ms_image_part`. A `tool_result` holding at least
+  one image becomes a tool message whose `content` is a list of `text` /
+  `image_url` chunks in block order (same `is_error` and orphan shapes as the
+  Responses kinds); without an image the content stays a string
+  `Scripts/llm-router.py:_rt_ms_result_parts`. The route option
+  `tool_result_images` (boolean, default `Scripts/llm-router.py:_RT_MS_TOOL_RESULT_IMAGES`)
+  set to false restores the text `[image omitted]`
+  `Scripts/llm-router.py:_rt_ms_result_text`. One live probe (2026-10-27,
+  mistral-small-2603 and mistral-large-4) showed the model reads such an image;
+  the docs do not promise it, the OpenAPI schema and mistral-common only permit it.
+- *codex and openai* — a user-turn image becomes an `input_image` part
+  `Scripts/llm-router.py:_rt_rs_image_part`. A `tool_result` holding at least
+  one image becomes a `function_call_output` whose `output` is a **list** of
+  `input_text` / `input_image` parts in block order (with `is_error`, `Error: `
+  is put in front of the first text part, or a leading `Error:` part when the
+  first part is an image; an orphan result's parts follow the orphan marker in
+  the user message); a `tool_result` with no image keeps the plain string
+  `output` it always had `Scripts/llm-router.py:_rt_rs_result_parts`
+  `Scripts/llm-router.py:_rt_rs_translate`. The list form is a profile-row
+  switch, `output_parts`, true on all three rows; a row set to false restores the
+  string form with `[image omitted]` without a code change
+  `Scripts/llm-router.py:ResponsesProfile`
+  `Scripts/llm-router.py:_rt_check_responses_profiles`.
+- *An image in an assistant turn* is a 400 naming the block type on mistral
+  and on the Responses kinds, as any block they cannot take
+  `Scripts/llm-router.py:_rt_ms_translate`.
+- *An image in a top-level system list*, with `vision` true, is dropped by
+  mistral, codex/openai and llamacpp's `hoist-system` row, which keep the text
+  blocks only `Scripts/llm-router.py:_rt_ll_hoist_system`; passthrough relays it.
+
+The local estimate (mistral, codex, openai) never counts an image's base64 or
+url text: each translated image part's `image_url` is emptied before the body
+is measured, and `Scripts/llm-router.py:_RT_IMAGE_TOKEN_ESTIMATE` (1500) tokens'
+worth of bytes, `Scripts/llm-router.py:_RT_IMAGE_ESTIMATE_BYTES`, is charged per
+image instead `Scripts/llm-router.py:_rt_strip_images`. That charge goes
+through `count_divisor` like every other byte, so it is 1500 tokens only at the
+default divisor 4 and about 750 at divisor 8 — a declared quirk, below. There
+is no per-image size limit; an image counts against `--body-limit` like any
+other byte.
 
 ## OAuth: the token store and the write-back
 
@@ -775,8 +841,8 @@ resolve, a stalled connect or a model call still waiting for its answer
 passthrough `tests/test_llm_router.py:group_d`, the llama.cpp quirk rows
 `tests/test_llm_router.py:group_e`, Mistral request translation
 `tests/test_llm_router.py:group_f`, the Mistral stream, including the
-unoffered-tool refusal on the stream and the non-stream path (F26, R-0093)
-`tests/test_llm_router.py:group_g`, idle deadlines, the drain and a client that
+unoffered-tool refusal on the stream and the non-stream path (review finding
+F26, R-0093; not test case F26) `tests/test_llm_router.py:group_g`, idle deadlines, the drain and a client that
 hangs up, per backend kind `tests/test_llm_router.py:group_h`, secret leaks
 `tests/test_llm_router.py:group_i`, static AST rules over the router
 source, the declared hand copies and sandbox hygiene
@@ -795,6 +861,21 @@ snapshots `tests/test_llm_router.py:GROUP_ORDER`. Its case count is declared
 once, per group, in `tests/run.py:SUITES`, and checked against the run; the
 per-group detail is the suite's row in [[tests]], and the red-first record per
 group is ADR 0028's, its addendum included.
+
+**Images.** One case per layer, each in the group of the code it covers: the
+`vision` key's boolean rule (A50) `tests/test_llm_router.py:group_a`; the
+central 400 for a user, a nested `tool_result` and a system-list image, on both
+POST paths and a passthrough and a mistral route, with no peer contact and no
+image byte in the answer, and the same bodies forwarded with `vision` true or
+absent (B32) `tests/test_llm_router.py:group_b`; passthrough and llamacpp
+forwarding image blocks byte-identical (D17, E15)
+`tests/test_llm_router.py:gd_image_forward`; the estimate unmoved by the
+image data's length and charging the fixed figure through `count_divisor` on
+mistral, codex and openai (F26) `tests/test_llm_router.py:group_f`; and the
+`function_call_output` list per profile, the string form without an image, the
+`is_error` and orphan shapes and `output_parts` false (K27)
+`tests/test_llm_router.py:group_k`. The static profile-row snapshot carries the
+`output_parts` column `tests/test_llm_router.py:GJ_RS_PROFILES`.
 
 **Deadlines in milliseconds.** A case whose observable is one of the router's
 own deadlines — the ping interval, the relay tick, the pre-auth, header and
@@ -874,6 +955,20 @@ read before relying on one of them. In brief:
   inside a larger string, or split across lines, is not caught.
 - **The Mistral token count is an estimate,** and Mistral tool calls appear
   whole at the end of the turn, never streamed.
+- **An image's token charge is a fixed, rough figure.** Providers price an
+  image by its pixels, which the router never decodes; the local estimate
+  charges `Scripts/llm-router.py:_RT_IMAGE_TOKEN_ESTIMATE` per image, and since
+  that charge passes through `count_divisor`, a route with a divisor other than
+  4 scales it too (about 750 at 8).
+- **The list-form `function_call_output` is not measured live.** It is the
+  documented Responses API shape, but whether the codex and `openai`-OAuth
+  backends accept it has not been observed; the fallback is one profile row's
+  `output_parts` set to false `Scripts/llm-router.py:ResponsesProfile`.
+- **An image in a top-level system list is dropped silently** by mistral,
+  codex/openai and llamacpp's `hoist-system` row while `vision` is true; only
+  `vision: false` turns it into a refusal.
+- **No per-image size limit;** an image is bounded only by `--body-limit`
+  (32 MiB by default).
 - **Passthrough request bodies are equal after parsing, not byte for byte**
   (the body is re-serialized after the model rewrite).
 - **No metrics endpoint;** the DEBUG `req` line is the only per-request record,

@@ -38,15 +38,17 @@ Usage:
 Exit code 0 iff every non-informational case passes.
 
 Groups:
-  A  config               -- load_config refusals and defaults, in-process and CLI
+  A  config               -- load_config refusals and defaults, in-process and CLI (A50: route vision)
   B  front                -- bind, auth, Host/Origin, framing refusals, caps, GET /v1/models
+                             (B32: a vision-false route refuses any image block with a 400)
   C  outbound             -- address policy, TLS verification, upstream refusals
-  D  passthrough          -- an Anthropic-compatible backend, relayed
-  E  llamacpp             -- request and event quirks against a llama.cpp peer
-  F  mistral request      -- Anthropic -> chat-completions translation
+  D  passthrough          -- an Anthropic-compatible backend, relayed (D17: images unchanged)
+  E  llamacpp             -- request and event quirks against a llama.cpp peer (E15: images unchanged)
+  F  mistral request      -- Anthropic -> chat-completions translation (F26: the image-free estimate;
+                             F27-F29: an image inside a tool_result, its tool_result_images switch)
   G  mistral stream       -- chat-completions SSE -> Anthropic SSE translation
   H  timeouts/disconnect  -- idle and total deadlines, a client that hangs up
-  K  responses request    -- Anthropic -> Responses translation (codex, openai)
+  K  responses request    -- Anthropic -> Responses translation (codex, openai; K27: tool_result images)
   L  config write-back    -- the atomic, directory-relative rewrite of backends.<n>.oauth
   N  token store          -- refresh, the per-backend lock, one forced refresh per 401 (codex)
   O  login                -- the codex login subcommand: browser callback, paste, device flow
@@ -975,6 +977,7 @@ GA_CASES = (
     "reasoning_effort_map accepted",     # A47
     "reasoning_effort_map refused",      # A48
     "cleartext oauth bearer refused",    # A49
+    "route vision boolean",              # A50
 )
 
 # (label, text, is_config_error) of every exception group A provoked and every
@@ -2241,6 +2244,39 @@ def group_a(suite, fixture_root):
                           "accepted    : the same with allow_cleartext_api_key true; %s with no opt-in"
                           % GA_LOOPBACK_HTTP[0]]
 
+    def a50():
+        # A route's optional top-level boolean `vision` (default true): a strict boolean like its
+        # siblings' strict integers -- 0/1, strings, null and containers are refused, by path.
+        problems = []
+        want = {"claude-sonnet-4-5": False, "claude-haiku-4-5": True, "tf-a-vision-absent": True,
+                "(default)": False}
+
+        def visions(cfg):
+            cfg["routes"]["tf-a-vision-absent"] = {"backend": "mistral", "model": "tf-model"}
+            cfg["routes"]["claude-sonnet-4-5"]["vision"] = False
+            cfg["routes"]["claude-haiku-4-5"]["vision"] = True
+            cfg["default"]["vision"] = False
+        cfg, problems = ga_accepted(mod, cfg_with("vision-good.json", visions), "vision on routes and the default")
+        if cfg is not None:
+            for key, value in want.items():
+                spec = cfg.default if key == "(default)" else cfg.routes.get(key)
+                got = getattr(spec, "vision", "<no vision field>")
+                if got is not value:
+                    problems.append("%s: RouteSpec.vision %r, expected %r" % (key, got, value))
+        n = 0
+        for where, place in (("routes.claude-sonnet-4-5", lambda cfg: cfg["routes"]["claude-sonnet-4-5"]),
+                             ("default", lambda cfg: cfg["default"])):
+            for label, value in (("0", 0), ("1", 1), ("the string \"false\"", "false"), ("null", None),
+                                 ("a list", [True]), ("1.0", 1.0)):
+                n += 1
+                path = cfg_with("vision-bad-%d.json" % n,
+                                lambda cfg, p=place, v=value: p(cfg).__setitem__("vision", v))
+                absent = (value,) if isinstance(value, str) else ()
+                problems += ga_refused(mod, path, ["%s.vision" % where, "boolean"],
+                                       "%s.vision %s" % (where, label), absent=absent)
+        return problems, ["accepted    : true and false on a route and the default; absent -> true",
+                          "refused     : 0, 1, 1.0, \"false\", null, a list -- naming the path and boolean"]
+
     def a12():
         problems = []
 
@@ -2276,7 +2312,7 @@ def group_a(suite, fixture_root):
         GA_CASES[34]: a35, GA_CASES[35]: a36, GA_CASES[36]: a37, GA_CASES[37]: a38,
         GA_CASES[38]: a39, GA_CASES[39]: a40, GA_CASES[40]: a41, GA_CASES[41]: a42,
         GA_CASES[42]: a43, GA_CASES[43]: a44, GA_CASES[44]: a45, GA_CASES[45]: a46,
-        GA_CASES[46]: a47, GA_CASES[47]: a48, GA_CASES[48]: a49,
+        GA_CASES[46]: a47, GA_CASES[47]: a48, GA_CASES[48]: a49, GA_CASES[49]: a50,
         GA_CASES[11]: a12,    # last: it sweeps every message the others provoked
     }
     results = {}
@@ -2329,6 +2365,7 @@ GB_CASES = (
     "models: no routes -> data []",      # B29
     "mid-conversation system rules",     # B30
     "models: token limits advertised",   # B31
+    "vision false: image -> 400",        # B32
 )
 
 # "Accepted" in a B case means "not a front refusal" (plan section 8): the status
@@ -3653,6 +3690,75 @@ def group_b(suite, fixture_root):
             finally:
                 lim.close()
 
+        def b32():
+            # A route with vision false refuses any image block, centrally and for every kind:
+            # a 400 invalid_request_error naming the path and the route, never the image, and
+            # no peer contact.  vision true / absent is unchanged (forwarded, 200).
+            box = new_sandbox(fixture_root, "vision")
+            cfg = gb_config(peer.url())
+            cfg["backends"]["tfms"] = {"kind": "mistral", "base_url": peer.url(), "api_key": TF_KEY_MISTRAL}
+            cfg["routes"] = {"tf-vis-off": {"backend": "tfpeer", "model": "tf-model", "vision": False},
+                             "tf-vis-off-ms": {"backend": "tfms", "model": "tf-model", "vision": False},
+                             "tf-vis-on": {"backend": "tfpeer", "model": "tf-model", "vision": True},
+                             "tf-vis-absent": {"backend": "tfpeer", "model": "tf-model"}}
+            vis = RouterProc(box, write_config(box, cfg), label="vision")
+            try:
+                if vis.wait_ready() is None:
+                    return [gb_not_ready(vis)], []
+                vc = vis.client()
+                image = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": GD_PNG}}
+                text = {"type": "text", "text": "tf look"}
+                tool_use = {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_tfb_v", "name": "Read",
+                                                              "input": {}}]}
+                shapes = (
+                    ("user image", {"messages": [{"role": "user", "content": [text, image]}]},
+                     "messages.0.content.1"),
+                    ("tool_result nested image",
+                     {"messages": [{"role": "user", "content": "tf start"}, tool_use,
+                                   {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_tfb_v",
+                                                                 "content": [text, image]}]}]},
+                     "messages.2.content.0.content.1"),
+                    ("system-list image",
+                     {"system": [{"type": "text", "text": "tf sys"}, image],
+                      "messages": [{"role": "user", "content": "tf ping"}]}, "system.1"))
+                problems, shown = [], []
+                before = len(peer.requests)
+                for route in ("tf-vis-off", "tf-vis-off-ms"):
+                    for label, extra, path in shapes:
+                        for endpoint in ("/v1/messages", "/v1/messages/count_tokens"):
+                            body = {"model": route, "max_tokens": 16}
+                            body.update(ge_clone(extra))
+                            case = "%s, %s, %s" % (label, route, endpoint)
+                            status, _h, raw = vc.post(path=endpoint, obj=body)
+                            etype, msg, bad = gb_envelope(raw)
+                            if status != 400 or bad or etype != GB_TYPES[400]:
+                                problems.append("%s: status %r %s, expected a 400 invalid_request_error envelope"
+                                                % (case, status, bad or etype))
+                                continue
+                            if path not in msg or route not in msg:
+                                problems.append("%s: message %r names neither %r nor the route"
+                                                % (case, ga_redact(msg)[:120], path))
+                            if GD_PNG in gb_text(raw) or "base64" in gb_text(raw) \
+                                    or any(s in gb_text(raw) for s in SENTINELS):
+                                problems.append("%s: the answer echoes image data or a sentinel" % case)
+                            shown.append("%s -> 400 %s" % (case, path))
+                problems += peer_untouched(before, "vision false")
+                for route in ("tf-vis-on", "tf-vis-absent"):
+                    for label, extra, _path in shapes[:2]:
+                        body = {"model": route, "max_tokens": 16}
+                        body.update(ge_clone(extra))
+                        status, _h, raw = vc.post(obj=body)
+                        if status != 200:
+                            etype, msg, _bad = gb_envelope(raw)
+                            problems.append("control: %s on %s: status %r (%s), expected 200"
+                                            % (label, route, status, ga_redact(msg or "")[:100]))
+                return problems, ["refused     : %d answer(s), each a 400 naming the path and the route" % len(shown),
+                                  "paths       : user image, tool_result nested image, system-list image; "
+                                  "messages and count_tokens; passthrough and mistral routes",
+                                  "control     : vision true / absent forward the same bodies, 200"]
+            finally:
+                vis.close()
+
         cases = [(GB_CASES[0], live(b1)), (GB_CASES[1], live(b2)), (GB_CASES[2], live(b3)),
                  (GB_CASES[3], live(b4)), (GB_CASES[4], live(b5)), (GB_CASES[5], live(b6)),
                  (GB_CASES[6], live(b7)), (GB_CASES[7], live(b8)), (GB_CASES[8], live(b9)),
@@ -3664,6 +3770,7 @@ def group_b(suite, fixture_root):
                  (GB_CASES[24], live_models(b25)), (GB_CASES[25], live_models(b26)),
                  (GB_CASES[26], live_models(b27)), (GB_CASES[27], live_models(b28)),
                  (GB_CASES[28], b29), (GB_CASES[29], live(b30)), (GB_CASES[30], b31),
+                 (GB_CASES[31], b32),
                  (GB_CASES[16], live(b17))]   # last: it sweeps every error body the others provoked
         for cid, fn in cases:
             try:
@@ -4728,6 +4835,7 @@ GD_CASES = (
     "bare CR / BOM parsed as a client",  # D14
     "mid-conversation system verbatim",  # D15
     "route sampling override wins",      # D16
+    "image blocks forwarded unchanged",  # D17
 )
 
 GD_BACKEND = "tfd"
@@ -4823,6 +4931,55 @@ def gd_d16(mod):
                                    want.get("top_p"), ge_diff_keys(up, want)))
         shown.append("%s -> %r" % (label, want_sampling))
     return problems, ["route       : " + s for s in shown] + ["count_tokens: the client's sampling, unchanged"]
+
+
+GD_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAQ=="     # D17/E15: a dummy base64 payload (no real image)
+
+
+def gd_image_forward(mod, kind, adapter_name, label):
+    """D17 / E15, in-process: a user image block (base64 and url sources) and a tool_result whose
+    content holds an image are forwarded byte-identical -- the upstream body is the client's with
+    only `model` replaced (an Anthropic-compatible backend takes images natively)."""
+    if mod is None:
+        return ["the router module cannot be imported"], []
+    adapter_cls = getattr(mod, adapter_name, None)
+    if adapter_cls is None:
+        return ["the module defines no %s" % adapter_name], []
+    backend = mod.BackendSpec(name="tf-img", kind=kind, scheme="https", host="tf-img.invalid",
+                              port=443, base_path="", allow_private=False, allow_loopback=False,
+                              ca_file=None, ca_pem=None, api_key=None, auth_header="x-api-key",
+                              forward_headers=frozenset(), connect_timeout=5.0, idle_timeout=30.0)
+    route = mod.RouteSpec(name="claude-tf-img", backend="tf-img", model="tf-img-up", options={})
+    b64 = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": GD_PNG}}
+    url = {"type": "image", "source": {"type": "url", "url": "https://tf-img.invalid/a.png"}}
+    sent = {"model": "claude-tf-img", "max_tokens": 64,
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "tf look"}, b64, url]},
+                         {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_tfi_a", "name": "Read",
+                                                            "input": {"file_path": "/tf/a.png"}}]},
+                         {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_tfi_a",
+                                                       "content": [{"type": "text", "text": "tf shot"}, b64]}]}]}
+    problems, shown = [], []
+    for endpoint in ("messages", "count_tokens"):
+        inbound = mod.InboundRequest(endpoint=endpoint, requested_model=sent["model"], body=ge_clone(sent),
+                                     stream=False, route=route, backend=backend, client_headers={},
+                                     scrub=lambda text: text)
+        adapter = adapter_cls()
+        local = adapter.upstream_request(inbound) if endpoint == "messages" else adapter.count_tokens(inbound)
+        if isinstance(local, dict):
+            problems.append("%s %s: answered locally, expected a forwarded body" % (label, endpoint))
+            continue
+        raw = local[1]
+        up = json.loads(raw.decode("utf-8"))
+        want = ge_clone(sent)
+        want["model"] = "tf-img-up"
+        if up != want:
+            problems.append("%s %s: the upstream body differs from the client's beyond model (key(s): %s)"
+                            % (label, endpoint, ge_diff_keys(up, want)))
+        if raw.count(GD_PNG.encode("ascii")) != 2:
+            problems.append("%s %s: the base64 payload occurs %d time(s) upstream, expected 2"
+                            % (label, endpoint, raw.count(GD_PNG.encode("ascii"))))
+        shown.append("%s -> image blocks forwarded unchanged" % endpoint)
+    return problems, ["relay       : " + s for s in shown]
 
 
 def gd_d14(mod):
@@ -5451,6 +5608,11 @@ def group_d(suite, fixture_root):
         except Exception as exc:  # noqa: BLE001 -- a broken case fails, never aborts the group
             results[GD_CASES[15]] = (["case raised %s: %s"
                                       % (type(exc).__name__, gi_redact(str(exc))[:200])], [])
+        try:
+            results[GD_CASES[16]] = gd_image_forward(mod, "passthrough", "PassthroughAdapter", "passthrough")
+        except Exception as exc:  # noqa: BLE001 -- a broken case fails, never aborts the group
+            results[GD_CASES[16]] = (["case raised %s: %s"
+                                      % (type(exc).__name__, gi_redact(str(exc))[:200])], [])
     except Exception as exc:  # noqa: BLE001 -- a setup failure fails every case not yet run
         setup = "the group setup raised %s: %s" % (type(exc).__name__, gi_redact(str(exc))[:200])
     else:
@@ -5484,6 +5646,7 @@ GE_CASES = (
     "registry rows = six names",         # E12
     "default route echoes model",        # E13
     "mid-conversation system collapsed", # E14
+    "image blocks forwarded unchanged",  # E15
 )
 
 # E12: the six names Step 4 wrote provisionally, as a LITERAL -- never the module's
@@ -6241,7 +6404,8 @@ def group_e(suite, fixture_root):
             return problems, ["rows        : %s" % (", ".join(shown) or "(no registry)")]
 
         fns = (inproc(e1), inproc(e2), inproc(e3), inproc(e4), inproc(e5), inproc(e6), inproc(e7),
-               e8, live(e9), replayed(e10), live(e11), inproc(e12), replayed(e13), live(e14))
+               e8, live(e9), replayed(e10), live(e11), inproc(e12), replayed(e13), live(e14),
+               lambda: gd_image_forward(mod, "llamacpp", "LlamacppAdapter", "llamacpp"))
         for cid, fn in zip(GE_CASES, fns):
             try:
                 results[cid] = fn()
@@ -6291,6 +6455,10 @@ GF_CASES = (
     "fixed reasoning_effort: no remap",  # F23
     "effort remap: nearest, tie higher", # F24
     "effort 400 matcher: tolerant",      # F25
+    "estimate ignores image bytes",      # F26
+    "tool_result image -> parts list",   # F27
+    "tool_result_images option",         # F28
+    "tool message estimate, vision",     # F29
 )
 
 GF_BACKEND = "tff"
@@ -7145,10 +7313,11 @@ def group_f(suite, fixture_root):
         if out2 is not None:
             tools = [m for m in out2["messages"] if isinstance(m, dict) and m.get("role") == "tool"]
             text = tools[0].get("content") if len(tools) == 1 else None
-            if not (isinstance(text, str) and "tf shot" in text and "[image omitted]" in text
-                    and GF_PNG not in text):
-                problems.append("image in a tool result: the tool message content is %r, expected the text "
-                                "and \"[image omitted]\" (no image data)" % (text,))
+            want_parts = [{"type": "text", "text": "tf shot"},
+                          {"type": "image_url", "image_url": "data:image/png;base64," + GF_PNG}]
+            if text != want_parts:
+                problems.append("image in a tool result: the tool message content is %r, expected the parts "
+                                "%r (F27 pins the rest of the list form)" % (text, want_parts))
         return problems, ["user        : %s" % (ge_types(out["messages"][0].get("content"))
                                                  if out is not None and out["messages"] else "(none)"),
                           "tool result : %r" % (text,)]
@@ -7439,6 +7608,220 @@ def group_f(suite, fixture_root):
             shown.append("%s -> %s" % (label, sorted(got) if isinstance(got, (set, frozenset)) else got))
         return problems, ["matcher     : " + s for s in shown]
 
+    def f26():
+        # The local estimate (count_tokens) never counts an image's base64 or url text: two bodies
+        # that differ only in the image data's length get the same estimate, and each image costs
+        # the router's fixed, rough per-image figure (1500 tokens at count_divisor 4, written here
+        # as a literal) through the same count_divisor as every other byte.
+        image_tokens = 1500
+        slack = 60          # the image part's own JSON framing, a few dozen bytes per image
+        problems, shown = [], []
+
+        def body_with(images, data_len, url_len=0):
+            content = [{"type": "text", "text": "tf look"}]
+            for _ in range(images):
+                content.append({"type": "image", "source": {"type": "base64", "media_type": "image/png",
+                                                            "data": "A" * data_len}})
+            if url_len:
+                content.append({"type": "image", "source": {"type": "url",
+                                                            "url": "https://tf-img.invalid/" + "u" * url_len}})
+            return gf_body([{"role": "user", "content": content}])
+
+        routes = (("mistral", "MistralAdapter", lambda **o: gf_route(mod, **o),
+                   lambda b, r: gf_inbound(mod, "count_tokens", b, r)),
+                  ("codex", "CodexAdapter", lambda **o: gk_route(mod, **o),
+                   lambda b, r: gk_inbound(mod, b, r, "codex", endpoint="count_tokens")),
+                  ("openai", "OpenaiAdapter", lambda **o: gk_route(mod, **o),
+                   lambda b, r: gk_inbound(mod, b, r, "openai-apikey", endpoint="count_tokens")))
+        for kind, adapter_name, make_route, make_inbound in routes:
+            adapter = getattr(mod, adapter_name)()
+
+            def estimate(body, **options):
+                route = make_route(**options)
+                got = adapter.count_tokens(make_inbound(ge_clone(body), route))
+                return got["input_tokens"] if isinstance(got, dict) else None
+            small, large = estimate(body_with(1, 64)), estimate(body_with(1, 400000))
+            if small is None or small != large:
+                problems.append("%s: one image, 64 vs 400000 base64 chars: estimates %r and %r, expected equal"
+                                % (kind, small, large))
+            short_url, long_url = estimate(body_with(0, 0, 8)), estimate(body_with(0, 0, 40000))
+            if short_url is None or short_url != long_url:
+                problems.append("%s: a url image, 8 vs 40000 url chars: estimates %r and %r, expected equal"
+                                % (kind, short_url, long_url))
+            one, two, none = estimate(body_with(1, 64)), estimate(body_with(2, 64)), estimate(body_with(0, 0))
+            if None in (one, two, none) or not image_tokens <= two - one <= image_tokens + slack:
+                problems.append("%s: the second image adds %r token(s), expected %d to %d"
+                                % (kind, None if None in (one, two) else two - one, image_tokens,
+                                   image_tokens + slack))
+            half = estimate(body_with(2, 64), count_divisor=8) - estimate(body_with(1, 64), count_divisor=8)
+            if not image_tokens // 2 <= half <= image_tokens // 2 + slack:
+                problems.append("%s: with count_divisor 8 the second image adds %r token(s), expected %d to %d "
+                                "(the fixed cost goes through count_divisor)"
+                                % (kind, half, image_tokens // 2, image_tokens // 2 + slack))
+            shown.append("%s: image data 64 vs 400000 chars -> %r/%r; +1 image -> +%r; divisor 8 -> +%r"
+                         % (kind, small, large, None if None in (one, two) else two - one, half))
+        return problems, ["estimate    : " + s for s in shown]
+
+    # F27-F29: an image inside a tool_result.  A role:"tool" message's content may be an array of
+    # chunks including {"type":"image_url","image_url":"<string>"} (Mistral OpenAPI spec and
+    # mistral-common); not measured live by this suite (declared, ADR 0028).
+    f_b64 = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": GF_PNG}}
+    f_url = {"type": "image", "source": {"type": "url", "url": "https://tf-img.invalid/a.png"}}
+    f_data_url, f_plain_url = "data:image/png;base64," + GF_PNG, "https://tf-img.invalid/a.png"
+    f_text = lambda t: {"type": "text", "text": t}                          # noqa: E731
+    f_image = lambda u: {"type": "image_url", "image_url": u}               # noqa: E731
+
+    def f_turn(result):
+        history = gf_pair_history([("toolu_tff_i", "Read")])
+        history[2]["content"] = [result]
+        return history
+
+    def f_tool_content(out):
+        tools = [m for m in out["messages"] if isinstance(m, dict) and m.get("role") == "tool"]
+        return tools[0].get("content") if len(tools) == 1 else "%d tool messages" % len(tools)
+
+    def f27():
+        problems, shown = [], []
+        for label, content, want in (
+                ("text + base64", [f_text("tf shot"), f_b64], [f_text("tf shot"), f_image(f_data_url)]),
+                ("image first, text last", [f_b64, f_text("tf after")], [f_image(f_data_url), f_text("tf after")]),
+                ("url source", [f_url], [f_image(f_plain_url)]),
+                ("two images, order kept", [f_b64, f_text("tf mid"), f_url],
+                 [f_image(f_data_url), f_text("tf mid"), f_image(f_plain_url)]),
+                ("no image: string", [f_text("tf a"), f_text("tf b")], "tf a\ntf b"),
+                ("plain string content", "tf plain", "tf plain")):
+            out, more = gf_translate(mod, gf_body(f_turn(gf_tool_result("toolu_tff_i", content))), gf_route(mod),
+                                     label)
+            problems += more
+            if out is None:
+                continue
+            got = f_tool_content(out)
+            if got != want:
+                problems.append("%s: tool content %r, expected %r" % (label, got, want))
+            else:
+                shown.append("%s -> %s" % (label, "list" if isinstance(got, list) else "string"))
+        for label, content, want in (
+                ("is_error, text first", [f_text("tf bad"), f_b64],
+                 [f_text("Error: tf bad"), f_image(f_data_url)]),
+                ("is_error, image first", [f_b64, f_text("tf bad")],
+                 [f_text("Error:"), f_image(f_data_url), f_text("tf bad")])):
+            out, more = gf_translate(mod, gf_body(f_turn(gf_tool_result("toolu_tff_i", content, is_error=True))),
+                                     gf_route(mod), label)
+            problems += more
+            if out is not None and f_tool_content(out) != want:
+                problems.append("%s: tool content %r, expected %r" % (label, f_tool_content(out), want))
+        marker = GF_ORPHAN.rstrip()
+        for label, history, want in (
+                ("orphan image", [{"role": "user", "content": [gf_tool_result("toolu_tff_none",
+                                                                              [f_text("tf o"), f_b64])]}],
+                 [{"role": "user", "content": [f_text(marker), f_text("tf o"), f_image(f_data_url)]}]),
+                ("orphan image after user text", [{"role": "user", "content": [
+                    f_text("tf lead"), gf_tool_result("toolu_tff_none", [f_url])]}],
+                 [{"role": "user", "content": [f_text("tf lead"), f_text(marker), f_image(f_plain_url)]}])):
+            out, more = gf_translate(mod, gf_body(history), gf_route(mod), label)
+            problems += more
+            if out is not None and out["messages"] != want:
+                problems.append("%s: messages %r, expected %r" % (label, out["messages"], want))
+        bad = [f_b64, {"type": "document", "source": {}}]
+        try:
+            mod._rt_ms_translate(gf_body(f_turn(gf_tool_result("toolu_tff_i", bad))), gf_route(mod))
+        except Exception as exc:  # noqa: BLE001 -- the type is the finding
+            api = getattr(mod, "ApiError", ())
+            if not isinstance(exc, api) or getattr(exc, "status", None) != 400 \
+                    or "messages.2.content.0.content.1" not in str(getattr(exc, "message", "")):
+                problems.append("unsupported block next to an image: raised %s %r, expected an ApiError 400 "
+                                "naming messages.2.content.0.content.1" % (type(exc).__name__, str(exc)[:120]))
+        else:
+            problems.append("unsupported block next to an image: accepted, expected an ApiError 400")
+        return problems, ["result      : " + s for s in shown] + ["result      : %d outcome(s) in all" % len(shown)]
+
+    def f28():
+        problems = []
+        constant = getattr(mod, "_RT_MS_TOOL_RESULT_IMAGES", None)
+        if not isinstance(constant, bool):
+            problems.append("the module has no bool _RT_MS_TOOL_RESULT_IMAGES (the one named default), got %r"
+                            % (constant,))
+        body = gf_body(f_turn(gf_tool_result("toolu_tff_i", [f_text("tf shot"), f_b64])))
+        as_list = [f_text("tf shot"), f_image(f_data_url)]
+        as_marker = "tf shot\n[image omitted]"
+        for label, options, want in (
+                ("option true", {"tool_result_images": True}, as_list),
+                ("option false", {"tool_result_images": False}, as_marker),
+                ("option absent = the named default", {}, as_list if constant else as_marker)):
+            out, more = gf_translate(mod, body, gf_route(mod, **options), label)
+            problems += more
+            if out is not None and f_tool_content(out) != want:
+                problems.append("%s: tool content %r, expected %r" % (label, f_tool_content(out), want))
+        out, more = gf_translate(mod, gf_body([{"role": "user", "content": [
+            gf_tool_result("toolu_tff_none", [f_text("tf o"), f_b64])]}]),
+            gf_route(mod, tool_result_images=False), "orphan, option false")
+        problems += more
+        if out is not None and out["messages"] != [{"role": "user", "content": GF_ORPHAN + "tf o\n[image omitted]"}]:
+            problems.append("orphan, option false: messages %r, expected the marker text" % (out["messages"],))
+        adapter = getattr(mod, "MistralAdapter", None)
+        if adapter is None:
+            return problems + ["the module has no MistralAdapter"], []
+        for value in (True, False):
+            try:
+                got = adapter.validate_options({"tool_result_images": value}, "routes.tf.options")
+            except Exception as exc:  # noqa: BLE001
+                problems.append("tool_result_images %r refused: %s" % (value, type(exc).__name__))
+            else:
+                if got != {"tool_result_images": value} or type(got["tool_result_images"]) is not bool:
+                    problems.append("tool_result_images %r validated to %r" % (value, got))
+        for value in ("true", "yes", 1, 0, 1.0, None, [], {}):
+            try:
+                adapter.validate_options({"tool_result_images": value}, "routes.tf.options")
+            except mod.ConfigError as exc:
+                if "routes.tf.options.tool_result_images" not in str(exc) or "boolean" not in str(exc):
+                    problems.append("tool_result_images %r: refusal %r does not name the path and a boolean"
+                                    % (value, str(exc)[:120]))
+            except Exception as exc:  # noqa: BLE001
+                problems.append("tool_result_images %r: raised %s, expected ConfigError" % (value, type(exc).__name__))
+            else:
+                problems.append("tool_result_images %r accepted, expected a ConfigError" % (value,))
+        return problems, ["option      : default %r; true -> parts, false -> \"[image omitted]\"; non-bool "
+                          "refused" % (constant,)]
+
+    def f29():
+        problems = []
+        image_tokens, slack = 1500, 60
+
+        def estimate(data_len, images=1, **options):
+            content = [f_text("tf shot")] + [{"type": "image", "source": {"type": "base64",
+                                              "media_type": "image/png", "data": "A" * data_len}}] * images
+            body = gf_body(f_turn(gf_tool_result("toolu_tff_i", content)))
+            route = gf_route(mod, **options)
+            got = mod.MistralAdapter().count_tokens(gf_inbound(mod, "count_tokens", ge_clone(body), route))
+            return got["input_tokens"] if isinstance(got, dict) else None
+        small, large = estimate(64, tool_result_images=True), estimate(400000, tool_result_images=True)
+        if small is None or small != large:
+            problems.append("tool-message image, 64 vs 400000 base64 chars: estimates %r and %r, expected equal"
+                            % (small, large))
+        one, two = estimate(64, 1, tool_result_images=True), estimate(64, 2, tool_result_images=True)
+        if None in (one, two) or not image_tokens <= two - one <= image_tokens + slack:
+            problems.append("the second tool-message image adds %r token(s), expected %d to %d"
+                            % (None if None in (one, two) else two - one, image_tokens, image_tokens + slack))
+        # The central vision-false 400 comes before the translator and the option.
+        cfg = mod.RouterConfig(token=b"tf", backends={GF_BACKEND: gf_backend(mod)},
+                               routes={GF_ROUTE: mod.RouteSpec(name=GF_ROUTE, backend=GF_BACKEND, model=GF_MODEL,
+                                                               options={"tool_result_images": True},
+                                                               vision=False)},
+                               default=None, secrets=(), scrub=lambda text: text)
+        body = gf_body(f_turn(gf_tool_result("toolu_tff_i", [f_text("tf shot"), f_b64])))
+        try:
+            mod._rt_parse_inbound("messages", body, {}, cfg)
+        except Exception as exc:  # noqa: BLE001
+            msg = str(getattr(exc, "message", exc))
+            if getattr(exc, "status", None) != 400 or "vision is false" not in msg \
+                    or "messages.2.content.0.content.1" not in msg or GF_PNG in msg:
+                problems.append("vision false: raised %s %r, expected a 400 naming the path and vision (no data)"
+                                % (type(exc).__name__, msg[:120]))
+        else:
+            problems.append("vision false with tool_result_images true: accepted, expected the central 400")
+        return problems, ["estimate    : tool-message image 64 vs 400000 chars -> %r/%r; +1 image -> +%r"
+                          % (small, large, None if None in (one, two) else two - one)]
+
     def needs(fn, *names):
         """The case, failing once with the missing names before it runs (one red line, not one per call)."""
         def case():
@@ -7451,7 +7834,8 @@ def group_f(suite, fixture_root):
            needs(f6, idmap, tr), needs(f7, idmap, tr), needs(f8, anth, tr), needs(f9, tr), needs(f10, tr),
            needs(f11, tr), f12, needs(f13, tr), needs(f14, tr), needs(f15, idmap, tr), needs(f16, idmap, tr),
            needs(f17, tr), needs(f18, tr), needs(f19, tr), needs(f20, tr), needs(f21, tr),
-           needs(f22, tr), needs(f23, tr), needs(f24, "_rt_ms_effort_remap"), needs(f25, "_rt_ms_unsupported_effort"))
+           needs(f22, tr), needs(f23, tr), needs(f24, "_rt_ms_effort_remap"), needs(f25, "_rt_ms_unsupported_effort"),
+           needs(f26, "_rt_ms_estimate"), needs(f27, tr), needs(f28, tr), needs(f29, "_rt_ms_estimate"))
     try:
         for cid, fn in zip(GF_CASES, fns):
             try:
@@ -9717,9 +10101,10 @@ GK_CASES = (
     "namespace tool_choice; others flat",  # K24
     "apikey: override in, learned out",  # K25
     "deep tool schema -> 400, not 500",  # K26
+    "tool_result image -> list output",  # K27
 )
 GK_IDS = ("K1", "K2", "K3", "K4", "K5", "K6", "K7", "K8", "K9", "K10", "K11", "K12", "K13", "K14", "K15",
-          "K16", "K17", "K18", "K19", "K20", "K21", "K22", "K23", "K24", "K25", "K26")
+          "K16", "K17", "K18", "K19", "K20", "K21", "K22", "K23", "K24", "K25", "K26", "K27")
 # K26 (F22): the deepest tool input_schema translated, in nested containers (dict or list)
 # counting the schema itself as 1 -- written here, never read from the module.  One level
 # more is a 400 invalid_request_error; so is a nesting past the interpreter's recursion
@@ -10861,6 +11246,79 @@ def group_k(suite, fixture_root):
         return problems, ["schema      : " + s for s in shown[:6]] + \
             ["schema      : %d outcome(s) in all" % len(shown)]
 
+    def k27():
+        # A tool_result holding an image is sent as a function_call_output whose output is a LIST of
+        # input_text / input_image parts, in block order; without an image the output stays the
+        # string it always was.  Not measured live against the codex backend (declared, ADR 0028).
+        b64 = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": GK_PNG}}
+        url = {"type": "image", "source": {"type": "url", "url": "https://tf-img.invalid/a.png"}}
+        data_url, plain_url = "data:image/png;base64," + GK_PNG, "https://tf-img.invalid/a.png"
+        text = lambda t: {"type": "text", "text": t}                        # noqa: E731
+        part = lambda t: {"type": "input_text", "text": t}                  # noqa: E731
+        image = lambda u: {"type": "input_image", "image_url": u}           # noqa: E731
+
+        def turn(result):
+            return [{"role": "user", "content": "tf start"},
+                    {"role": "assistant", "content": [gk_tool_use("toolu_tfk_i", "Read")]},
+                    {"role": "user", "content": [result]}]
+
+        def output_of(out):
+            outs = [i for i in out["input"] if isinstance(i, dict) and i.get("type") == "function_call_output"]
+            return outs[0].get("output") if len(outs) == 1 else "%d function_call_output items" % len(outs)
+
+        problems, shown = [], []
+        for profile in GK_PROFILES:
+            for label, content, want in (
+                    ("text + base64", [text("tf shot"), b64], [part("tf shot"), image(data_url)]),
+                    ("image first, text last", [b64, text("tf after")], [image(data_url), part("tf after")]),
+                    ("url source", [url], [image(plain_url)]),
+                    ("two images, order kept", [b64, text("tf mid"), url], [image(data_url), part("tf mid"),
+                                                                            image(plain_url)]),
+                    ("no image: string", [text("tf a"), text("tf b")], "tf a\ntf b"),
+                    ("plain string content", "tf plain", "tf plain")):
+                case = "%s (%s)" % (label, profile)
+                out, more = gk_translate(mod, gk_body(turn(gk_tool_result("toolu_tfk_i", content))),
+                                         profile=profile, label=case)
+                problems += more
+                if out is None:
+                    continue
+                got = output_of(out)
+                if got != want:
+                    problems.append("%s: output %r, expected %r" % (case, got, want))
+                else:
+                    shown.append("%s -> %s" % (case, "list" if isinstance(got, list) else "string"))
+            out, more = gk_translate(mod, gk_body(turn(gk_tool_result("toolu_tfk_i", [b64], is_error=True))),
+                                     profile=profile, label="is_error image (%s)" % profile)
+            problems += more
+            if out is not None and output_of(out) != [part("Error:"), image(data_url)]:
+                problems.append("is_error image (%s): output %r, expected a leading 'Error:' part"
+                                % (profile, output_of(out)))
+            orphan = [{"role": "user", "content": [gk_tool_result("toolu_tfk_none", [text("tf o"), b64])]}]
+            out, more = gk_translate(mod, gk_body(orphan), profile=profile, label="orphan image (%s)" % profile)
+            problems += more
+            if out is not None:
+                want = [{"type": "message", "role": "user",
+                         "content": [part(GK_ORPHAN.rstrip()), part("tf o"), image(data_url)]}]
+                if out["input"] != want:
+                    problems.append("orphan image (%s): input %r, expected %r" % (profile, out["input"], want))
+        if not gk_need(mod, ("_rt_rs_translate",)):
+            bad = [b64, {"type": "document", "source": {}}]
+            problems += gk_refused(mod, "unsupported block next to an image",
+                                   lambda: mod._rt_rs_translate(
+                                       gk_body(turn(gk_tool_result("toolu_tfk_i", bad))), gk_route(mod),
+                                       GK_BACKEND, mod._RT_RESPONSES_PROFILES["codex"]))
+            row = mod._RT_RESPONSES_PROFILES["codex"]._replace(output_parts=False) \
+                if "output_parts" in getattr(mod.ResponsesProfile, "_fields", ()) else None
+            if row is None:
+                problems.append("ResponsesProfile has no output_parts flag (the list form must be a profile row switch)")
+            else:
+                got = mod._rt_rs_translate(gk_body(turn(gk_tool_result("toolu_tfk_i", [b64]))), gk_route(mod),
+                                           GK_BACKEND, row)[0]
+                if output_of(got) != "[image omitted]":
+                    problems.append("output_parts False: output %r, expected the string form" % (output_of(got),))
+        return problems, ["result      : " + s for s in shown[:6]] + \
+            ["result      : %d outcome(s) in all" % len(shown)]
+
     def needs(fn, *names):
         """The case, failing once with the missing names before it runs (one red line, not one per call)."""
         def case():
@@ -10874,7 +11332,7 @@ def group_k(suite, fixture_root):
            needs(k7, idmap, anth, tr), needs(k8, tr), needs(k9, tr), needs(k10, tr), needs(k11, tr, ck),
            needs(k12, tr), needs(k13, tr), needs(k14, tr, eff), needs(k15, tr, eff), needs(k16, tr, unsign),
            needs(k17, tr, unsign), needs(k18, tr, unsign), needs(k19, tr), needs(k20, tr), needs(k21, tr),
-           needs(k22, tr), needs(k23, tr), needs(k24, tr), needs(k25, tr), needs(k26, tr))
+           needs(k22, tr), needs(k23, tr), needs(k24, tr), needs(k25, tr), needs(k26, tr), needs(k27, tr))
     try:
         for cid, fn in zip(GK_CASES, fns):
             try:
@@ -18106,20 +18564,22 @@ GJ_REG_REFUSALS = (
 # module, so a drifted row is a finding rather than a new expectation.
 GJ_RS_FIELDS = ("name", "default_base_url", "path", "oauth_provider", "sampling",
                 "account_header", "identity", "beta", "require_event_stream",
-                "line_limit", "event_limit", "tool_shape")
+                "line_limit", "event_limit", "tool_shape", "output_parts")
 GJ_RS_LINE = 8 * 1024 * 1024     # _RT_RS_SSE_LINE_LIMIT
 GJ_RS_EVENT = 16 * 1024 * 1024   # _RT_RS_SSE_EVENT_LIMIT
+# output_parts True on all three rows: a tool_result image is a function_call_output list (K27);
+# the list form is not measured live against any of the three backends.
 GJ_RS_PROFILES = {
     "codex": ("codex", "https://chatgpt.com/backend-api", "/codex/responses", "codex",
               False, True, True, "responses=experimental", False,
-              GJ_RS_LINE, GJ_RS_EVENT, "function"),
+              GJ_RS_LINE, GJ_RS_EVENT, "function", True),
     # tool_shape "namespace": user decision 2026-10-07 (SIWC preview limitations; K23/K24).
     "openai-oauth": ("openai-oauth", "https://api.openai.com", "/v1/responses", "openai",
                      False, False, False, "", False,
-                     GJ_RS_LINE, GJ_RS_EVENT, "namespace"),
+                     GJ_RS_LINE, GJ_RS_EVENT, "namespace", True),
     "openai-apikey": ("openai-apikey", "https://api.openai.com", "/v1/responses", "",
                       True, False, False, "", True,
-                      GJ_RS_LINE, GJ_RS_EVENT, "function"),
+                      GJ_RS_LINE, GJ_RS_EVENT, "function", True),
 }
 # J30 (Plan Step 5, L6): the kinds that predate the Responses unit keep the Adapter base hooks.
 GJ_BASE_HOOK_KINDS = ("passthrough", "llamacpp", "mistral")
