@@ -3,7 +3,7 @@ name: llm-router
 type: component
 status: active
 title: llm-router — an Anthropic Messages router for Claude Code
-description: The stdlib-only HTTP server between Claude Code and several kinds of LLM backend -- an Anthropic Messages front that routes each request by its exact model string to a passthrough, llama.cpp, Mistral, codex or openai adapter, the last two speaking the OpenAI Responses API through one profile table; its command line and login subcommand, its 0600 JSON config and the OAuth write-back into it, the per-kind header allow-list and llama.cpp quirk rows, reasoning across kinds, images per kind and the route's vision key, the inbound and outbound security rules, how it is tested and what it declares rather than gates.
+description: The stdlib-only HTTP server between Claude Code and several kinds of LLM backend -- an Anthropic Messages front that routes each request by its exact model string to a passthrough, llama.cpp, Mistral, codex or openai adapter, the last two speaking the OpenAI Responses API through one profile table; its command line and login subcommand, its 0600 JSON config and the OAuth write-back into it, the per-kind header allow-list and llama.cpp quirk rows, reasoning across kinds, images per kind and the route's vision key, the OpenAI-shaped image generation and edit endpoints behind the route's modality key, the inbound and outbound security rules, how it is tested and what it declares rather than gates.
 sources:
   - Scripts/llm-router.py
   - Scripts/_mcp_oauth.py
@@ -45,7 +45,11 @@ with an API key or a Sign-in-with-ChatGPT login (`openai`)
 the `login` subcommand, and the router keeps their refresh tokens current in
 the same config file. Every answer the client sees is
 Anthropic-shaped: a JSON body, an SSE stream that always closes its envelope, or
-the `{"type":"error","error":{...}}` envelope `Scripts/llm-router.py:_rt_error_body`.
+the `{"type":"error","error":{...}}` envelope `Scripts/llm-router.py:_rt_error_body`
+— except on the two OpenAI-shaped image endpoints, `POST /v1/images/generations`
+and `POST /v1/images/edits`, which serve the routes marked `"modality": "image"`
+and answer their errors in the OpenAI envelope
+`Scripts/llm-router.py:_rt_openai_error_body` (see *Image endpoints* below).
 It is pure Python 3.9 and the standard library
 ([[0024-pure-python-39-and-the-stdlib]]), and it is not an MCP server.
 
@@ -83,31 +87,45 @@ clock or thread name, so every translator is sans-IO — `begin` / `feed(line)` 
 `finish` / `fail` / `ping` each return bytes `Scripts/llm-router.py:Adapter` —
 and the translators are tested in-process with literal input and output.
 
-**Three endpoints: two POST, one GET.** `/v1/messages` and
-`/v1/messages/count_tokens` take POST, `/v1/models` and `/v1/models/{id}` take
+**Five endpoints: four POST, one GET.** `/v1/messages`,
+`/v1/messages/count_tokens`, `/v1/images/generations` and `/v1/images/edits`
+take POST, `/v1/models` and `/v1/models/{id}` take
 GET; there are no other paths `Scripts/llm-router.py:_ENDPOINTS`
 `Scripts/llm-router.py:_rt_front_endpoint`. On the messages paths the only
 query strings accepted are none and `beta=true`
-`Scripts/llm-router.py:_RT_ALLOWED_QUERIES`, anything else is a 404; on the
-models paths the query keys `limit`, `before_id`, `after_id` and `beta` are
-accepted with any value and ignored, any other key is a 400
-`Scripts/llm-router.py:_RT_MODELS_QUERY_KEYS`. Every other method — `OPTIONS`
+`Scripts/llm-router.py:_RT_ALLOWED_QUERIES`, on the image paths none at all
+`Scripts/llm-router.py:_RT_IMAGE_ALLOWED_QUERIES`; anything else is a 404. On the
+models paths the query keys `limit`, `before_id`, `after_id`, `beta` and
+`modality` are accepted, the first four with any value and ignored, any other key
+is a 400 `Scripts/llm-router.py:_RT_MODELS_QUERY_KEYS`. Every other method — `OPTIONS`
 and `HEAD` included, since there is no CORS — passes the same precheck and is
-then a 405 with `Allow: POST` on a messages path and `Allow: GET` on a models
-path `Scripts/llm-router.py:_refuse_405`.
+then a 405 with `Allow: POST` on a messages or image path and `Allow: GET` on a
+models path `Scripts/llm-router.py:_refuse_405`.
 
 **The model list is the config.** `GET /v1/models` answers 200 with the
 Anthropic list shape — `data`, `has_more` (always `false`), `first_id`,
-`last_id` (`null` when there is no route) — holding one
+`last_id` (`null` when there is no route) — plus the OpenAI list's
+`"object": "list"`, holding one
 `{"type": "model", "id", "display_name", "created_at"}` per route key in config
-order, plus the route's advertised `max_input_tokens` and `max_tokens` and a
+order, followed by the OpenAI model fields `"object": "model"`, `created` (the
+same start time as whole epoch seconds, an integer), `"owned_by": "llm-router"`
+(fixed, never a backend name) and the route's `modality` (`chat` or `image`),
+then the route's advertised `max_input_tokens` and `max_tokens` and a
 `context_window` equal to `max_input_tokens` (each `null` when the route sets
 none); `display_name` is the route's own or else the key, and `created_at` is
-the router's start time in UTC to the second. The `default` route has no name
-and is never listed `Scripts/llm-router.py:_rt_models_list`.
+the router's start time in UTC to the second, read from the same clock reading
+as `created` `Scripts/llm-router.py:_rt_model_entry`
+`Scripts/llm-router.py:_RouterHttpServer`. The `default` route has no name
+and is never listed `Scripts/llm-router.py:_rt_models_list`. `?modality=chat`,
+`?modality=image` or `?modality=all` keeps only that kind of route; without it
+every route is listed, image routes included, because the OpenAI SDK's
+`models.list()` sends no query — so Claude Code's model picker, which sends none
+either, shows a configured image route too. A repeated, blank or other
+`modality` value is a 400 `Scripts/llm-router.py:_rt_models_modality`.
 `GET /v1/models/{id}` answers the one entry whose route key equals the
-percent-decoded single path segment exactly, else a 404 `not_found_error` that
-does not echo the id `Scripts/llm-router.py:_get_models`. Both pass the same
+percent-decoded single path segment exactly, a chat or an image route alike and
+in the same shape (a valid `modality` query does not filter it), else a 404
+`not_found_error` that does not echo the id `Scripts/llm-router.py:_get_models`. Both pass the same
 precheck as a POST, read no body — a `Content-Length` above 0 is a 400,
 `Transfer-Encoding` the POST framing 411 — and never contact a backend.
 
@@ -123,6 +141,19 @@ is not named), and so is an integer literal longer than
 can spend quadratic time on it on a Python without its own digit limit
 `Scripts/llm-router.py:_rt_bounded_int` — and `max_tokens` is an integer from 1 to
 `Scripts/llm-router.py:_RT_MAX_TOKENS_LIMIT` (1000000).
+
+**The media type is per endpoint.** The 415 rule reads one table: the messages
+paths and `/v1/images/generations` take `application/json` only,
+`/v1/images/edits` takes `application/json` or `multipart/form-data`; any other
+media type, and a `Content-Type` sent twice, is a 415 naming the accepted set
+`Scripts/llm-router.py:_RT_ENDPOINT_MEDIA` `Scripts/llm-router.py:_post`. 415
+means only "this media type is not taken here": a multipart body whose
+`boundary` is missing, repeated or malformed is a 400 from the image parser.
+A `multipart/form-data` `Content-Type` on `/v1/messages` is not a 415 but a 400
+`malformed header`, because the stdlib's header parser records multipart defects
+for a header block that has no body, and only the image paths tolerate those
+(*Image endpoints* below); case Q5 pins that as stdlib-dependent
+`tests/test_llm_router.py:group_q`.
 
 **Response head first, then decide.** The router writes its own head only once
 the upstream status (and, for a stream, its `Content-Type`) is known: a non-2xx
@@ -217,7 +248,8 @@ Network settings are flags; routing and secrets are the config. There is no
 | `--allowed-origin` | none | repeatable; an exact `scheme://host[:port]`, http or https, no path, query or trailing slash |
 | `--ready-file` | none | written `0600` and atomically after the bind: `{"port": N, "pid": P}` `Scripts/_mcp_httpfront.py:_http_write_ready_file`; removed on a clean shutdown while it still holds the router's pid `Scripts/_mcp_httpfront.py:_http_remove_ready_file`; a file left in place (another pid, not JSON, unreadable, a symlink) is logged at DEBUG by type only |
 | `--body-limit` | 32 MiB `Scripts/llm-router.py:_ROUTER_BODY_LIMIT` | bytes, inside `Scripts/llm-router.py:_BODY_LIMIT_RANGE` (1 MiB to 256 MiB) |
-| `--max-connections` | `Scripts/llm-router.py:_HTTP_CONNECTION_CAP` (32) | inside `Scripts/llm-router.py:_CONNECTION_CAP_RANGE` (1 to 1024); past it a connection gets a bare 503 and is closed |
+| `--max-connections` | `Scripts/llm-router.py:_HTTP_CONNECTION_CAP` (32) | inside `Scripts/llm-router.py:_CONNECTION_CAP_RANGE` (1 to 1024); past it a connection gets a bare 503 and is closed. Chat and image requests share it |
+| `--max-image-requests` | `Scripts/llm-router.py:_IMAGE_REQUEST_CAP` (4) | image requests in flight at once, inside `Scripts/llm-router.py:_IMAGE_REQUEST_RANGE` (1 to 64); one more is refused at once with a 429 and `Retry-After: 1`, before any upstream contact. It protects chat only while it is below `--max-connections`: a value not below it logs one startup WARNING `Scripts/llm-router.py:main` |
 | `--debug` | off | DEBUG logging to stderr |
 | `--log-file` | none | log to a `0600` file; implies `--debug` |
 
@@ -393,12 +425,12 @@ other key is refused by name `Scripts/llm-router.py:_RT_TOP_KEYS`.
 | `auth_header` | `x-api-key` with an `api_key`, else `none` | `authorization`, `x-api-key` or `none`; anything but `none` needs an `api_key`; `mistral` and `openai` with an `api_key` use `authorization` only; refused on an OAuth profile, whose credential comes from the token store |
 | `forward_headers` | the kind's `DEFAULT_FORWARD` | lower-case names, each in the kind's `FORWARDABLE` (table below) |
 | `connect_timeout` | `Scripts/llm-router.py:_CONNECT_TIMEOUT_S` (10 s) | resolve, connect and TLS handshake under one deadline (the resolver runs on a daemon thread joined with what remains of it; a late answer is a 504 and the thread is abandoned); `0 < x <= 3600` |
-| `idle_timeout` | `Scripts/llm-router.py:_IDLE_TIMEOUT_S` (300 s) | per upstream read; `0 < x <= 3600` |
+| `idle_timeout` | `Scripts/llm-router.py:_IDLE_TIMEOUT_S` (300 s) | per upstream read; `0 < x <= 3600`. It bounds the wait for an answer's head too, and is not a total deadline: a slow image model needs it raised on its backend |
 
 **A route** — `backend` (a configured backend), `model` (the upstream
 model id, 1-256 characters, no control character), `options`, validated by
 the backend kind's `ROUTE_OPTIONS`, and the optional `display_name`, token
-limits and `vision`; an unknown key or option is refused by name
+limits, `vision` and `modality`; an unknown key or option is refused by name
 `Scripts/llm-router.py:_rt_cfg_route` `Scripts/llm-router.py:_RT_ROUTE_KEYS`.
 
 | Key | Default | Rule |
@@ -409,6 +441,7 @@ limits and `vision`; an unknown key or option is refused by name
 | `display_name` | the route key | a string of 1-`Scripts/llm-router.py:_RT_DISPLAY_NAME_LIMIT` (256) characters with no control character; shown by `GET /v1/models` only. Allowed on `default` too, where it is unused |
 | `max_input_tokens`, `max_tokens` | none | integers from `Scripts/llm-router.py:_RT_TOKEN_LIMIT_MIN` to `Scripts/llm-router.py:_RT_TOKEN_LIMIT_MAX`; advertised by `GET /v1/models` (with `context_window`), never enforced |
 | `vision` | `true` | a JSON boolean (`0`, `1`, `"false"`, `null` are refused by path); `false` makes the router answer 400 to any request holding an image block, never strip it — see *Images* under Backends `Scripts/llm-router.py:RouteSpec`. Allowed on `default` too |
+| `modality` | `chat` | `chat` or `image` `Scripts/llm-router.py:_RT_MODALITIES`. An `image` route is served by the two image endpoints only and needs a kind that lists `image` in its adapter's `MODALITIES` (only `openai`), a backend that is not the `openai-oauth` profile ("image generation is not available with Sign in with ChatGPT tokens; use an api_key backend"), and a `model` equal to the route key, because the body is forwarded byte for byte and the upstream reads the client's `model`. The key is refused on `default`, checked on the config path and not on the route's name, so a typo can never send a prompt to an image model `Scripts/llm-router.py:_rt_cfg_route` |
 
 | Kind | Option | Rule |
 |---|---|---|
@@ -437,7 +470,12 @@ from the backend, never copied from the client: `Content-Type:
 application/json`, `Accept` (`text/event-stream` when streaming, else
 `application/json`), `User-Agent: llm-router`, then each client header whose
 name is in the backend's `forward_headers`, then the credential last
-`Scripts/llm-router.py:_rt_upstream_headers`. `Accept-Encoding: identity` and
+`Scripts/llm-router.py:_rt_upstream_headers`. The one exception to the fixed
+`Content-Type` is an image request, whose adapter hands the header builder the
+value the parser rebuilt from validated parts; the builder re-checks it against
+the `content_type` rule of `Scripts/llm-router.py:_RT_HEADER_VALUE_RULES` and
+answers a failure with a 502, as for a bad token
+`Scripts/llm-router.py:Adapter`. `Accept-Encoding: identity` and
 `Content-Length` are added by the one sender `Scripts/llm-router.py:_rt_send`.
 
 | Kind | `FORWARDABLE` | `DEFAULT_FORWARD` | Credential |
@@ -697,6 +735,130 @@ default divisor 4 and about 750 at divisor 8 — a declared quirk, below. There
 is no per-image size limit; an image counts against `--body-limit` like any
 other byte.
 
+## Image endpoints
+
+Two OpenAI-shaped endpoints serve clients other than Claude Code: `POST
+/v1/images/generations` (a JSON body) and `POST /v1/images/edits` (a
+`multipart/form-data` body, or the JSON form whose images are `image_url`
+objects). The router reads only `model` and a few guard fields, forwards the
+client's bytes untouched, and relays a 2xx JSON answer untouched
+`Scripts/llm-router.py:OpenaiAdapter`. Only kind `openai` with an `api_key`
+serves them, through the route key `modality` (route table above); every other
+kind inherits the chat-only defaults of the image hooks
+`Scripts/llm-router.py:Adapter`. Why the design is a route marker, a raw relay and
+a canonical-only sniffer, and what lost, is the image-endpoints addendum of
+[[0028-route-by-model-translate-at-the-edge]].
+
+**Routing is by exact name.** The sniffed `model` is looked up among the route
+keys only, never the `default` route: an unknown model is a 404 `model_not_found`
+`Scripts/llm-router.py:_rt_route_named`. A chat route on an image path is a 400
+"route X is a chat model; use /v1/messages", and an image route on `/v1/messages`
+or count_tokens a 400 naming the two image paths
+`Scripts/llm-router.py:_rt_parse_image_inbound`
+`Scripts/llm-router.py:_rt_parse_inbound`. `stream: true` is a 400 "streaming is
+not supported yet", before any upstream contact. The forwardable-header rule is
+the chat path's, one shared helper `Scripts/llm-router.py:_rt_forwarded_headers`;
+the `openai` kind forwards no client header.
+
+**The envelope is OpenAI's on the image paths.** As soon as the precheck knows
+the path is an image path, every refusal — the bearer 401, Host and Origin 403,
+405, 411, 413, 415, the parser's 400s, the in-flight 429, an upstream failure —
+is `{"error": {"message", "type", "param", "code"}}`, its `type` picked by the
+status (`invalid_request_error`, `requests` for 429, `server_error` for 5xx)
+and its `code` the caller's or the status's default (`invalid_api_key`,
+`rate_limit_exceeded`) `Scripts/llm-router.py:_rt_openai_error_body`
+`Scripts/llm-router.py:_rt_err`. The flag is reset for every request of a
+keep-alive connection `Scripts/llm-router.py:handle_one_request`. Two refusals
+come before the path is known and stay Anthropic-shaped: a header-defect 400 and
+an unknown-path 404 `Scripts/llm-router.py:_precheck`.
+
+**The sniffer is canonical-only.** Because the upstream reads the same bytes the
+router vetted, any spelling the two could read two ways is a 400 naming a field
+and a rule, never content — refused, never resolved
+([[0015-ambiguity-is-the-defect]]) `Scripts/llm-router.py:_rt_image_fields`. It
+is hand-written, since the stdlib's multipart parser left with `cgi` after 3.9
+([[0024-pure-python-39-and-the-stdlib]]), and scans with `bytes.find` and
+`bytes.count`, skipping a part it does not want without copying it
+`Scripts/llm-router.py:_rt_image_multipart_fields`.
+
+- *The `Content-Type`.* `application/json` (a parameter such as `charset` is
+  dropped, since the upstream gets the rebuilt value), or `multipart/form-data`
+  with exactly one parameter, `boundary`, once: 1-70 RFC 2046 characters, a token
+  or quoted, no trailing space; a control character anywhere, a second or an
+  extra parameter is a 400 `Scripts/llm-router.py:_rt_image_ctype`. The
+  upstream is sent a value rebuilt from those parts, never the client's string:
+  the boundary unquoted when it is all token characters, else quoted
+  `Scripts/llm-router.py:_rt_image_canonical_ctype`.
+- *Framing.* A delimiter is CRLF, `--` and the boundary (the first may open the
+  body), followed by CRLF or `--`; a bare `--boundary` inside a line is data. A
+  bare-LF delimiter anywhere — preamble, skipped file data, a field — is a 400, as
+  is a part with an empty body whose header terminator would double as the next
+  delimiter's CRLF; the closing delimiter is required and may be followed by one
+  CRLF only.
+- *Part headers.* Only `Content-Disposition` (exactly once, as
+  `form-data; name="..."[; filename="..."]` in that spelling: no `name*=`, no
+  percent-encoded or backslash-escaped name, a name of printable ASCII without
+  `"`, `%` or `\`) and `Content-Type`; any other header — notably
+  `Content-Transfer-Encoding`, which changes the bytes the upstream sees —, a
+  repeat, a continuation line or a bare CR or LF is a 400. A text part may carry
+  no `Content-Type`, an empty one, `text/plain` or `text/plain; charset=utf-8`
+  and nothing else `Scripts/llm-router.py:_rt_image_part_head`.
+- *Fields.* A wanted name must be a text part — a `filename` on it is a 400 — and
+  appear once; its value is UTF-8 without control characters (the `prompt` may
+  hold tab, CR and LF) `Scripts/llm-router.py:_rt_image_text_ok`. In the JSON form
+  `stream` must be a JSON boolean, `n` an integer and the rest strings, a repeated
+  key is refused by the JSON loader, and a key that case-folds to a wanted name
+  without being spelled so (`Model`, `STREAM`) is a 400
+  `Scripts/llm-router.py:_rt_image_json_fields`.
+- *Vocabularies.* `stream` exactly `true` or `false`; `n` 0-99 with no sign,
+  space or leading zero; `output_format` one of `png`, `jpeg`, `webp`;
+  `response_format` `b64_json` or `url`; `size` `auto` or `WIDTHxHEIGHT`
+  `Scripts/llm-router.py:_rt_image_check_vocab`
+  `Scripts/llm-router.py:_RT_IMAGE_WORDS`. `model` is required, 1-256 characters.
+- *Caps.* At most `Scripts/llm-router.py:_RT_IMAGE_PART_CAP` (64) parts, a part
+  header block of `Scripts/llm-router.py:_RT_IMAGE_PART_HEAD_CAP` (8 KiB), a field
+  value of `Scripts/llm-router.py:_RT_IMAGE_FIELD_CAP` (4 KiB) and a prompt of
+  `Scripts/llm-router.py:_RT_IMAGE_PROMPT_CAP` (32 KiB).
+
+**The precheck tolerates three multipart defects.** A multipart `Content-Type`
+makes the stdlib's header parser look for parts in a body it was never given and
+record `NoBoundaryInMultipartDefect`, `StartBoundaryNotFoundDefect` and
+`MultipartInvariantViolationDefect`. On an image path, and only when the
+`Content-Type`'s main type is `multipart`, those three — matched by class name,
+`email.errors` is not imported — are not a malformed header; any other defect
+still is, and nothing changes on the other paths
+`Scripts/llm-router.py:_RT_MULTIPART_DEFECTS` `Scripts/llm-router.py:_precheck`.
+
+**Forwarding and relay.** The upstream path is a fixed `IMAGE_PATHS` entry per
+endpoint, never built from client input, and the body is `InboundRequest.raw`,
+the client's bytes `Scripts/llm-router.py:OpenaiAdapter`. The request goes out
+through the same single `_rt_send` call as every chat request, with the image
+head in place of the chat one `Scripts/llm-router.py:_post`. The answer is read
+whole under `Scripts/llm-router.py:_UPSTREAM_BODY_LIMIT` and sent as the bytes
+the adapter returns, never re-serialized `Scripts/llm-router.py:_relay_image`
+`Scripts/llm-router.py:_send_raw_json`: a 2xx is relayed untouched when its
+media type is `application/json` and its first non-space byte is `{` — checked,
+not parsed and not scrubbed — and is otherwise a 502. A non-2xx is mapped
+through `Scripts/llm-router.py:_UPSTREAM_STATUS`; 401 and 403 get the fixed
+"backend `<name>` rejected the router's credential" (OpenAI's 401 echoes a
+masked fragment of the key that the exact-secret scrubber cannot match); only
+400, 404, 413, 422 and 429 relay the upstream message, from a JSON body of at
+most 64 KiB, with every non-printable character a space, through the KD-9
+scrubber and a case-insensitive pattern strip of `sk-...` keys, `Bearer`
+credentials, `org-`/`proj-`/`req-`/`sess-` ids and `****abcd` key tails, then
+cut at `Scripts/llm-router.py:_ERROR_TEXT_WIDTH` (300); every other status gets a
+fixed text `Scripts/llm-router.py:_rt_image_error_text`
+`Scripts/llm-router.py:_RT_IMAGE_TEXT_STATUSES`
+`Scripts/llm-router.py:_RT_IMAGE_SECRET_RES`. A 429's `Retry-After` is relayed
+when it is all digits. A failure logs the structure-only `upstream failed:` line.
+
+**The in-flight cap.** Once an image route resolves, the handler takes one slot
+of `--max-image-requests` without blocking, or answers 429 with `Retry-After: 1`
+before any upstream contact; the slot is released in the handler's `finally`
+`Scripts/llm-router.py:_RouterHttpServer` `Scripts/llm-router.py:_post`. Image
+waits and answers up to 64 MiB therefore cannot take every connection slot from
+chat.
+
 ## OAuth: the token store and the write-back
 
 **Where the tokens live.** A logged-in backend's `oauth` object holds the
@@ -780,8 +942,9 @@ within `Scripts/llm-router.py:_HTTP_BODY_TIMEOUT_S` (60 s) in total
 its `100 Continue` only after the bearer and the framing checks pass, never
 from the stdlib before them `Scripts/llm-router.py:handle_expect_100`. A
 forwardable header sent twice, or whose value holds a CR or LF, is a 400
-naming the header `Scripts/llm-router.py:_rt_parse_inbound`. Every refusal is an Anthropic
-envelope with `Connection: close` `Scripts/llm-router.py:_refuse`, and the
+naming the header `Scripts/llm-router.py:_rt_forwarded_headers`. Every refusal is an Anthropic
+envelope — an OpenAI one on an image path once the path is known (*Image
+endpoints* above) — with `Connection: close` `Scripts/llm-router.py:_refuse`, and the
 stdlib's own refusals (400, 414, 431, 501, 505) answer fixed texts so they never
 quote the request line or the method, and carry `nosniff` and `no-store` as
 mcp-proxy's do `Scripts/llm-router.py:send_error`
@@ -881,7 +1044,9 @@ stream and the non-stream collector `tests/test_llm_router.py:group_m`, the
 token store — single-flight refresh, the forced refresh on 401, the shared
 failure, the bounded wait, a login landing mid-refresh, and the learned Mistral
 effort `tests/test_llm_router.py:group_n` — and the `login` subcommand against
-a scripted auth peer `tests/test_llm_router.py:group_o`. K-O run before I and
+a scripted auth peer `tests/test_llm_router.py:group_o`, the `upstream failed:`
+line `tests/test_llm_router.py:group_p` and the image endpoints
+`tests/test_llm_router.py:group_q`. K-Q run before I and
 J, because I sweeps every log the run collected and J compares start-of-run
 snapshots `tests/test_llm_router.py:GROUP_ORDER`. Its case count is declared
 once, per group, in `tests/run.py:SUITES`, and checked against the run; the
@@ -915,6 +1080,29 @@ ignored values `tests/test_llm_router.py:group_k`. The levels and the ignored
 values are written in the test, never read from the module
 `tests/test_llm_router.py:GK_OC_EFFORTS`
 `tests/test_llm_router.py:GK_OC_IGNORED`.
+
+**The image endpoints.** Group Q `tests/test_llm_router.py:group_q`
+`tests/test_llm_router.py:GQ_IDS` runs against an `openai` api_key backend on a
+scripted peer: the `modality` config rules, the OAuth refusal included (Q1);
+generations relayed byte for byte, with a whitespace and key-order quirk in the
+answer a re-serializing router would change (Q2); a multipart edit with an
+awkward quoted boundary and boundary-like bytes in its file part, and the JSON
+edit form, each forwarded byte for byte (Q3, Q4); the per-endpoint 415, the
+boundary 400 and the `/v1/messages` multipart 400 pinned as stdlib-dependent (Q5);
+the wrong-endpoint 400s and the no-default 404 (Q6); `stream` refused (Q7); the
+OpenAI envelope, keep-alive switching included (Q8), and the upstream error
+hygiene with a masked key echo (Q8b); the `/v1/models` additions and the
+`modality` filter (Q9); the sniffer's refusals in-process (Q10); the body limit
+and a 64 MiB answer (Q11); no prompt, base64 or file byte in any log, with
+Q-local sentinels `tests/test_llm_router.py:GQ_SENTINELS`, never the I group's,
+which would sweep a relayed base64 body (Q12); the rebuilt `Content-Type` (Q14); 411 and `Expect` on an upload (Q15); an
+image backend's idle timeout (Q16); the in-flight cap, chat still served while it
+is full (Q17); and an upstream path no client spelling can reach (Q18). Three
+static cases join group J: J42, the chat kinds inherit the image hooks
+`tests/test_llm_router.py:GJ_IMG_HOOKS`; J43, no log or format call receives
+the request, its raw bytes or its fields, and `rec` gets neither key
+`tests/test_llm_router.py:rule_j43`; J44, an upstream image path is only an
+`IMAGE_PATHS[...]` subscript `tests/test_llm_router.py:rule_j44`.
 
 **Deadlines in milliseconds.** A case whose observable is one of the router's
 own deadlines — the ping interval, the relay tick, the pre-auth, header and
@@ -977,7 +1165,11 @@ read before relying on one of them. In brief:
   `Scripts/llm-router.py:_UPSTREAM_BODY_LIMIT`, 64 MiB), plus the parsed
   objects, which are several times the bytes; times `--max-connections`. At the
   defaults the bytes alone are about 6 GiB. Lower `--max-connections` or
-  `--body-limit` to shrink it.
+  `--body-limit` to shrink it. Image answers are the first that come near the
+  64 MiB bound — one peaks near twice it while it is copied — and an edit upload
+  near `--body-limit`, so this is the case that figure describes, not a
+  theoretical one; `--max-image-requests` bounds how many image requests hold
+  such buffers at once, the rest of the connections staying chat's.
 - **A resolver that misses the connect deadline leaves its thread running**
   until the OS resolver gives up; under a stalled resolver such threads pile
   up, one per timed-out request.
@@ -1009,14 +1201,40 @@ read before relying on one of them. In brief:
 - **No per-image size limit;** an image is bounded only by `--body-limit`
   (32 MiB by default).
 - **Passthrough request bodies are equal after parsing, not byte for byte**
-  (the body is re-serialized after the model rewrite).
+  (the body is re-serialized after the model rewrite). The image endpoints are
+  the exception: an image request's body goes upstream byte for byte and a 2xx
+  image answer comes back byte for byte, which is why an image route's `model`
+  must equal its route key — there is no model rewrite to alias it.
 - **No metrics endpoint;** the DEBUG `req` line is the only per-request record,
   and only a POST gets one. A failed upstream call adds the WARNING
   `upstream failed:` line described under Logging; a successful request leaves
   no WARNING and there is no rate limit on that line.
 - **`GET /v1/models` does not paginate.** `limit`, `before_id` and `after_id`
   are accepted and ignored: the whole list comes back with `has_more` false,
-  and every entry's `created_at` is the router's start time, not a model's.
+  and every entry's `created_at` and `created` are the router's start time, not
+  a model's. `modality` is the one query key that changes the answer.
+- **Image routes appear in Claude Code's model picker.** The list carries them by
+  default, for the OpenAI SDK, and the picker sends no `modality` filter; an
+  operator who does not want that runs the image routes in a router of their own.
+- **Image uploads: no chunked body.** A chunked upload is a 411 like any chunked
+  body, and an edit's images are bounded by `--body-limit` only, as in the
+  per-image bullet above — raise it for large edits `Scripts/llm-router.py`.
+- **An image call holds its slot until it ends.** `idle_timeout` is per read, not
+  a total deadline, and nothing notices a departed client on the synchronous
+  image path (the client-gone poll runs in the stream loop only), so the upstream
+  call runs to its end and keeps its connection and its `--max-image-requests`
+  slot.
+- **The image relay trusts the upstream's 2xx.** It checks the media type and the
+  first byte and the size bound, and neither parses nor scrubs the body.
+- **A JSON edit's `image_url` values are fetched by OpenAI,** outside this
+  router's address policy.
+- **The image endpoints are unmeasured live.** No call has reached
+  api.openai.com; whether it accepts the JSON edit form alongside multipart is
+  open, and how its multipart parser reads an odd body is unknown — which is why
+  the sniffer accepts only the canonical spelling rather than guessing the
+  upstream's.
+- **Two refusals on an image path stay Anthropic-shaped:** a header-defect 400
+  and an unknown-path 404, both answered before the path is known.
 - **A stalled resolve is given up, not interrupted.** `getaddrinfo` cannot be
   cut, so a shutdown waits up to one `Scripts/llm-router.py:_RT_TICK_S` for a
   stalled resolve and leaves its thread running, as above. That a

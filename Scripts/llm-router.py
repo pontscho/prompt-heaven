@@ -25,20 +25,28 @@ they always stream upstream and aggregate for a non-stream client, and carry
 reasoning as thinking blocks signed "lrs1.<backend>.". GET /v1/models and
 GET /v1/models/{id} list the config's route keys (with an optional route
 display_name and the route's optional advertised max_input_tokens / max_tokens,
-plus context_window) in the Anthropic model-list shape, never contacting a backend.
+plus context_window) in the Anthropic model-list shape, never contacting a backend; each entry
+also carries the OpenAI model fields (object, created, owned_by) and the route's modality.
 Every answer the client sees is Anthropic-shaped: a JSON body, an SSE stream
 that always closes its envelope, or the {"type":"error","error":{...}}
-envelope. Requires only Python 3.9+ stdlib modules.
+envelope -- except on the image endpoints. A route with `"modality": "image"` (an openai
+backend with an api_key) is served by POST /v1/images/generations and /v1/images/edits (a
+JSON body, or a multipart/form-data one for edits): the router reads `model` and a few
+guard fields, forwards the client's bytes untouched, relays a 2xx JSON answer untouched, and
+answers its own errors in the OpenAI envelope {"error":{message,type,param,code}} (no stream).
+Requires only Python 3.9+ stdlib modules.
 
 Layout: one file, eight units, in file order (each has one reason to change)
 -----------------------------------------------------------------------------
-  1. ConfigError, ApiError, UpstreamError, _STATUS_TO_TYPE, _rt_error_body() -- the error classes and
-     the Anthropic error envelope; plus the pure helpers units 2-5 share: _log_value (generated from
+  1. ConfigError, ApiError, UpstreamError, _STATUS_TO_TYPE, _rt_error_body(), _rt_openai_error_body() --
+     the error classes and the Anthropic and OpenAI (image endpoints) error envelopes; plus the pure helpers units 2-5 share: _log_value (generated from
      Scripts/_mcp_logging.py), _http_token_value (generated from Scripts/_mcp_httpfront.py),
      _rt_dumps(), _rt_loads() and _rt_make_scrubber() (KD-9).
   2. BackendSpec, RouteSpec, RouterConfig, load_config() -- the config schema. Pure: reads, and on
      login/refresh rewrites, one file; never opens a socket.
   3. InboundRequest, _rt_parse_inbound(), _rt_route() -- validate the Anthropic request once; route lookup;
+     _rt_parse_image_inbound(), _rt_image_fields() -- the image endpoints' canonical-only sniffer of
+     model and the guard fields (JSON or multipart), the raw bytes kept for the forward;
      _rt_models_list() / _rt_model_entry() -- the GET /v1/models answer shapes.
   4. The SSE toolkit -- _rt_sse_events() (a line parser) and AnthropicSseEncoder (a pure state machine
      that always closes its envelope).
@@ -153,6 +161,16 @@ addendum the limits of the codex/openai kinds, OAuth and Mistral reasoning)
   * reasoning_effort_map and effort learning are mistral only; learned
     sampling and effort sets last as long as the process.
   * A non-stream answer's dropped_thinking is not on the req line.
+  * Image endpoints: the body is read like any other (Content-Length required, so a chunked upload is
+    a 411) under --body-limit (default 32 MiB: raise it for large edits), and a 2xx answer is held
+    whole under _UPSTREAM_BODY_LIMIT (a 64 MiB answer peaks near twice that while it is copied);
+    --max-image-requests (default 4) bounds how many are in flight, on top of --max-connections,
+    which image and chat requests still share (a value not below --max-connections can refuse
+    nothing: one startup WARNING says so). idle_timeout is per read, not a total deadline, and
+    nothing notices a departed client on this synchronous path: the upstream call runs to its end
+    and holds its slot. The upstream error text is relayed (scrubbed, cut) for 400/404/413/422/429
+    only. The image_url values of a JSON edit are fetched by OpenAI, outside this router's address
+    policy. A header-defect 400 and an unknown-path 404 keep the Anthropic envelope.
 """
 
 import argparse
@@ -180,6 +198,7 @@ import string
 import sys
 import threading
 import time
+import types
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import (
@@ -279,6 +298,8 @@ _ROUTER_BODY_LIMIT = 32 * 1024 * 1024
 _BODY_LIMIT_RANGE = (1 << 20, 256 << 20)
 _HTTP_CONNECTION_CAP = 32         # default --max-connections
 _CONNECTION_CAP_RANGE = (1, 1024)  # accepted --max-connections values
+_IMAGE_REQUEST_CAP = 4            # default --max-image-requests: image requests in flight at once (D10b)
+_IMAGE_REQUEST_RANGE = (1, 64)    # accepted --max-image-requests values
 _HTTP_HEADER_TIMEOUT_S = 10.0     # TOTAL bound on one request line + headers, and per-recv until auth
 # TOTAL header bound while the connection has never authenticated (V3): an
 # unauthenticated socket gives its slot back sooner; never above the header bound.
@@ -329,13 +350,15 @@ class ConfigConflict(ConfigError):
 
 
 class ApiError(Exception):
-    """An Anthropic-shaped refusal (status, error type, message; no secret) -> an error envelope."""
+    """A refusal (status, Anthropic error type, message; no secret) -> an error envelope: the
+    Anthropic one, or the OpenAI one on an image endpoint (which reads `code`, else its status table)."""
 
-    def __init__(self, status: int, err_type: str, message: str):
+    def __init__(self, status: int, err_type: str, message: str, code: Optional[str] = None):
         super().__init__(message)
         self.status = status
         self.err_type = err_type
         self.message = message
+        self.code = code
 
 
 class UpstreamError(Exception):
@@ -396,6 +419,24 @@ _ANTHROPIC_ERROR_TYPES = frozenset({
 def _rt_error_body(err_type: str, message: str) -> dict:
     """The Anthropic error envelope every error answer carries."""
     return {"type": "error", "error": {"type": err_type, "message": message}}
+
+
+# The OpenAI error envelope's `type` and default `code` per router status (image endpoints only).
+_RT_OPENAI_ERRORS = {
+    401: ("invalid_request_error", "invalid_api_key"),
+    429: ("requests", "rate_limit_exceeded"),
+}
+
+
+def _rt_openai_error_body(status: int, message: str, param: Optional[str] = None,
+                          code: Optional[str] = None) -> dict:
+    """The OpenAI error envelope {"error": {message, type, param, code}} an image endpoint answers:
+    the type from the status (400-level invalid_request_error, 429 requests, 5xx server_error), the
+    code the caller's, else the status's default (401 invalid_api_key, 429 rate_limit_exceeded)."""
+    err_type, default_code = _RT_OPENAI_ERRORS.get(
+        status, ("server_error", None) if status >= 500 else ("invalid_request_error", None))
+    return {"error": {"message": message, "type": err_type, "param": param,
+                      "code": code if code is not None else default_code}}
 
 
 def _rt_dumps(obj: Any) -> bytes:
@@ -674,6 +715,7 @@ class RouteSpec(NamedTuple):
     max_input_tokens: Optional[int] = None   # advertised by GET /v1/models only (+ context_window)
     max_tokens: Optional[int] = None         # advertised by GET /v1/models only; never enforced
     vision: bool = True         # False: a request holding any image block is refused 400, never stripped
+    modality: str = "chat"      # "chat" (/v1/messages) | "image" (/v1/images/generations and /edits), D1
 
 
 class _RouterConfigBase(NamedTuple):    # from --config (routing + secrets)
@@ -708,6 +750,7 @@ class RouterSettings(NamedTuple):   # from the command line (network)
     ready_file: Optional[str]
     debug: bool
     log_file: Optional[str]
+    max_image_requests: int = _IMAGE_REQUEST_CAP   # trailing, defaulted: in flight at once (D10b)
 
 
 class _DupKey:
@@ -959,7 +1002,8 @@ _RT_BACKEND_KEYS = frozenset({"kind", "base_url", "allow_private", "allow_loopba
                               "idle_timeout", "allow_cleartext_api_key", "oauth", "identity",
                               "auth_base_url"})
 _RT_ROUTE_KEYS = frozenset({"backend", "model", "options", "display_name",
-                            "max_input_tokens", "max_tokens", "vision"})
+                            "max_input_tokens", "max_tokens", "vision", "modality"})
+_RT_MODALITIES = ("chat", "image")
 _RT_ROUTE_LIMIT_KEYS = ("max_input_tokens", "max_tokens")   # a route's optional advertised caps
 _RT_BACKEND_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")    # the _CHILD_NAME_RE shape
 _RT_AUTH_HEADERS = ("authorization", "x-api-key", "none")
@@ -982,6 +1026,10 @@ _RT_HEADER_VALUE_RULES = {
     "token": re.compile(r"[\x21-\x7e]{1,16384}", re.ASCII),    # == _oauth_token_ok's charset and cap
     "claim": re.compile(r"[A-Za-z0-9_-]{1,128}", re.ASCII),    # chatgpt_account_id, residency
     "identity": re.compile(r"[\x20-\x7e]{1,256}", re.ASCII),   # KD-2 identity values
+    # An image request's rebuilt Content-Type (D9): application/json, or multipart/form-data with the
+    # one boundary parameter, unquoted when it is all token characters, else quoted.
+    "content_type": re.compile(r"application/json|multipart/form-data; boundary="
+                               r"(?:[A-Za-z0-9'+_.-]{1,70}|\"[A-Za-z0-9'()+_,./:=? -]{1,70}\")", re.ASCII),
 }
 
 
@@ -1303,8 +1351,11 @@ def _rt_cfg_route(name: str, entry: Any, backends: Mapping[str, BackendSpec],
     _RT_TOKEN_LIMIT_MIN to _RT_TOKEN_LIMIT_MAX, independent of each other and
     only advertised by GET /v1/models, never enforced; vision, when present, is
     a JSON boolean (default true; false makes the router refuse a request that
-    holds any image block with a 400, see _rt_vision_refusal); options are checked by
-    the backend kind's validators and an unknown option is refused by name.
+    holds any image block with a 400, see _rt_vision_refusal); modality, when present, is
+    "chat" (default) or "image" -- an image route serves /v1/images/generations and /edits
+    only, needs a kind whose adapter lists it in MODALITIES (openai), not the openai-oauth
+    profile, and a route key equal to its model; the key is refused on the default route;
+    options are checked by the backend kind's validators and an unknown option is refused by name.
     """
     if where is None:
         where = f"routes.{_rt_seg(name)}"
@@ -1336,6 +1387,13 @@ def _rt_cfg_route(name: str, entry: Any, backends: Mapping[str, BackendSpec],
     vision = entry.get("vision", True)
     if not isinstance(vision, bool):
         raise ConfigError(f"{where}.vision: must be a boolean")
+    if where == "default" and "modality" in entry:
+        # Keyed on `where`, not RouteSpec.name ("(default)"): an image endpoint never falls back to the
+        # default route, so a typo can not send a prompt to an image model silently.
+        raise ConfigError(f"{where}.modality: not allowed on the default route (image endpoints never use it)")
+    modality = entry.get("modality", "chat")
+    if not isinstance(modality, str) or modality not in _RT_MODALITIES:
+        raise ConfigError(f"{where}.modality: must be chat or image")
     raw = entry.get("options", {})
     if not isinstance(raw, dict):
         raise ConfigError(f"{where}.options: must be an object")
@@ -1347,10 +1405,21 @@ def _rt_cfg_route(name: str, entry: Any, backends: Mapping[str, BackendSpec],
                 raise ConfigError(f"{where}.options.{option}: not sent by this backend's auth mode "
                                   f"(profile {spec.profile})")
     kind = spec.kind
-    options = KIND_CLASSES[kind].validate_options(raw, f"{where}.options")
+    adapter_cls = KIND_CLASSES[kind]
+    if modality not in adapter_cls.MODALITIES:
+        raise ConfigError(f"{where}.modality: kind {kind} does not serve {modality} routes")
+    if modality == "image":
+        if spec.profile == "openai-oauth":
+            raise ConfigError(f"{where}.modality: image generation is not available with Sign in with "
+                              f"ChatGPT tokens; use an api_key backend")
+        if adapter_cls.IMAGE_MODEL_IS_KEY and model != name:
+            # The body is forwarded byte-for-byte (multipart included), so the upstream reads the
+            # client's `model`: the route key must be the upstream model id (D4).
+            raise ConfigError(f"{where}.model: an image route's model must equal its route key")
+    options = adapter_cls.validate_options(raw, f"{where}.options")
     return RouteSpec(name=name, backend=backend, model=model, options=options,
                      display_name=display_name, max_input_tokens=limits["max_input_tokens"],
-                     max_tokens=limits["max_tokens"], vision=vision)
+                     max_tokens=limits["max_tokens"], vision=vision, modality=modality)
 
 
 _RT_TOKEN_HINT = "generate one with secrets.token_urlsafe(32)"
@@ -1671,11 +1740,11 @@ _RT_ROLES = ("user", "assistant", "system")
 
 
 class InboundRequest(NamedTuple):   # unit 3: the validated request, built once
-    """The validated Anthropic request. Keeps the default repr: body and client_headers are
-    client content, so an InboundRequest is NEVER formatted into a log line, an error or an
-    exception text (NFR-3)."""
+    """The validated request (Anthropic, or an image request: see raw, content_type, fields below).
+    Keeps the default repr: body, client_headers, raw and fields are client content, so an
+    InboundRequest is NEVER formatted into a log line, an error or an exception text (NFR-3, J43)."""
 
-    endpoint: str               # "messages" | "count_tokens"
+    endpoint: str               # "messages" | "count_tokens" | "images_generations" | "images_edits"
     requested_model: str        # body["model"] as the client sent it; the model echo of KD-16
     body: dict                  # the parsed Anthropic body (validated minimum, rest untouched)
     stream: bool
@@ -1692,6 +1761,13 @@ class InboundRequest(NamedTuple):   # unit 3: the validated request, built once
     # 400 listed them): set by the handler from the same learned table; a computed effort outside
     # it is remapped (_rt_ms_effort_remap). Empty: nothing learned, the effort sent as computed.
     effort_supported: FrozenSet[str] = frozenset()
+    # An image request (endpoint images_generations | images_edits; body is then just {"model": ...}):
+    # the client's bytes, forwarded as they came, the REBUILT canonical Content-Type (D9, never the
+    # client's string) and the sniffed guard fields (text). raw and fields hold prompts and images, so
+    # they are never formatted into a log line, an error or `rec` (J43). Empty for every chat request.
+    raw: bytes = b""
+    content_type: str = ""
+    fields: Mapping[str, str] = types.MappingProxyType({})      # read-only: the shared default can not be mutated
 
 
 def _rt_bad(field: str, rule: str) -> ApiError:
@@ -1720,24 +1796,63 @@ def _rt_route(cfg: RouterConfig, model: str) -> RouteSpec:
     return route
 
 
-def _rt_model_entry(route: RouteSpec, created_at: str) -> dict:
-    """One Anthropic model object for a named route: the route key is the id,
-    display_name falls back to it. *created_at* is the router's start time
-    (the front owns the clock; this unit never reads one). The route's token
-    limits follow, null when unset: Anthropic's max_input_tokens and max_tokens,
-    plus the non-standard context_window (= max_input_tokens) some clients read."""
+def _rt_route_named(cfg: RouterConfig, model: str) -> RouteSpec:
+    """The route for `model` by exact name only -- an image endpoint never falls back to
+    cfg.default (a typo must not send a prompt to an unintended model): else a 404."""
+    route = cfg.routes.get(model)
+    if route is None:
+        raise ApiError(404, "not_found_error", "model %s is not routed" % _log_value(model),
+                       code="model_not_found")
+    return route
+
+
+def _rt_model_entry(route: RouteSpec, created_at: str, created_epoch: int) -> dict:
+    """One model object for a named route: the route key is the id, display_name
+    falls back to it. *created_at* (ISO) and *created_epoch* (whole seconds) are the
+    router's start time (the front owns the clock; this unit never reads one). The
+    OpenAI fields follow (object, created, owned_by -- the fixed "llm-router", not a
+    backend name -- and the route's modality), then the route's token limits, null when
+    unset: Anthropic's max_input_tokens and max_tokens, plus the non-standard
+    context_window (= max_input_tokens) some clients read."""
     return {"type": "model", "id": route.name, "display_name": route.display_name or route.name,
-            "created_at": created_at, "max_input_tokens": route.max_input_tokens,
+            "created_at": created_at, "object": "model", "created": created_epoch,
+            "owned_by": "llm-router", "modality": route.modality,
+            "max_input_tokens": route.max_input_tokens,
             "max_tokens": route.max_tokens, "context_window": route.max_input_tokens}
 
 
-def _rt_models_list(cfg: RouterConfig, created_at: str) -> dict:
+def _rt_models_list(cfg: RouterConfig, created_at: str, created_epoch: int, modality: str = "all") -> dict:
     """GET /v1/models: one entry per route key in config order, never the default
-    (it has no name). No pagination: always the whole list, has_more false."""
-    data = [_rt_model_entry(route, created_at) for route in cfg.routes.values()]
+    (it has no name); *modality* ("chat" | "image" | "all") keeps only that kind of route.
+    No pagination: always the whole (filtered) list, has_more false."""
+    data = [_rt_model_entry(route, created_at, created_epoch) for route in cfg.routes.values()
+            if modality == "all" or route.modality == modality]
     return {"data": data, "has_more": False,
             "first_id": data[0]["id"] if data else None,
-            "last_id": data[-1]["id"] if data else None}
+            "last_id": data[-1]["id"] if data else None, "object": "list"}
+
+
+def _rt_forwarded_headers(headers: Any, allowed: FrozenSet[str]) -> Dict[str, str]:
+    """The client headers named in *allowed* (a backend's forward_headers), by lower-case name.
+
+    A forwardable header sent more than once is a 400 naming the header, never a value (ADR 0015:
+    ambiguity is the defect), and so is one whose value holds a CR or LF (V29). Shared by the chat
+    and the image parsers."""
+    client_headers: Dict[str, str] = {}
+    for name, value in headers.items():
+        key = name.lower()
+        if key in allowed:
+            if key in client_headers:
+                # A forwardable header sent twice is ambiguous (ADR 0015): refused,
+                # naming the header only -- never either value.
+                raise _rt_bad("header %s" % _log_value(key), "must appear at most once")
+            if "\r" in value or "\n" in value:
+                # An obs-fold continuation or a bare CR survives the stdlib's header
+                # parse and http.client's putheader check; a lenient upstream could
+                # read it as a header of its own (V29). Refused, the value never shown.
+                raise _rt_bad("header %s" % _log_value(key), "must not contain CR or LF")
+            client_headers[key] = value
+    return client_headers
 
 
 def _rt_parse_inbound(endpoint: str, body: Any, headers: Any, cfg: RouterConfig) -> InboundRequest:
@@ -1804,22 +1919,11 @@ def _rt_parse_inbound(endpoint: str, body: Any, headers: Any, cfg: RouterConfig)
             if not isinstance(tool, dict) or not isinstance(tool.get("name"), str):
                 raise _rt_bad("tools.%d" % k, "must be an object with a string name")
     route = _rt_route(cfg, model)
+    if route.modality != "chat":
+        raise _rt_bad("model", "route %s is an image model; use /v1/images/generations or /v1/images/edits"
+                      % _log_value(route.name))
     backend = cfg.backends[route.backend]
-    allowed = backend.forward_headers
-    client_headers = {}
-    for name, value in headers.items():
-        key = name.lower()
-        if key in allowed:
-            if key in client_headers:
-                # A forwardable header sent twice is ambiguous (ADR 0015): refused,
-                # naming the header only -- never either value.
-                raise _rt_bad("header %s" % _log_value(key), "must appear at most once")
-            if "\r" in value or "\n" in value:
-                # An obs-fold continuation or a bare CR survives the stdlib's header
-                # parse and http.client's putheader check; a lenient upstream could
-                # read it as a header of its own (V29). Refused, the value never shown.
-                raise _rt_bad("header %s" % _log_value(key), "must not contain CR or LF")
-            client_headers[key] = value
+    client_headers = _rt_forwarded_headers(headers, backend.forward_headers)
     if not route.vision:
         where = _rt_first_image(body)
         if where is not None:
@@ -1856,6 +1960,294 @@ def _rt_first_image(body: dict) -> Optional[str]:
                     if isinstance(nested, dict) and nested.get("type") == "image":
                         return "%s.content.%d" % (where, k)
     return None
+
+
+# The image endpoints (POST /v1/images/generations and /v1/images/edits). The router reads only
+# `model` and the few guard fields below, and forwards the client's bytes untouched (multipart
+# included): so the sniffer is canonical-only -- a spelling the router and the upstream could read
+# two ways is a 400, never resolved (ADR 0015). Every refusal names a field and a rule, never content.
+_RT_IMAGE_KINDS = {"images_generations": "generations", "images_edits": "edits"}   # endpoint -> IMAGE_PATHS key
+_RT_IMAGE_GUARD_FIELDS = frozenset({"model", "stream", "n", "output_format", "response_format", "size"})
+_RT_IMAGE_FIELD_CAP = 4096          # one sniffed text field, in bytes
+_RT_IMAGE_PROMPT_CAP = 32768        # the prompt field: OpenAI's 32000-character limit, rounded up
+_RT_IMAGE_PART_CAP = 64             # parts in one multipart body (16 images + a mask + ~10 text fields)
+_RT_IMAGE_PART_HEAD_CAP = 8192      # one part's header block, in bytes
+_RT_IMAGE_BOUNDARY_TOKEN_RE = re.compile(r"[A-Za-z0-9'+_.-]{1,70}")             # RFC 2046 bchars that are token chars
+_RT_IMAGE_BOUNDARY_QUOTED_RE = re.compile(r"[A-Za-z0-9'()+_,./:=? -]{1,70}")    # all of RFC 2046's bchars
+# Content-Disposition in its one canonical spelling: a quoted name (printable ASCII without " % \) and an
+# optional quoted filename (no " or \); name*=, percent-encoded or backslash-escaped forms do not match.
+_RT_IMAGE_DISPOSITION_RE = re.compile(
+    r'form-data; name="([\x20\x21\x23\x24\x26-\x5b\x5d-\x7e]{1,256})"'
+    r'(?:; filename="([\x20\x21\x23-\x5b\x5d-\x7e\x80-\xff]{0,1024})")?')
+_RT_IMAGE_N_RE = re.compile(r"0|[1-9][0-9]?")
+_RT_IMAGE_SIZE_RE = re.compile(r"auto|[0-9]{1,5}x[0-9]{1,5}")
+_RT_IMAGE_WORDS = {"stream": ("true", "false"), "output_format": ("png", "jpeg", "webp"),
+                   "response_format": ("b64_json", "url")}
+
+
+def _rt_image_ctype(content_type: str) -> Tuple[str, str]:
+    """(media type, boundary) of an image request's Content-Type.
+
+    application/json (a parameter such as charset is dropped: the upstream is sent the rebuilt
+    value) gives ("application/json", ""). multipart/form-data takes exactly one parameter,
+    boundary, once: 1-70 RFC 2046 characters, a token or quoted, no trailing space; a missing,
+    repeated, extra or malformed one is a 400 (a body-level defect -- 415 is only for a media type
+    the endpoint does not take). A control character anywhere is a 400."""
+    if _rt_has_control(content_type):
+        raise _rt_bad("content-type", "must not contain a control character")
+    head, *params = [part.strip() for part in content_type.split(";")]
+    media = head.lower()
+    if media == "application/json":
+        return media, ""
+    if media != "multipart/form-data":
+        raise ApiError(415, "invalid_request_error", "Content-Type must be application/json or multipart/form-data")
+    if len(params) != 1:
+        raise _rt_bad("content-type", "multipart/form-data takes exactly one parameter, boundary")
+    name, sep, value = params[0].partition("=")
+    if not sep or name.lower() != "boundary":
+        raise _rt_bad("content-type", "the one parameter must be boundary")
+    if len(value) >= 2 and value[0] == '"' and value[-1] == '"':
+        boundary = value[1:-1]
+        valid = _RT_IMAGE_BOUNDARY_QUOTED_RE.fullmatch(boundary) is not None and not boundary.endswith(" ")
+    else:
+        boundary = value
+        valid = _RT_IMAGE_BOUNDARY_TOKEN_RE.fullmatch(boundary) is not None
+    if not valid:
+        raise _rt_bad("content-type", "the boundary must be 1-70 RFC 2046 characters, a token or quoted")
+    return media, boundary
+
+
+def _rt_image_canonical_ctype(media: str, boundary: str) -> str:
+    """The Content-Type the upstream is sent (D9), rebuilt from validated parts and never echoed:
+    application/json, or multipart/form-data with the boundary unquoted when it is all token
+    characters, else quoted."""
+    if not boundary:
+        return media
+    if _RT_IMAGE_BOUNDARY_TOKEN_RE.fullmatch(boundary):
+        return "%s; boundary=%s" % (media, boundary)
+    return '%s; boundary="%s"' % (media, boundary)
+
+
+def _rt_image_text(name: str, data: bytes) -> str:
+    """A sniffed multipart text field: UTF-8 and control-free (the prompt may hold tab and newlines)."""
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        raise _rt_bad(name, "must be UTF-8 text") from None
+    return _rt_image_text_ok(name, text)
+
+
+def _rt_image_text_ok(name: str, text: str) -> str:
+    allowed = "\t\n\r" if name == "prompt" else ""
+    if any((ord(ch) < 0x20 or 0x7F <= ord(ch) <= 0x9F) and ch not in allowed for ch in text):
+        raise _rt_bad(name, "must not contain control characters")
+    return text
+
+
+def _rt_image_part_head(block: bytes) -> Tuple[str, Optional[str]]:
+    """(field name, filename or None) of one part's header block.
+
+    Only Content-Disposition (exactly one, in its canonical spelling) and Content-Type are allowed;
+    any other header -- notably Content-Transfer-Encoding, which changes the bytes the upstream sees --,
+    a duplicate, a continuation line or a bare CR or LF is a 400. A part without a filename (a text
+    field) may carry no Content-Type, an empty one, text/plain or text/plain; charset=utf-8 (any case)
+    and nothing else."""
+    text = block.decode("latin-1")
+    lines = text.split("\r\n") if text else []
+    if any("\r" in line or "\n" in line for line in lines):
+        raise _rt_bad("body", "a part header must end in CRLF")
+    seen = set()
+    disposition: Optional[str] = None
+    part_type: Optional[str] = None
+    for line in lines:
+        key, sep, value = line.partition(":")
+        if not sep or not key or key != key.strip():
+            raise _rt_bad("body", "malformed part header")
+        lname = key.lower()
+        if lname in seen:
+            raise _rt_bad("body", "a part header appears more than once")
+        seen.add(lname)
+        if lname == "content-disposition":
+            disposition = value.strip(" \t")
+        elif lname == "content-type":
+            part_type = value.strip(" \t").lower()
+        else:
+            raise _rt_bad("body", "a part may carry Content-Disposition and Content-Type only")
+    match = _RT_IMAGE_DISPOSITION_RE.fullmatch(disposition) if disposition is not None else None
+    if match is None:
+        raise _rt_bad("body", 'a part needs Content-Disposition: form-data; name="..."[; filename="..."] '
+                              'in that canonical spelling')
+    if match.group(2) is None and part_type not in (None, "", "text/plain", "text/plain; charset=utf-8"):
+        raise _rt_bad("body", "a text part's Content-Type must be text/plain (charset=utf-8) or absent")
+    return match.group(1), match.group(2)
+
+
+def _rt_image_multipart_fields(raw: bytes, boundary: str, names: FrozenSet[str]) -> Dict[str, str]:
+    """The text fields of *names* in a multipart/form-data body, found without parsing the rest.
+
+    A delimiter is CRLF + "--" + boundary (the first may open the body) followed by CRLF or "--"; a
+    bare "--boundary" inside a line is data. A bare-LF + "--" + boundary anywhere (preamble, skipped
+    file data, a field) is a 400: a reader that takes LF alone for a line end would split there, so it
+    is the ambiguity refused, never resolved (ADR 0015) -- as is a part whose empty body lets the
+    header block's own CRLF double as the delimiter's. The closing delimiter is required and may be
+    followed by one CRLF only. A part whose name is not in *names* is skipped without being copied; a
+    part whose name is in *names* must be a text part -- a filename on it is a 400, as is a repeat.
+    Counts and sizes are capped. Scans with bytes.find and bytes.count."""
+    delim = b"--" + boundary.encode("ascii")
+    sep = b"\r\n" + delim
+    if raw.count(b"\n" + delim) != raw.count(sep):
+        raise _rt_bad("body", "a bare-LF delimiter: every boundary delimiter must start with CRLF")
+    if raw.startswith(delim):
+        pos = 0
+    else:
+        at = raw.find(sep)
+        if at < 0:
+            raise _rt_bad("body", "no multipart delimiter for the declared boundary")
+        pos = at + 2
+    fields: Dict[str, str] = {}
+    parts = 0
+    while True:
+        after = pos + len(delim)
+        tail = raw[after:after + 2]
+        if tail == b"--":
+            rest = len(raw) - (after + 2)           # no copy of a (possibly huge) epilogue
+            if rest not in (0, 2) or (rest == 2 and not raw.endswith(b"\r\n")):
+                raise _rt_bad("body", "the closing boundary is followed by an epilogue")
+            return fields
+        if tail != b"\r\n":
+            raise _rt_bad("body", "a boundary delimiter must be followed by CRLF or --")
+        parts += 1
+        if parts > _RT_IMAGE_PART_CAP:
+            raise _rt_bad("body", "more than %d parts" % _RT_IMAGE_PART_CAP)
+        start = after + 2
+        if raw.startswith(b"\r\n", start):
+            block, data_start = b"", start + 2
+        else:
+            head_end = raw.find(b"\r\n\r\n", start, start + _RT_IMAGE_PART_HEAD_CAP + 4)
+            if head_end < 0:
+                raise _rt_bad("body", "a part header block is over %d bytes or unterminated"
+                              % _RT_IMAGE_PART_HEAD_CAP)
+            block, data_start = raw[start:head_end], head_end + 4
+            if raw.startswith(delim, data_start):       # the terminator's 2nd CRLF would double as the delimiter's
+                raise _rt_bad("body", "a part with an empty body shares its CRLF with the next delimiter")
+        name, filename = _rt_image_part_head(block)
+        nxt = raw.find(sep, data_start)
+        if nxt < 0:
+            raise _rt_bad("body", "the closing boundary is missing")
+        if name in names:
+            if filename is not None:
+                raise _rt_bad(name, "must be a text field, not a file part")
+            if name in fields:
+                raise _rt_bad(name, "appears more than once")
+            cap = _RT_IMAGE_PROMPT_CAP if name == "prompt" else _RT_IMAGE_FIELD_CAP
+            if nxt - data_start > cap:
+                raise _rt_bad(name, "is over %d bytes" % cap)
+            fields[name] = _rt_image_text(name, raw[data_start:nxt])
+        pos = nxt + 2
+
+
+def _rt_image_json_fields(raw: bytes, names: FrozenSet[str]) -> Dict[str, str]:
+    """The fields of *names* in a JSON image body, as text: stream a JSON boolean ("true" | "false"), n a
+    JSON integer, the rest strings; _rt_loads refuses a repeated key and a non-finite number, and a key
+    that case-folds to one of *names* without being spelled exactly so ("Model") is a 400."""
+    try:
+        obj = _rt_loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        raise ApiError(400, "invalid_request_error", "request body is not valid JSON") from None
+    if not isinstance(obj, dict):
+        raise ApiError(400, "invalid_request_error", "request body must be a JSON object")
+    # A key that only a case-insensitive reader would take for one of *names* ("Model", "STREAM") is the
+    # ambiguity refused: the guard reads exact lower-case keys, the upstream may not (ADR 0015).
+    for key in obj:
+        low = key.casefold()
+        if low in names and key != low:
+            raise _rt_bad(low, "must be spelled exactly in lower case")
+    fields: Dict[str, str] = {}
+    for name in names:
+        if name not in obj:
+            continue
+        value = obj[name]
+        if name == "stream":
+            if not isinstance(value, bool):
+                raise _rt_bad(name, "must be a boolean")
+            text = "true" if value else "false"
+        elif name == "n":
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise _rt_bad(name, "must be an integer")
+            text = str(value)
+        else:
+            if not isinstance(value, str):
+                raise _rt_bad(name, "must be a string")
+            text = value
+        cap = _RT_IMAGE_PROMPT_CAP if name == "prompt" else _RT_IMAGE_FIELD_CAP
+        try:
+            size = len(text.encode("utf-8"))
+        except UnicodeEncodeError:
+            raise _rt_bad(name, "must be valid UTF-8 text") from None
+        if size > cap:
+            raise _rt_bad(name, "is over %d bytes" % cap)
+        fields[name] = _rt_image_text_ok(name, text)
+    return fields
+
+
+def _rt_image_check_vocab(fields: Mapping[str, str]) -> None:
+    """The guard fields' value sets, one spelling each (stream exactly true or false, n 0-99 with no sign,
+    space or leading zero, output_format and response_format exact lower-case words, size auto or WxH):
+    the router and the upstream must read the same thing."""
+    for name, words in _RT_IMAGE_WORDS.items():
+        if name in fields and fields[name] not in words:
+            raise _rt_bad(name, "must be one of %s" % ", ".join(words))
+    if "n" in fields and _RT_IMAGE_N_RE.fullmatch(fields["n"]) is None:
+        raise _rt_bad("n", "must be an integer from 0 to 99 with no sign, space or leading zero")
+    if "size" in fields and _RT_IMAGE_SIZE_RE.fullmatch(fields["size"]) is None:
+        raise _rt_bad("size", "must be auto or WIDTHxHEIGHT")
+
+
+def _rt_image_fields(content_type: str, raw: bytes, wanted: FrozenSet[str] = frozenset()) -> Dict[str, str]:
+    """model and the guard fields (stream, n, output_format, response_format, size), plus the *wanted*
+    ones, of an image request body as text: a JSON object, or a multipart/form-data body. `model` is
+    required (1-_RT_MODEL_LIMIT characters); a malformed body, boundary or value is an ApiError 400."""
+    media, boundary = _rt_image_ctype(content_type)
+    names = _RT_IMAGE_GUARD_FIELDS | wanted
+    fields = _rt_image_json_fields(raw, names) if media == "application/json" \
+        else _rt_image_multipart_fields(raw, boundary, names)
+    model = fields.get("model")
+    if model is None:
+        raise _rt_bad("model", "is required")
+    if not 1 <= len(model) <= _RT_MODEL_LIMIT:
+        raise _rt_bad("model", "must be 1-%d characters" % _RT_MODEL_LIMIT)
+    _rt_image_check_vocab(fields)
+    return fields
+
+
+def _rt_parse_image_inbound(endpoint: str, content_type: str, raw: bytes, headers: Any,
+                            cfg: RouterConfig) -> InboundRequest:
+    """Validate an image request (endpoint images_generations | images_edits) and build its InboundRequest.
+
+    The model is sniffed (_rt_image_fields) and looked up by exact name only -- an unknown model is a 404,
+    never the default route; a chat route is a 400; a JSON edit to a kind that takes multipart only is a
+    400; stream true is a 400 (not supported yet). The body is not parsed further: InboundRequest.raw
+    is the client's bytes and .content_type the rebuilt canonical value (D9). Headers follow the chat
+    rule (_rt_forwarded_headers)."""
+    media, boundary = _rt_image_ctype(content_type)
+    fields = _rt_image_fields(content_type, raw)
+    model = fields["model"]
+    route = _rt_route_named(cfg, model)
+    if route.modality != "image":
+        raise _rt_bad("model", "route %s is a chat model; use /v1/messages" % _log_value(route.name))
+    backend = cfg.backends[route.backend]
+    adapter_cls = KIND_CLASSES[backend.kind]
+    if endpoint == "images_edits" and media == "application/json" and not adapter_cls.IMAGE_EDIT_JSON:
+        raise _rt_bad("content-type", "this route accepts multipart edits only")
+    extra = adapter_cls.IMAGE_FIELDS - _RT_IMAGE_GUARD_FIELDS
+    if extra:
+        fields = _rt_image_fields(content_type, raw, extra)
+    if fields.get("stream") == "true":
+        raise _rt_bad("stream", "streaming is not supported yet")
+    client_headers = _rt_forwarded_headers(headers, backend.forward_headers)
+    return InboundRequest(endpoint=endpoint, requested_model=model, body={"model": model}, stream=False,
+                          route=route, backend=backend, client_headers=client_headers, scrub=cfg.scrub,
+                          raw=raw, content_type=_rt_image_canonical_ctype(media, boundary), fields=fields)
 
 
 # ---------------------------------------------------------------------------
@@ -2261,13 +2653,25 @@ class Adapter:
     NotImplementedError, so a kind without them is never in ADAPTERS. The two
     hooks upstream_head and stream_policy have safe defaults (P1) that keep
     every kind's behaviour as it was: no Accept override, no extra headers,
-    the _SSE_LINE_LIMIT line cap and a required text/event-stream answer.
+    the _SSE_LINE_LIMIT line cap and a required text/event-stream answer. The image hooks
+    (image_request, image_head, image_response) and the MODALITIES / IMAGE_* attributes are
+    for a kind that serves `modality: image` routes (openai); a chat kind inherits them unchanged.
     """
 
     kind: str = ""
     FORWARDABLE: FrozenSet[str] = frozenset()
     DEFAULT_FORWARD: FrozenSet[str] = frozenset()
     ROUTE_OPTIONS: Mapping[str, _RtOptionValidator] = {}
+    # The image endpoints (D1): the route modalities this kind serves, its upstream path per endpoint
+    # kind ("generations" | "edits"; the ONLY source of an image path, J44), the extra request fields
+    # the sniffer reads for it (beyond the guard fields), whether it takes a JSON edit body, and
+    # whether the route key must equal the upstream model (the body is forwarded byte-for-byte).
+    # A chat kind inherits all of it and the three hooks below untouched (J42).
+    MODALITIES: FrozenSet[str] = frozenset({"chat"})
+    IMAGE_PATHS: Mapping[str, str] = {}
+    IMAGE_FIELDS: FrozenSet[str] = frozenset()
+    IMAGE_EDIT_JSON: bool = False
+    IMAGE_MODEL_IS_KEY: bool = True
 
     @classmethod
     def validate_options(cls, options: dict, where: str) -> dict:
@@ -2300,6 +2704,22 @@ class Adapter:
                       cred: Optional[Credential]) -> Tuple[Optional[str], Tuple[Tuple[str, str], ...]]:
         """(Accept override or None, extra (name, value) header pairs) for the upstream request."""
         return None, ()
+
+    def image_request(self, inbound: InboundRequest) -> Tuple[str, bytes]:
+        """(path, body_bytes) to POST upstream for an image endpoint: IMAGE_PATHS[...] and inbound.raw."""
+        raise NotImplementedError
+
+    def image_head(self, inbound: InboundRequest,
+                   cred: Optional[Credential]) -> Tuple[Optional[str], Tuple[Tuple[str, str], ...]]:
+        """upstream_head for an image request: the rebuilt Content-Type (D9) as a content-type pair,
+        which _rt_upstream_headers re-checks and puts in the Content-Type slot; no Accept override."""
+        return None, (("content-type", inbound.content_type),)
+
+    def image_response(self, inbound: InboundRequest, status: int, body: bytes,
+                       content_type: str) -> Tuple[int, bytes]:
+        """Map a whole upstream image answer to (status, body bytes). *content_type* is the upstream
+        Content-Type header value (the hook cannot see the response head)."""
+        raise NotImplementedError
 
     def stream_policy(self, inbound: InboundRequest) -> StreamPolicy:
         """The front's stream limits for this request; the base keeps today's behaviour."""
@@ -4875,8 +5295,55 @@ class CodexAdapter(ResponsesAdapter):
     }
 
 
+# An image answer's upstream error text is relayed only for the statuses whose message is about the
+# request (S3); 401 and 403 get the fixed credential wording (OpenAI's 401 echoes a masked fragment of
+# the key, which the exact-secret scrubber can not match), every other status a fixed per-status text.
+_RT_IMAGE_TEXT_STATUSES = frozenset({400, 404, 413, 422, 429})
+# Case-insensitive: an sk-... key, a Bearer credential, an OpenAI org-/proj-/req-/sess- id, and the
+# masked tail of a key ("****abcd") as an echoing 400 or 429 writes them.
+_RT_IMAGE_SECRET_RES = (re.compile(r"sk-[A-Za-z0-9_*.-]{4,}", re.I), re.compile(r"Bearer\s+\S+", re.I),
+                        re.compile(r"\b(?:org|proj|req|sess)[-_][A-Za-z0-9_-]{3,}", re.I),
+                        re.compile(r"\*{3,}[A-Za-z0-9]{2,}"))
+_RT_JSON_LEAD_RE = re.compile(rb"[ \t\r\n]*")
+
+
+def _rt_image_error_text(inbound: InboundRequest, status: int, body: bytes) -> str:
+    """The message of an upstream non-2xx image answer as the client may read it.
+
+    Fixed ("backend <n> answered <status>") unless the status is in _RT_IMAGE_TEXT_STATUSES and the
+    body is a JSON object of at most _RT_LEARN_BODY_LIMIT bytes with a string message (error.message,
+    error as a string, or message): then that text with control characters turned to spaces, run
+    through the KD-9 scrubber and the _RT_IMAGE_SECRET_RES pattern strip (sk-..., Bearer ..., org-/proj-/
+    req-/sess- ids, ****abcd key tails; any case), whitespace collapsed and cut at
+    _ERROR_TEXT_WIDTH. Never logged."""
+    fixed = "backend %s answered %d" % (inbound.backend.name, status)
+    if status not in _RT_IMAGE_TEXT_STATUSES or len(body) > _RT_LEARN_BODY_LIMIT:
+        return fixed
+    try:
+        obj = _rt_loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        return fixed
+    message: Any = None
+    if isinstance(obj, dict):
+        err = obj.get("error")
+        if isinstance(err, dict):
+            message = err.get("message")
+        elif isinstance(err, str):
+            message = err
+        if not isinstance(message, str):
+            message = obj.get("message")
+    if not isinstance(message, str):
+        return fixed
+    text = inbound.scrub("".join(ch if ch.isprintable() else " " for ch in message))
+    for pattern in _RT_IMAGE_SECRET_RES:
+        text = pattern.sub("[redacted]", text)
+    return " ".join(text.split())[:_ERROR_TEXT_WIDTH] or fixed
+
+
 class OpenaiAdapter(ResponsesAdapter):
-    """kind openai: the platform Responses endpoint (profiles openai-oauth / openai-apikey)."""
+    """kind openai: the platform Responses endpoint (profiles openai-oauth / openai-apikey), and, with
+    an api_key backend, the image endpoints: the client's generations and edits (multipart or JSON)
+    bytes go to /v1/images/... untouched and the 2xx JSON comes back untouched (raw relay, NFR-3)."""
 
     kind = "openai"
     ROUTE_OPTIONS: Mapping[str, _RtOptionValidator] = {
@@ -4887,6 +5354,35 @@ class OpenaiAdapter(ResponsesAdapter):
         "top_p": _RT_TOP_P,
         "max_tokens_cap": _rt_opt_int(1),
     }
+    MODALITIES = frozenset({"chat", "image"})
+    IMAGE_PATHS = {"generations": "/v1/images/generations", "edits": "/v1/images/edits"}
+    IMAGE_EDIT_JSON = True
+
+    def image_request(self, inbound: InboundRequest) -> Tuple[str, bytes]:
+        """The fixed upstream path of the endpoint (never built from client input) and the client's bytes."""
+        return self.IMAGE_PATHS[_RT_IMAGE_KINDS[inbound.endpoint]], inbound.raw
+
+    def image_response(self, inbound: InboundRequest, status: int, body: bytes,
+                       content_type: str) -> Tuple[int, bytes]:
+        """A 2xx whose Content-Type is application/json and whose body starts with `{` is relayed as
+        it came (a different media type or lead byte is a 502); a non-2xx is an OpenAI error envelope:
+        the status through _UPSTREAM_STATUS, the fixed credential text for 401/403, otherwise
+        _rt_image_error_text."""
+        name = inbound.backend.name
+        if 200 <= status < 300:
+            media = content_type.split(";", 1)[0].strip().lower()
+            lead = _RT_JSON_LEAD_RE.match(body).end()
+            if media != "application/json" or body[lead:lead + 1] != b"{":
+                return 502, _rt_dumps(_rt_openai_error_body(
+                    502, "backend %s answered with a body that is not a JSON object" % name))
+            return status, body
+        mapped = _UPSTREAM_STATUS.get(status, 502)
+        if status in (401, 403):
+            log.warning("upstream credential rejected: backend %s", _log_value(name))
+            text = "backend %s rejected the router's credential" % name
+        else:
+            text = _rt_image_error_text(inbound, status, body)
+        return mapped, _rt_dumps(_rt_openai_error_body(mapped, text))
 
 
 class _RtKindRow(NamedTuple):
@@ -6911,7 +7407,9 @@ def _rt_upstream_headers(inbound: Any, head: Optional[Tuple[Optional[str], Tuple
     Duck-typed on inbound.backend, inbound.client_headers and inbound.stream;
     *head* is the adapter's upstream_head(inbound, cred) answer (accept or None,
     extra pairs) and *cred* the token store's Credential, both optional.
-    Order: Content-Type, Accept (head's accept when not None, else
+    Order: Content-Type (application/json, or the `content-type` pair of head's
+    extras when present -- an image request's rebuilt value, which must pass the
+    `content_type` rule or the call is a 502), Accept (head's accept when not None, else
     text/event-stream when streaming, else application/json), User-Agent (the
     `user-agent` pair of head's extras when present, else "llm-router"), then
     each client header whose lower-case name is in backend.forward_headers
@@ -6928,13 +7426,20 @@ def _rt_upstream_headers(inbound: Any, head: Optional[Tuple[Optional[str], Tuple
     if accept is None:
         accept = "text/event-stream" if inbound.stream else "application/json"
     user_agent = "llm-router"
+    content_type = "application/json"
     rest: List[Tuple[str, str]] = []
     for name, value in extra:
         if name.lower() == "user-agent":
             user_agent = value
+        elif name.lower() == "content-type":
+            # An image request's rebuilt value (D9): checked again here, a failure is a 502 like a bad token.
+            if not _rt_header_value_ok(value, "content_type"):
+                raise UpstreamError(502, "api_error", "backend %s: the content type is not a valid header value"
+                                    % backend.name)
+            content_type = value
         else:
             rest.append((name, value))
-    headers = [("Content-Type", "application/json"),
+    headers = [("Content-Type", content_type),
                ("Accept", accept),
                ("User-Agent", user_agent)]
     allowed = backend.forward_headers
@@ -7203,6 +7708,9 @@ class _RouterHttpServer(ThreadingHTTPServer):
         self.settings = settings
         self.cfg = cfg
         self.conn_sem = threading.BoundedSemaphore(settings.max_connections)
+        # Image requests in flight (D10b): taken without blocking once an image route resolves, so a
+        # burst of 64 MiB answers can not hold every connection slot; the 429 comes before any upstream contact.
+        self.image_sem = threading.BoundedSemaphore(settings.max_image_requests)
         self.closing = threading.Event()
         self.loopback = ipaddress.IPv4Address(settings.bind).is_loopback
         # Raw upstream sockets, every one from its connect on -- a model call's
@@ -7220,8 +7728,11 @@ class _RouterHttpServer(ThreadingHTTPServer):
         # Running handler threads, for the shutdown drain.
         self.active = 0
         self.active_cond = threading.Condition()
-        # GET /v1/models's created_at for every entry: the start time, second precision, UTC.
-        self.started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        # GET /v1/models's created_at (ISO) and created (epoch seconds) for every entry: the start
+        # time, second precision, UTC, both from one clock read so the two agree.
+        started = time.time()
+        self.started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(started))
+        self.started_epoch = int(started)
         # The learned sampling drop: (backend name, upstream model) -> the sampling names that
         # model refused (an upstream 400 "Unsupported parameter"), for the process lifetime.
         # Keyed by configured names only, so bounded by the config's routes; under sampling_lock.
@@ -7373,17 +7884,29 @@ _RT_STDLIB_REFUSAL = {
 # The fixed paths the router answers -> the endpoint name the hub dispatches on.
 # /v1/models/{id} is the one variable path: _rt_front_endpoint names it "model".
 _ENDPOINTS = {"/v1/messages": "messages", "/v1/messages/count_tokens": "count_tokens",
-              "/v1/models": "models"}
+              "/v1/models": "models", "/v1/images/generations": "images_generations",
+              "/v1/images/edits": "images_edits"}
 _RT_MODELS_PREFIX = "/v1/models/"
 _RT_GET_ENDPOINTS = frozenset({"models", "model"})     # GET only; every other endpoint is POST only
+# The image endpoints: OpenAI-shaped errors (D2), the Content-Types each takes (D8), no query at all,
+# the in-flight image cap (D10b) and the raw relay (D3). Derived from the unit-3 table the adapters index.
+_RT_IMAGE_ENDPOINTS = frozenset(_RT_IMAGE_KINDS)
+_RT_ENDPOINT_MEDIA = {"messages": ("application/json",), "count_tokens": ("application/json",),
+                      "images_generations": ("application/json",),
+                      "images_edits": ("application/json", "multipart/form-data")}
 
 # G-M1 DEFAULT: the query strings a client may send. Replace with exactly the set
 # M1 records once it is measured; anything else is a 404.
 _RT_ALLOWED_QUERIES = frozenset({"", "beta=true"})
+_RT_IMAGE_ALLOWED_QUERIES = frozenset({""})            # the image endpoints take no query
+# The header-parser defects (by class name; email.errors is not imported) a multipart Content-Type records
+# on a header block that has no body: tolerated on the image paths only (_precheck).
+_RT_MULTIPART_DEFECTS = frozenset({"NoBoundaryInMultipartDefect", "StartBoundaryNotFoundDefect",
+                                   "MultipartInvariantViolationDefect"})
 
-# The query keys GET /v1/models[/{id}] accepts (values ignored: no pagination);
-# any other key is a 400.
-_RT_MODELS_QUERY_KEYS = frozenset({"limit", "before_id", "after_id", "beta"})
+# The query keys GET /v1/models[/{id}] accepts (values ignored: no pagination, except
+# modality, which filters the list: chat, image or all); any other key is a 400.
+_RT_MODELS_QUERY_KEYS = frozenset({"limit", "before_id", "after_id", "beta", "modality"})
 
 
 def _rt_front_endpoint(path: str) -> Tuple[Optional[str], Optional[str]]:
@@ -7410,6 +7933,20 @@ def _rt_models_query_ok(query: str) -> bool:
     except ValueError:
         return False
     return all(key in _RT_MODELS_QUERY_KEYS for key, _value in pairs)
+
+
+def _rt_models_modality(query: str) -> Optional[str]:
+    """The ?modality= filter of a GET /v1/models[/{id}] query -- "chat", "image" or "all"
+    (the default when absent) -- or None when it is repeated or any other value (a 400:
+    ambiguity is refused, ADR 0015). Call it after _rt_models_query_ok."""
+    try:
+        pairs = urllib.parse.parse_qsl(query, keep_blank_values=True, strict_parsing=True) if query else []
+    except ValueError:
+        return None
+    values = [value for key, value in pairs if key == "modality"]
+    if not values:
+        return "all"
+    return values[0] if len(values) == 1 and values[0] in ("chat", "image", "all") else None
 
 _RT_MISPLACED_TOKEN = "the router token must appear only in the Authorization header"
 
@@ -7438,8 +7975,13 @@ class _RouterHandler(BaseHTTPRequestHandler):
         stock.close()
         # True once a request on this connection passed _precheck (V3).
         self._rt_authed = False
+        # True while the request in hand is for an image path: its errors are OpenAI-shaped (D2).
+        self._rt_image = False
 
     def handle_one_request(self) -> None:
+        # One handler serves every request of a keep-alive connection: the envelope flag is
+        # per request, reset here so a request whose line fails before _precheck is Anthropic-shaped.
+        self._rt_image = False
         # Every keep-alive request starts in the header phase again: request
         # line + headers within _HTTP_HEADER_TIMEOUT_S in TOTAL (F8). A
         # connection that never authenticated gets _HTTP_PREAUTH_TIMEOUT_S (V3):
@@ -7506,9 +8048,16 @@ class _RouterHandler(BaseHTTPRequestHandler):
                 command = "<other>"
             log.debug("http %s %s", _log_value(command), shown)
 
+    def _rt_err(self, status: int, err_type: str, message: str, code: Optional[str] = None) -> dict:
+        """The error envelope of the request in hand: the OpenAI one on an image path (the status picks
+        its type; *code* overrides the status's default code), else the Anthropic one with *err_type*."""
+        if getattr(self, "_rt_image", False):
+            return _rt_openai_error_body(status, message, code=code)
+        return _rt_error_body(err_type, message)
+
     def _refuse(self, status: int, err_type: Optional[str] = None, message: str = "",
                 extra_headers=()) -> None:
-        """Answer with the Anthropic error envelope and close: used for every
+        """Answer with the error envelope (_rt_err) and close: used for every
         response sent before the body is consumed, so unread body bytes are never
         parsed as the next request. A HEAD gets the head only (Content-Length: 0).
 
@@ -7524,7 +8073,7 @@ class _RouterHandler(BaseHTTPRequestHandler):
         if getattr(self, "request_version", None) == "HTTP/0.9":
             self.request_version = "HTTP/1.1"
         head_only = getattr(self, "command", None) == "HEAD"
-        body = b"" if head_only else _rt_dumps(_rt_error_body(err_type or _STATUS_TO_TYPE[status], message))
+        body = b"" if head_only else _rt_dumps(self._rt_err(status, err_type or _STATUS_TO_TYPE[status], message))
         self._rt_note(status, len(body))
         self.send_response(status)
         for name, value in extra_headers:
@@ -7562,6 +8111,18 @@ class _RouterHandler(BaseHTTPRequestHandler):
             log.warning("http answer was not JSON-serialisable: %s", type(exc).__name__)
             status = 500
             body = _rt_dumps(_rt_error_body("api_error", "internal error"))
+        self._rt_note(status, len(body))
+        self.send_response(status)
+        for name, value in extra_headers:
+            self.send_header(name, value)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_raw_json(self, status: int, body: bytes, extra_headers=()) -> None:
+        """One complete JSON answer whose bytes are already serialised (an image answer relayed
+        as the upstream sent it, D3): _send_json without the dumps."""
         self._rt_note(status, len(body))
         self.send_response(status)
         for name, value in extra_headers:
@@ -7634,8 +8195,10 @@ class _RouterHandler(BaseHTTPRequestHandler):
                     _log_value(reason), _log_value(up_ms))
 
     def _precheck(self) -> Optional[str]:
-        """The endpoint ("messages" | "count_tokens" | "models" | "model"), or
-        None after refusing; for "model" the still-encoded id is _rt_model_id.
+        """The endpoint ("messages" | "count_tokens" | "images_generations" | "images_edits" |
+        "models" | "model"), or None after refusing; for "model" the still-encoded id is
+        _rt_model_id. Sets self._rt_image (the request is for an image path) as soon as the
+        path is known: from then on a refusal is OpenAI-shaped. The image paths take no query (404).
 
         Looks at the request line and the headers ONLY -- never the body, so an
         unauthenticated client cannot make the router read or wait for its
@@ -7647,15 +8210,24 @@ class _RouterHandler(BaseHTTPRequestHandler):
         an unknown key a 400); on the messages paths by _RT_ALLOWED_QUERIES (404).
         """
         settings = self.server.settings
-        if self.headers.defects:
-            self._refuse(400, message="malformed header")
-            return None
+        self._rt_image = False       # per request on a keep-alive connection (D2); set once the path is known
         raw_path = self.path or ""
         path, _sep, query = raw_path.partition("?")
+        # A multipart Content-Type makes the stdlib's header parser look for parts in a body it was never
+        # given and record these defects: they say nothing about the headers, so on the image paths (the
+        # only ones that take multipart) they are not a malformed header. Anywhere else nothing changes.
+        # They can only arise from a multipart/* Content-Type, so the tolerance needs that too: any other
+        # Content-Type with a defect is a malformed header.
+        tolerated = _RT_MULTIPART_DEFECTS if _ENDPOINTS.get(path) in _RT_IMAGE_ENDPOINTS \
+            and self.headers.get_content_maintype() == "multipart" else frozenset()
+        if any(type(defect).__name__ not in tolerated for defect in self.headers.defects):
+            self._refuse(400, message="malformed header")
+            return None
         endpoint, self._rt_model_id = _rt_front_endpoint(path)
         if endpoint is None:
             self._refuse(404, message="not found")
             return None
+        self._rt_image = endpoint in _RT_IMAGE_ENDPOINTS
         if self.server.loopback:
             hosts = self.headers.get_all("Host") or []
             port = self.server.server_port
@@ -7691,9 +8263,9 @@ class _RouterHandler(BaseHTTPRequestHandler):
             return None
         if endpoint in _RT_GET_ENDPOINTS:
             if not _rt_models_query_ok(query):
-                self._refuse(400, message="query: only limit, before_id, after_id and beta are accepted")
+                self._refuse(400, message="query: only limit, before_id, after_id, beta and modality are accepted")
                 return None
-        elif query not in _RT_ALLOWED_QUERIES:
+        elif query not in (_RT_IMAGE_ALLOWED_QUERIES if self._rt_image else _RT_ALLOWED_QUERIES):
             self._refuse(404, message="not found")
             return None
         self._rt_authed = True
@@ -7732,9 +8304,13 @@ class _RouterHandler(BaseHTTPRequestHandler):
         if srv.closing.is_set():
             self._refuse(529, message="router shutting down")
             return
+        image = endpoint in _RT_IMAGE_ENDPOINTS
         ok, ctype = self._single_header("Content-Type")
-        if not ok or (ctype or "").split(";", 1)[0].strip().lower() != "application/json":
-            self._refuse(415, message="Content-Type must be application/json")
+        media_types = _RT_ENDPOINT_MEDIA[endpoint]
+        if not ok or (ctype or "").split(";", 1)[0].strip().lower() not in media_types:
+            # 415: this media type is not allowed on this endpoint. A multipart body with a missing
+            # or malformed boundary is a body-level defect, a 400 from the image parser.
+            self._refuse(415, message="Content-Type must be %s" % " or ".join(media_types))
             return
         # G-M1 DEFAULT: no chunked decoder until M1 shows a client sending it.
         if "Transfer-Encoding" in self.headers:
@@ -7772,32 +8348,47 @@ class _RouterHandler(BaseHTTPRequestHandler):
         if len(raw) != length:
             self.close_connection = True   # short body: the peer is gone or lying
             return
-        try:
-            body = _rt_loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, ValueError, RecursionError):
-            self._refuse(400, message="request body is not valid JSON")
-            return
-        if not isinstance(body, dict):
-            self._refuse(400, message="request body must be a JSON object")
-            return
+        body: Any = None
+        if not image:          # an image body is the parser's: raw bytes in, a JSON object or multipart out
+            try:
+                body = _rt_loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, ValueError, RecursionError):
+                self._refuse(400, message="request body is not valid JSON")
+                return
+            if not isinstance(body, dict):
+                self._refuse(400, message="request body must be a JSON object")
+                return
         rec = self._rt_rec
         rec["endpoint"] = endpoint
         rec["in"] = length
         inbound: Optional[InboundRequest] = None
         adapter: Optional[Adapter] = None
         sent: Any = None                 # the last upstream connection: untracked in finally (R-0095)
+        slot = False                     # an in-flight image slot is held (released in finally, D10b)
         try:
-            inbound = _rt_parse_inbound(endpoint, body, self.headers, srv.cfg)
+            if image:
+                inbound = _rt_parse_image_inbound(endpoint, ctype or "", raw, self.headers, srv.cfg)
+            else:
+                inbound = _rt_parse_inbound(endpoint, body, self.headers, srv.cfg)
             backend = inbound.backend
             rec["route"], rec["kind"], rec["stream"] = inbound.route.name, backend.kind, int(inbound.stream)
             rec["backend"] = backend.name
+            if image:
+                if not srv.image_sem.acquire(blocking=False):
+                    # Refused at once, before any upstream contact: image traffic (long waits, answers
+                    # up to _UPSTREAM_BODY_LIMIT) can not take every connection slot from chat.
+                    self._send_json(429, self._rt_err(429, "rate_limit_error",
+                                                      "too many image requests in flight; retry shortly"),
+                                    (("retry-after", "1"),))
+                    return
+                slot = True
             adapter = ADAPTERS.get(backend.kind)
             if adapter is None:
                 # Unreachable: ADAPTERS and KIND_CLASSES derive from the same
                 # _RT_KIND_TABLE rows. Kept as the guard for a kind that loads
                 # without an adapter: it is answered 501 rather than half-served.
-                self._send_json(501, _rt_error_body("api_error", "backend kind %s is not wired yet"
-                                                    % backend.kind))
+                self._send_json(501, self._rt_err(501, "api_error", "backend kind %s is not wired yet"
+                                                  % backend.kind))
                 return
             learns = endpoint == "messages" and adapter.learns_sampling(inbound)
             if learns:
@@ -7813,6 +8404,8 @@ class _RouterHandler(BaseHTTPRequestHandler):
                     self._send_json(200, local)
                     return
                 path, up_body = local
+            elif image:
+                path, up_body = adapter.image_request(inbound)
             else:
                 path, up_body = adapter.upstream_request(inbound)
             # The credential, then the ONE send; an OAuth profile's first 401 closes the
@@ -7835,7 +8428,9 @@ class _RouterHandler(BaseHTTPRequestHandler):
                 # R-0095: the socket is in the shutdown sweep from its connect on; every
                 # path that closes conn below (or the finally) also untracks it.
                 conn, resp = _rt_send(inbound.backend, path,
-                                      _rt_upstream_headers(inbound, adapter.upstream_head(inbound, cred), cred),
+                                      _rt_upstream_headers(inbound, (adapter.image_head if image
+                                                                     else adapter.upstream_head)(inbound, cred),
+                                                           cred),
                                       up_body, track=srv.track)
                 sent = conn
                 refresh = False
@@ -7881,6 +8476,8 @@ class _RouterHandler(BaseHTTPRequestHandler):
                 rec["effort"] = adapter.effort_remapped(inbound)
             if read is not None:
                 self._answer_upstream_json(adapter, inbound, *read)
+            elif image:
+                self._relay_image(conn, resp, adapter, inbound)
             elif inbound.stream and endpoint == "messages":
                 self._relay_stream(conn, resp, adapter.stream_translator(inbound), inbound)
             else:
@@ -7900,17 +8497,20 @@ class _RouterHandler(BaseHTTPRequestHandler):
                 # R-0095: the shutdown sweep cut this upstream call (connect, head or body):
                 # whatever the transport saw, the answer is the router's own 529.
                 self.close_connection = True
-                self._send_json(529, _rt_error_body("overloaded_error", _RT_SHUTTING_DOWN))
+                self._send_json(529, self._rt_err(529, "overloaded_error", _RT_SHUTTING_DOWN))
                 return
-            self._send_json(exc.status, _rt_error_body(exc.err_type, exc.message))
+            self._send_json(exc.status, self._rt_err(exc.status, exc.err_type, exc.message,
+                                                     getattr(exc, "code", None)))
         except OSError:
             raise                        # a client write: do_POST's disconnect
         except Exception as exc:  # noqa: BLE001 -- the type name is logged, never a traceback (P7)
             log.warning("request failed: %s", type(exc).__name__)
             self.close_connection = True
             if not self._rt_head_sent:
-                self._send_json(500, _rt_error_body("api_error", "internal error"))
+                self._send_json(500, self._rt_err(500, "api_error", "internal error"))
         finally:
+            if slot:
+                srv.image_sem.release()
             # F27: an exit that never reached stream_translator -- a 400 answered from the
             # learn path's read, a failed send, a refusal after upstream_request -- leaves
             # this request's _pending entry; popped while the inbound is alive, so its id
@@ -7940,6 +8540,23 @@ class _RouterHandler(BaseHTTPRequestHandler):
         digits. The handler owns conn and resp here (no pump): closed in finally."""
         status, retry_after, up_body = self._rt_read_upstream(conn, resp, inbound)
         self._answer_upstream_json(adapter, inbound, status, retry_after, up_body)
+
+    def _relay_image(self, conn: Any, resp: Any, adapter: Adapter, inbound: InboundRequest) -> None:
+        """An image answer: the whole upstream body under _UPSTREAM_BODY_LIMIT (_rt_read_upstream),
+        mapped by adapter.image_response (given the upstream Content-Type, which the hook can not
+        see) and sent as the bytes it returns (_send_raw_json) -- no re-serialising of a 2xx. A
+        non-2xx or a refused 2xx logs the structure-only WARNING line; a 429's Retry-After is
+        relayed when it is all digits. The handler owns conn and resp: closed in finally."""
+        content_type = resp.getheader("Content-Type") or ""
+        up_status, retry_after, up_body = self._rt_read_upstream(conn, resp, inbound)
+        status, body = adapter.image_response(inbound, up_status, up_body, content_type)
+        if status >= 400:
+            self._log_upstream_failure(status, "upstream_status" if not 200 <= up_status < 300 else "bad_body")
+        extra = ()
+        if status == 429 and re.fullmatch(r"[0-9]{1,10}", retry_after):
+            extra = (("retry-after", retry_after),)
+        self._rt_rec["end"] = "json"
+        self._send_raw_json(status, body, extra)
 
     def _rt_read_upstream(self, conn: Any, resp: Any, inbound: InboundRequest) -> Tuple[int, str, bytes]:
         """(status, Retry-After, the whole body under _UPSTREAM_BODY_LIMIT) of one upstream
@@ -8187,7 +8804,9 @@ class _RouterHandler(BaseHTTPRequestHandler):
         above 0) is a 400. An id that is not exactly a route key after
         percent-decoding (UTF-8, strict) is a 404 that never echoes it. A
         two-word HTTP/0.9 `GET` is a 400: _send_json would write no head for it
-        (the M1 guard of _refuse)."""
+        (the M1 guard of _refuse). The list takes ?modality=chat|image|all (default all: every
+        route, each entry carrying its modality); a repeated or other value is a 400, and a
+        single id answers the same entry shape for a chat or an image route."""
         if self.request_version == "HTTP/0.9":
             self._refuse(400, message="HTTP/0.9 is not supported")
             return
@@ -8203,8 +8822,12 @@ class _RouterHandler(BaseHTTPRequestHandler):
                 self._refuse(400, message="a GET request must not carry a body")
                 return
         cfg = self.server.cfg
+        modality = _rt_models_modality((self.path or "").partition("?")[2])
+        if modality is None:
+            self._refuse(400, message="query: modality must be given once, as chat, image or all")
+            return
         if endpoint == "models":
-            self._send_json(200, _rt_models_list(cfg, self.server.started_at))
+            self._send_json(200, _rt_models_list(cfg, self.server.started_at, self.server.started_epoch, modality))
             return
         try:
             model_id = urllib.parse.unquote(self._rt_model_id or "", errors="strict")
@@ -8214,7 +8837,7 @@ class _RouterHandler(BaseHTTPRequestHandler):
         if route is None:
             self._send_json(404, _rt_error_body("not_found_error", "model not found"))
             return
-        self._send_json(200, _rt_model_entry(route, self.server.started_at))
+        self._send_json(200, _rt_model_entry(route, self.server.started_at, self.server.started_epoch))
 
     def do_GET(self) -> None:  # noqa: N802 -- stdlib name
         # No `req` summary line: only a POST gets one (deviation 8).
@@ -8318,6 +8941,7 @@ def _rt_settings(args: argparse.Namespace) -> RouterSettings:
     _rt_cli_range("--port", args.port, _RT_PORT_RANGE)
     _rt_cli_range("--body-limit", args.body_limit, _BODY_LIMIT_RANGE)
     _rt_cli_range("--max-connections", args.max_connections, _CONNECTION_CAP_RANGE)
+    _rt_cli_range("--max-image-requests", args.max_image_requests, _IMAGE_REQUEST_RANGE)
     origins = frozenset(_rt_cli_origin(value) for value in (args.allowed_origin or ()))
     if args.ready_file is not None and not args.ready_file:
         raise ConfigError("--ready-file: must not be empty")
@@ -8331,6 +8955,7 @@ def _rt_settings(args: argparse.Namespace) -> RouterSettings:
         ready_file=args.ready_file,
         debug=bool(args.debug),
         log_file=args.log_file,
+        max_image_requests=args.max_image_requests,
     )
 
 
@@ -8354,7 +8979,8 @@ example config (chmod 600; token: python3 -c 'import secrets;print(secrets.token
       "claude-opus-4-1":   {"backend": "openai", "model": "gpt-5"},
       "claude-sonnet-4-5": {"backend": "mistral", "model": "mistral-large-latest",
                             "max_input_tokens": 262144},
-      "claude-haiku-4-5":  {"backend": "llama", "model": "qwen3-coder"}
+      "claude-haiku-4-5":  {"backend": "llama", "model": "qwen3-coder"},
+      "gpt-image-1":       {"backend": "openai", "model": "gpt-image-1", "modality": "image"}
     },
     "default": {"backend": "infernox", "model": "local-model"}
   }
@@ -8364,6 +8990,14 @@ example config (chmod 600; token: python3 -c 'import secrets;print(secrets.token
   A route's optional "vision" (boolean, default true): false makes the router answer 400
   to any request holding an image block (messages, a tool_result's content, system), naming
   the path and the route, never the image -- an image is refused, not silently dropped.
+  A route's optional "modality" ("chat", the default, or "image"): an image route is served by
+  POST /v1/images/generations and /v1/images/edits (OpenAI-shaped, multipart or JSON edits, no
+  streaming yet; errors there are the OpenAI envelope) and refused 400 on /v1/messages, and a chat
+  route is refused 400 on the image paths. It needs an openai backend with an api_key (not the OAuth
+  login), a route key equal to its model, and is not allowed on "default" (an image path never falls
+  back to it). The router reads only model and a few guard fields and forwards the body as it came;
+  raise --body-limit for large edit uploads. GET /v1/models lists every route with its modality
+  (?modality=chat|image|all filters it); --max-image-requests caps image requests in flight.
   A mistral route's option tool_result_images (boolean, default true): an image inside a
   tool_result goes upstream as image_url parts in the tool message; false sends "[image omitted]".
   Route options temperature (0-2) / top_p (0-1) override the client's; one a backend cannot take
@@ -8426,6 +9060,12 @@ def _rt_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-connections", type=_rt_cli_int, default=_HTTP_CONNECTION_CAP,
                         help=f"Concurrent TCP connections, {_CONNECTION_CAP_RANGE[0]}-"
                              f"{_CONNECTION_CAP_RANGE[1]} (default {_HTTP_CONNECTION_CAP})")
+    parser.add_argument("--max-image-requests", type=_rt_cli_int, default=_IMAGE_REQUEST_CAP,
+                        help=f"Image requests (/v1/images/...) in flight at once, "
+                             f"{_IMAGE_REQUEST_RANGE[0]}-{_IMAGE_REQUEST_RANGE[1]} (default {_IMAGE_REQUEST_CAP}); "
+                             f"one more is refused at once with 429 and Retry-After: 1, so long image "
+                             f"waits can not take every --max-connections slot from chat -- only while this "
+                             f"is below --max-connections (a startup WARNING says so when it is not)")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging to stderr")
     parser.add_argument("--log-file", default=None, help="Log to file, mode 0600 (implies --debug)")
     return parser
@@ -8765,6 +9405,11 @@ def main() -> None:
         cfg = load_config(args.config)
     except ConfigError as exc:
         _rt_refuse(str(exc))
+    if settings.max_image_requests >= settings.max_connections:
+        # Structure only (two integers). Every image request holds a connection, so a cap that is not
+        # below the connection cap never refuses anything: the 429 protection for chat is then void.
+        log.warning("--max-image-requests %d is not below --max-connections %d: the image cap can not "
+                    "keep chat connections free", settings.max_image_requests, settings.max_connections)
 
     # KD-20: sweep stale writer temps under the config flock (a no-op without an
     # OAuth backend, R2-L5; a refusal is one WARNING), then the token store that

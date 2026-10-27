@@ -55,7 +55,10 @@ Groups:
   N  token store          -- refresh, the per-backend lock, one forced refresh per 401 (codex)
   O  login                -- the codex login subcommand: browser callback, paste, device flow
   P  upstream failure log -- a WARNING line, structure only, for each upstream failure
-  I  secret leak          -- no sentinel in stderr, the log, a body or a wrong peer
+  Q  image endpoints      -- /v1/images/generations and /edits on an openai api_key backend: the modality
+                             route key, raw relay, per-endpoint Content-Type, multipart sniffer, OpenAI
+                             error envelope, /v1/models additions, --max-image-requests (J42-J44: static)
+  I  secret leak         -- no sentinel in stderr, the log, a body or a wrong peer
   J  static and hygiene   -- AST over the router source, writes, bytecode, tree
 """
 
@@ -2450,8 +2453,11 @@ GB_MODELS_PATH = "/v1/models"
 GB_MODEL_ROUTES = (("claude-sonnet-4-5", None), ("tf-b-second", "TF Second Model"), ("tf b/third", None))
 GB_DEFAULT_DISPLAY = "TF Default Display Name"     # set on the default route; never listed
 GB_MODELS_QUERY = "limit=20&after_id=tf-a&before_id=tf-b&beta=true"   # every allowed key, values ignored
-GB_LIST_KEYS = frozenset({"data", "has_more", "first_id", "last_id"})
-GB_ENTRY_KEYS = frozenset({"type", "id", "display_name", "created_at"})
+GB_LIST_KEYS = frozenset({"data", "has_more", "first_id", "last_id", "object"})
+# type/id/display_name/created_at are the Anthropic fields; object/created/owned_by/modality the additive
+# OpenAI ones and the route's modality (the image endpoints' D6); the limits follow in GB_LIMIT_ORDER.
+GB_ENTRY_KEYS = frozenset({"type", "id", "display_name", "created_at", "object", "created", "owned_by",
+                           "modality"})
 # B31: the advertised token limits, after the fields above, in this order (context_window
 # repeats max_input_tokens); a route key absent here -- or a limit absent from its row -- is null.
 GB_LIMIT_ORDER = ("max_input_tokens", "max_tokens", "context_window")
@@ -2504,17 +2510,27 @@ def gb_json_200(label, status, hdrs, body):
 
 
 def gb_check_entry(label, entry, want_id, want_display, launched):
-    """Problems unless *entry* is exactly {type: model, id, display_name, created_at}
-    (plus, optionally, the GB_LIMIT_ORDER keys: B31 owns their presence and values)
-    with a second-precision RFC 3339 UTC created_at between the router's launch and now."""
+    """Problems unless *entry* is exactly {type: model, id, display_name, created_at, object: model,
+    created, owned_by: llm-router, modality} (plus, optionally, the GB_LIMIT_ORDER keys: B31 owns
+    their presence and values) with a second-precision RFC 3339 UTC created_at and an integer
+    epoch `created`, both between the router's launch and now; modality is chat or image
+    (these B cases configure chat routes only: Q9 owns the image ones)."""
     if not isinstance(entry, dict) or set(entry) not in (GB_ENTRY_KEYS,
                                                          GB_ENTRY_KEYS | frozenset(GB_LIMIT_ORDER)):
         return ["%s: entry %r, expected exactly the keys %s (+ %s)"
                 % (label, ga_redact(str(entry))[:160], sorted(GB_ENTRY_KEYS), ", ".join(GB_LIMIT_ORDER))]
     problems = []
-    for key, want in (("type", "model"), ("id", want_id), ("display_name", want_display)):
+    for key, want in (("type", "model"), ("id", want_id), ("display_name", want_display),
+                      ("object", "model"), ("owned_by", "llm-router")):
         if entry[key] != want:
             problems.append("%s: %s %r, expected %r" % (label, key, entry[key], want))
+    if entry["modality"] not in ("chat", "image"):
+        problems.append("%s: modality %r, expected chat or image" % (label, entry["modality"]))
+    epoch = entry["created"]
+    if isinstance(epoch, bool) or not isinstance(epoch, int):
+        problems.append("%s: created %r is not an integer" % (label, epoch))
+    elif not int(launched) - GB_CREATED_SLACK_S <= epoch <= time.time() + GB_CREATED_SLACK_S:
+        problems.append("%s: created %d is not the router's start time (launched %.0f)" % (label, epoch, launched))
     created = entry["created_at"]
     if not isinstance(created, str) or not GB_CREATED_RE.match(created):
         problems.append("%s: created_at %r is not YYYY-MM-DDTHH:MM:SSZ" % (label, created))
@@ -2544,6 +2560,8 @@ def gb_check_list(label, obj, routes, launched):
                         % (label, ids, want_ids))
     if obj["has_more"] is not False:
         problems.append("%s: has_more %r, expected false" % (label, obj["has_more"]))
+    if obj["object"] != "list":
+        problems.append("%s: object %r, expected 'list'" % (label, obj["object"]))
     for key, want in (("first_id", want_ids[0] if want_ids else None),
                       ("last_id", want_ids[-1] if want_ids else None)):
         if obj[key] != want:
@@ -3576,7 +3594,7 @@ def group_b(suite, fixture_root):
                 before = len(peer.requests)
                 status, hdrs, body = gb_get(ec, GB_MODELS_PATH)
                 obj, problems = gb_json_200("GET /v1/models, no routes", status, hdrs, body)
-                want = {"data": [], "has_more": False, "first_id": None, "last_id": None}
+                want = {"data": [], "has_more": False, "first_id": None, "last_id": None, "object": "list"}
                 if obj is not None and obj != want:
                     problems.append("GET /v1/models, no routes: %r, expected %r"
                                     % (ga_redact(str(obj))[:160], want))
@@ -3646,7 +3664,8 @@ def group_b(suite, fixture_root):
             want = {"max_input_tokens": row.get("max_input_tokens"), "max_tokens": row.get("max_tokens"),
                     "context_window": row.get("max_input_tokens")}
             problems = []
-            order = ["type", "id", "display_name", "created_at"] + list(GB_LIMIT_ORDER)
+            order = ["type", "id", "display_name", "created_at", "object", "created", "owned_by",
+                     "modality"] + list(GB_LIMIT_ORDER)
             if list(entry) != order:
                 problems.append("%s: keys %r, expected %r (the limits after the existing fields)"
                                 % (label, list(entry), order))
@@ -3688,7 +3707,8 @@ def group_b(suite, fixture_root):
                                   "'tf b/third' max_tokens 8192 only; claude-sonnet-4-5 neither",
                                   "list, {id}  : max_input_tokens, max_tokens, context_window "
                                   "(= max_input_tokens) after the existing fields; unset -> null",
-                                  "existing    : type, id, display_name, created_at unchanged"]
+                                  "existing    : type, id, display_name, created_at unchanged, then the "
+                                  "additive object, created, owned_by, modality before the limits"]
             finally:
                 lim.close()
 
@@ -17475,6 +17495,1270 @@ def group_p(suite, fixture_root):
 
 
 # ---------------------------------------------------------------------------
+# Group Q: image endpoints (/v1/images/generations and /v1/images/edits, openai kind, api_key)
+# ---------------------------------------------------------------------------
+
+GQ = "Q. image endpoints"
+GQ_CASES = (
+    "route marker modality",             # Q1
+    "generations relayed byte-exact",    # Q2
+    "multipart edit byte-exact",         # Q3
+    "JSON edit form byte-exact",         # Q4
+    "per-endpoint 415, boundary 400",    # Q5
+    "wrong-endpoint modality refusals",  # Q6
+    "stream true refused (400)",         # Q7
+    "OpenAI error envelope",             # Q8
+    "upstream error hygiene",            # Q8b
+    "/v1/models: object, modality",      # Q9
+    "multipart sniffer units",           # Q10
+    "size limits, 64 MiB answer",        # Q11
+    "no prompt/b64/file in a log",       # Q12
+    "content-type rebuilt, headers",     # Q14
+    "411 and Expect on uploads",         # Q15
+    "image backend timeouts",            # Q16
+    "in-flight image request cap",       # Q17
+    "upstream path never client's",      # Q18
+)
+GQ_IDS = ("Q1", "Q2", "Q3", "Q4", "Q5", "Q6", "Q7", "Q8", "Q8b", "Q9", "Q10", "Q11", "Q12", "Q14", "Q15",
+          "Q16", "Q17", "Q18")
+
+GQ_IMG = "tf-img"                  # an image route on the openai api_key backend (route key == upstream model)
+GQ_IMG_B = "tf-img-b"
+GQ_IMG_FAST = "tf-img-fast"        # idle_timeout 1
+GQ_IMG_SLOW = "tf-img-slow"        # idle_timeout 6
+GQ_CHAT = "tf-q-chat"              # a passthrough chat route
+GQ_CHAT_OA = "tf-q-openai-chat"    # a chat route on the openai backend
+GQ_GEN = "/v1/images/generations"
+GQ_EDIT = "/v1/images/edits"
+# A 200 answer with a whitespace and key-order quirk: a router that re-dumps it changes the bytes.
+GQ_OK = (b'{ "created" : 1700000000,\n  "data" : [ { "b64_json" : "iVBORw0KGgo=" } ] ,\n'
+         b'  "usage" : {"total_tokens":3, "input_tokens":1} }')
+GQ_CHAT_OK = {"id": "msg_tfq", "type": "message", "role": "assistant", "model": "tf-q-chat-up",
+              "content": [{"type": "text", "text": "tf ok"}], "stop_reason": "end_turn",
+              "stop_sequence": None, "usage": {"input_tokens": 1, "output_tokens": 1}}
+GQ_ERR_KEYS = {"message", "type", "param", "code"}
+# Q-local sentinels (never GI_SENTINEL_LABELS: client.post records every body for I2/J5 to sweep).
+GQ_SENTINELS = (("TF_IMG_PROMPT", "tf-img-prompt-SENTINEL-" + secrets.token_hex(8)),
+                ("TF_IMG_B64", "tf-img-b64-SENTINEL-" + secrets.token_hex(8)),
+                ("TF_IMG_FILE", "tf-img-file-SENTINEL-" + secrets.token_hex(8)))
+GQ_UPSTREAM_STATUS = {400: 400, 401: 502, 403: 502, 404: 404, 413: 413, 422: 400, 429: 429, 500: 502,
+                      502: 529, 503: 529}      # KD-14, written here, not read from the module
+
+
+def gq_config(peer_url):
+    """The Q router's config: image routes on openai api_key backends (default, fast and slow idle_timeout),
+    a passthrough chat route and a passthrough default (so a fallback would be visible)."""
+    def backend(**extra):
+        entry = {"kind": "openai", "base_url": peer_url, "api_key": TF_KEY_OPENAI}
+        entry.update(extra)
+        return entry
+    return {
+        "auth_token": TF_ROUTER_TOKEN,
+        "backends": {
+            "tfq": backend(),
+            "tfq-fast": backend(idle_timeout=1),
+            "tfq-slow": backend(idle_timeout=6),
+            "tfq-pass": {"kind": "passthrough", "base_url": peer_url, "api_key": TF_KEY_PASS,
+                         "auth_header": "x-api-key"},
+        },
+        "routes": {
+            GQ_IMG: {"backend": "tfq", "model": GQ_IMG, "modality": "image"},
+            GQ_IMG_B: {"backend": "tfq", "model": GQ_IMG_B, "modality": "image", "display_name": "TF Image B"},
+            GQ_IMG_FAST: {"backend": "tfq-fast", "model": GQ_IMG_FAST, "modality": "image"},
+            GQ_IMG_SLOW: {"backend": "tfq-slow", "model": GQ_IMG_SLOW, "modality": "image"},
+            GQ_CHAT: {"backend": "tfq-pass", "model": "tf-q-chat-up"},
+            GQ_CHAT_OA: {"backend": "tfq", "model": "gpt-5"},
+        },
+        "default": {"backend": "tfq-pass", "model": "tf-q-default-up"},
+    }
+
+
+def gq_script_default(_index, request):
+    """The peer's default answer: a chat JSON for /v1/messages, GQ_OK for an image path."""
+    if request["line"].split(" ")[1].startswith("/v1/messages"):
+        return [("respond_json", 200, GQ_CHAT_OK)]
+    return [("respond_json", 200, GQ_OK)]
+
+
+def gq_part(boundary, name, value=b"", filename=None, ctype=None, headers=(), disposition=None):
+    """One multipart part with its leading delimiter and trailing CRLF.  *disposition* replaces the
+    whole Content-Disposition value; *headers* are extra raw header lines."""
+    disp = disposition if disposition is not None else \
+        'form-data; name="%s"' % name + ('; filename="%s"' % filename if filename is not None else "")
+    lines = ["Content-Disposition: " + disp] if disp else []
+    if ctype:
+        lines.append("Content-Type: " + ctype)
+    lines += list(headers)
+    data = value if isinstance(value, bytes) else str(value).encode("utf-8")
+    return (b"--" + boundary.encode("latin-1") + b"\r\n" + "\r\n".join(lines).encode("latin-1")
+            + b"\r\n\r\n" + data + b"\r\n")
+
+
+def gq_close(boundary):
+    return b"--" + boundary.encode("latin-1") + b"--\r\n"
+
+
+def gq_multipart(boundary, fields, files):
+    """(Content-Type, body): text *fields* [(name, value)] first, then *files* [(name, filename, ctype, bytes)]."""
+    body = b"".join(gq_part(boundary, n, v) for n, v in fields)
+    body += b"".join(gq_part(boundary, n, d, filename=f, ctype=c) for n, f, c, d in files)
+    return "multipart/form-data; boundary=" + boundary, body + gq_close(boundary)
+
+
+def gq_post(client, path, body, content_type="application/json", headers=None):
+    """(status, headers, body): one POST of raw *body*; the answer is recorded for I2 like client.post's."""
+    merged = {"Content-Type": content_type}
+    merged.update(headers or {})
+    return client.post(path=path, raw_body=body, headers=merged)
+
+
+def gq_post_raw(client, path, body, content_type="application/json", headers=None, timeout=HTTP_TIMEOUT_S):
+    """(status, headers, body) of one POST whose answer is NOT appended to RESPONSE_BODIES: a success
+    body that carries a Q sentinel or 64 MiB of base64 must not reach I2's and J5's sweeps."""
+    conn = client.connect(timeout)
+    try:
+        merged = {"Content-Type": content_type}
+        merged.update(headers or {})
+        conn.putrequest("POST", path, skip_host=True, skip_accept_encoding=True)
+        for key, value in client.headers(merged).items():
+            conn.putheader(key, value)
+        conn.putheader("Content-Length", str(len(body)))
+        conn.endheaders(body)
+        resp = conn.getresponse()
+        data = resp.read()
+        return resp.status, {k.lower(): v for k, v in resp.getheaders()}, data
+    finally:
+        conn.close()
+
+
+def gq_json_body(model, prompt="tf prompt", **extra):
+    obj = {"model": model, "prompt": prompt}
+    obj.update(extra)
+    return json.dumps(obj).encode("utf-8")
+
+
+def gq_hdrs(request):
+    """{lower-case name: [values]} of a peer-recorded request."""
+    out = {}
+    for name, value in request["headers"]:
+        out.setdefault(name.lower(), []).append(value)
+    return out
+
+
+def gq_err(body):
+    """(error object, problem): *body* must be {"error": {message: str, type: str, param, code}}, nothing else."""
+    try:
+        obj = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return None, "the body is not JSON: %r" % gi_redact(gb_text(body))[:80]
+    err = obj.get("error") if isinstance(obj, dict) else None
+    if set(obj) != {"error"} or not isinstance(err, dict) or set(err) != GQ_ERR_KEYS \
+            or not isinstance(err["message"], str) or not isinstance(err["type"], str):
+        return None, "not an OpenAI error envelope: %r" % gi_redact(gb_text(body))[:120]
+    return err, None
+
+
+def gq_expect(label, status, body, want, needle=None, absent=()):
+    """Problems unless *status* is *want* with an OpenAI error envelope whose message holds *needle*
+    and none of *absent*."""
+    if status != want:
+        err, _why = gq_err(body) if body else (None, None)
+        return ["%s: status %r%s, expected %d" % (label, status,
+                                                 (" (%s)" % gi_redact(err["message"])[:100]) if err else "", want)]
+    err, why = gq_err(body)
+    if why:
+        return ["%s: %s" % (label, why)]
+    problems = []
+    if needle and needle not in err["message"]:
+        problems.append("%s: message %r does not hold %r" % (label, gi_redact(err["message"])[:120], needle))
+    for text in absent:
+        if text and text in gb_text(body):
+            problems.append("%s: the answer carries %r" % (label, text[:40]))
+    return problems
+
+
+def group_q(suite, fixture_root):
+    """Q. image endpoints (Plan phase 1): one openai api_key router in front of one scripted peer
+    serves most cases; Q11a, Q12 and Q17 start their own router (a body limit, a debug log, an
+    in-flight cap).  Q1 and Q10 run in-process on the loaded module.  Every case that sends an
+    image request checks the peer too: a refusal must leave it untouched."""
+    results = {}
+    setup = "case did not run"
+    try:
+        mod = H.load_module_from_path("ph_llm_router_q", SERVER)
+    except Exception:  # noqa: BLE001 -- the in-process cases then fail with the reason
+        mod = None
+    state = {"script": None}
+    peer = ScriptedPeer(script=lambda i, r: (state["script"] or gq_script_default)(i, r))
+    proc = None
+    launched = time.time()
+    try:
+        sandbox = new_sandbox(fixture_root, "img")
+        proc = RouterProc(sandbox, write_config(sandbox, gq_config(peer.url())), label="img")
+        port = proc.wait_ready()
+        router_why = None
+        if port is None:
+            router_why = "the router did not start: %s" % gi_redact(
+                proc.stderr_text().strip().splitlines()[-1] if proc.stderr_text().strip() else "(no stderr)")[:200]
+        with peer:      # the cases run inside it; the in-process Q1 and Q10 run even when the router did not start
+            client = proc.client()
+            bearer = ("Authorization", "Bearer " + client.token)
+            close = ("Connection", "close")
+            got = {}
+
+            def untouched(before, label):
+                return ["%s: the peer saw %d request(s), expected none" % (label, len(peer.requests) - before)] \
+                    if len(peer.requests) != before else []
+
+            def q1():
+                problems = missing_names(mod, ("load_config",)) if mod is not None else ["cannot import the router"]
+                if problems:
+                    return problems, []
+                box = new_sandbox(fixture_root, "q1")
+                counter = [0]
+
+                def write(mutate=None):
+                    cfg = {"auth_token": TF_ROUTER_TOKEN,
+                           "backends": {
+                               "oa": {"kind": "openai", "api_key": TF_KEY_OPENAI},
+                               "oa-oauth": {"kind": "openai", "oauth": {}},
+                               "ms": {"kind": "mistral", "base_url": "https://api.mistral.ai",
+                                      "api_key": TF_KEY_MISTRAL},
+                               "pt": {"kind": "passthrough", "base_url": "https://pt.example.invalid",
+                                      "api_key": TF_KEY_PASS, "auth_header": "x-api-key"},
+                               "ll": {"kind": "llamacpp", "base_url": "https://llama.lan:8443",
+                                      "allow_private": True},
+                               "cx": {"kind": "codex", "oauth": {}}},
+                           "routes": {GQ_IMG: {"backend": "oa", "model": GQ_IMG, "modality": "image"},
+                                      "tf-chat": {"backend": "oa", "model": "gpt-5"}}}
+                    if mutate is not None:
+                        mutate(cfg)
+                    counter[0] += 1
+                    return write_config(box, cfg, filename="q1-%d.json" % counter[0])
+
+                where = "routes.%s" % GQ_IMG
+                cfg, problems = ga_accepted(mod, write(), "image on an openai api_key backend, model == key")
+                if cfg is not None:
+                    for key, want in ((GQ_IMG, "image"), ("tf-chat", "chat")):
+                        route = cfg.routes.get(key)
+                        if getattr(route, "modality", None) != want:
+                            problems.append("routes.%s.modality is %r, expected %r"
+                                            % (key, getattr(route, "modality", "<no field>"), want))
+                for label, value in (("an unknown word", "video"), ("a non-string", 7), ("null", None)):
+                    problems += ga_refused(
+                        mod, write(lambda c, v=value: c["routes"][GQ_IMG].__setitem__("modality", v)),
+                        [where + ".modality", "chat or image"], "modality %s" % label, absent=("video",))
+                for label, value in (("image", "image"), ("chat", "chat")):
+                    problems += ga_refused(
+                        mod, write(lambda c, v=value: c.__setitem__("default", {"backend": "oa", "model": "gpt-5",
+                                                                                 "modality": v})),
+                        ["default.modality"], "modality %s on the default route" % label)
+                for backend, kind in (("ms", "mistral"), ("pt", "passthrough"), ("ll", "llamacpp"),
+                                      ("cx", "codex")):
+                    problems += ga_refused(
+                        mod, write(lambda c, b=backend: c["routes"][GQ_IMG].__setitem__("backend", b)),
+                        [where + ".modality", "kind " + kind, "does not serve image routes"],
+                        "image route on kind %s" % kind)
+                problems += ga_refused(
+                    mod, write(lambda c: c["routes"][GQ_IMG].__setitem__("backend", "oa-oauth")),
+                    [where + ".modality", "ChatGPT"], "image route on an openai-oauth backend")
+                problems += ga_refused(
+                    mod, write(lambda c: c["routes"][GQ_IMG].__setitem__("model", "tf-upstream-name")),
+                    [where + ".model"], "image route, model != key", absent=("tf-upstream-name",))
+                return problems, ["accepted    : image on openai api_key (model == key); a plain route is chat",
+                                  "refused     : value not chat/image, non-string, any modality key on default, "
+                                  "kinds mistral/passthrough/llamacpp/codex, the openai-oauth profile, model != key"]
+
+            def q2():
+                body = b'{ "prompt" : "tf q2 prompt",  "model":"%s", "n": 1 }' % GQ_IMG.encode("ascii")
+                before = len(peer.requests)
+                status, hdrs, answer = gq_post(client, GQ_GEN, body, headers={"x-api-key": TF_CLIENT_XKEY})
+                problems = []
+                if status != 200:
+                    problems += gq_expect("generations", status, answer, 200)
+                elif answer != GQ_OK:
+                    problems.append("the client got %d byte(s) that differ from the upstream's %d: re-serialised?"
+                                    % (len(answer), len(GQ_OK)))
+                if "application/json" not in (hdrs.get("content-type") or ""):
+                    problems.append("answer Content-Type %r" % hdrs.get("content-type"))
+                if len(peer.requests) != before + 1:
+                    return problems + ["the peer saw %d request(s), expected 1" % (len(peer.requests) - before)], []
+                req = peer.requests[-1]
+                seen = gq_hdrs(req)
+                if req["line"] != "POST /v1/images/generations HTTP/1.1":
+                    problems.append("peer request line %r" % req["line"])
+                if req["body"] != body:
+                    problems.append("the peer's body differs from what was sent (%d vs %d bytes)"
+                                    % (len(req["body"]), len(body)))
+                if seen.get("content-type") != ["application/json"]:
+                    problems.append("peer Content-Type %r, expected exactly application/json"
+                                    % seen.get("content-type"))
+                if seen.get("authorization") != ["Bearer " + TF_KEY_OPENAI]:
+                    problems.append("peer Authorization is not the backend key (or not alone)")
+                for name in ("x-api-key", "cookie"):
+                    if name in seen:
+                        problems.append("peer got a %s header" % name)
+                joined = " ".join(v for vals in seen.values() for v in vals)
+                for label, value in (("the router token", TF_ROUTER_TOKEN), ("the client's x-api-key", TF_CLIENT_XKEY)):
+                    if value in joined:
+                        problems.append("peer headers carry %s" % label)
+                return problems, ["peer        : POST /v1/images/generations, body %d bytes identical, backend key"
+                                  % len(body),
+                                  "client      : %d byte(s) back, identical to the upstream's quirky JSON" % len(answer)]
+
+            def q3():
+                boundary = "tfq3'+_" + "b" * 53
+                png = (b"\x89PNG\r\n\x1a\n" + b"\r\n--fragment\r\n" + b'\r\nContent-Disposition: form-data; name="model"\r\n'
+                       + b'name="model"' + b"\r\n--" + boundary[:20].encode() + b"\r\n" + bytes(range(256)) * 4)
+                ctype, body = gq_multipart(boundary, [("model", GQ_IMG), ("prompt", "tf q3 edit"), ("n", "1")],
+                                           [("image", "tf.png", "image/png", png)])
+                if len(boundary) != 60:
+                    return ["the test boundary is %d characters, expected 60" % len(boundary)], []
+                before = len(peer.requests)
+                status, _h, answer = gq_post(client, GQ_EDIT, body, ctype)
+                problems = [] if status == 200 else gq_expect("edit", status, answer, 200)
+                if status == 200 and answer != GQ_OK:
+                    problems.append("the client's answer differs from the upstream's")
+                if len(peer.requests) != before + 1:
+                    return problems + ["the peer saw %d request(s), expected 1" % (len(peer.requests) - before)], []
+                req = peer.requests[-1]
+                seen = gq_hdrs(req)
+                if req["line"] != "POST /v1/images/edits HTTP/1.1":
+                    problems.append("peer request line %r" % req["line"])
+                if req["body"] != body:
+                    problems.append("the multipart body reached the peer altered (%d vs %d bytes)"
+                                    % (len(req["body"]), len(body)))
+                if seen.get("content-type") != [ctype]:
+                    problems.append("peer Content-Type %r, expected %r" % (seen.get("content-type"), ctype))
+                return problems, ["boundary    : %d characters, ' + _ in it; the file part holds CRLF-- fragments and "
+                                  'name="model" bytes' % len(boundary),
+                                  "peer        : body %d bytes identical, Content-Type identical" % len(body)]
+
+            def q4():
+                body = json.dumps({"model": GQ_IMG, "prompt": "tf q4",
+                                   "images": [{"image_url": "https://example.invalid/a.png"}],
+                                   "mask": {"image_url": "data:image/png;base64,iVBORw0KGgo="}},
+                                  indent=1).encode("utf-8")
+                before = len(peer.requests)
+                status, _h, answer = gq_post(client, GQ_EDIT, body)
+                problems = [] if status == 200 else gq_expect("JSON edit", status, answer, 200)
+                if len(peer.requests) != before + 1:
+                    return problems + ["the peer saw %d request(s), expected 1" % (len(peer.requests) - before)], []
+                req = peer.requests[-1]
+                if req["line"] != "POST /v1/images/edits HTTP/1.1":
+                    problems.append("peer request line %r" % req["line"])
+                if req["body"] != body:
+                    problems.append("the JSON edit body reached the peer altered")
+                if gq_hdrs(req).get("content-type") != ["application/json"]:
+                    problems.append("peer Content-Type %r" % gq_hdrs(req).get("content-type"))
+                return problems, ["peer        : POST /v1/images/edits, the images[] / mask JSON byte-identical"]
+
+            def q5():
+                problems = []
+                before = len(peer.requests)
+                status, _h, body = client.post(path=MESSAGES_PATH, raw_body=b"x",
+                                               headers={"Content-Type": "multipart/form-data; boundary=x"})
+                # A regression guard, green before the feature: the stdlib's header parser records
+                # defects for any multipart Content-Type, so /v1/messages answers a 400 "malformed header"
+                # (Anthropic envelope), not the 415 the plan assumed.  The exact 400 is stdlib-dependent
+                # (http.client's header parser; a stdlib that stops recording those defects would answer
+                # the 415): a change here is a stdlib change to look at, not noise.
+                _t, _m, why = gb_envelope(body)
+                if status != 400 or why:
+                    problems.append("/v1/messages with multipart: status %r %s, expected a 400 Anthropic "
+                                    "envelope (unchanged; stdlib-dependent)" % (status, why or ""))
+                ctype, mp = gq_multipart("tfq5b", [("model", GQ_IMG), ("prompt", "x")], [])
+                status, _h, body = gq_post(client, GQ_GEN, mp, ctype)
+                problems += gq_expect("generations with multipart", status, body, 415)
+                status, _h, body = gq_post(client, GQ_GEN, b"model=x", "text/plain")
+                problems += gq_expect("generations with text/plain", status, body, 415)
+                status, _h, _c, data = raw_exchange(
+                    client, [bearer, ("Content-Type", "application/json"), ("Content-Type", "application/json"),
+                             close], gq_json_body(GQ_IMG), path=GQ_GEN)
+                problems += gq_expect("two Content-Type headers", status, data.partition(b"\r\n\r\n")[2], 415)
+                for label, value in (("no boundary", "multipart/form-data"),
+                                     ("a duplicated boundary", "multipart/form-data; boundary=aa; boundary=bb"),
+                                     ("an empty boundary", "multipart/form-data; boundary="),
+                                     ("a '/' in an unquoted boundary", "multipart/form-data; boundary=a/b"),
+                                     ("a 71-character boundary", "multipart/form-data; boundary=" + "b" * 71),
+                                     ("an unterminated quote", 'multipart/form-data; boundary="abc')):
+                    status, _h, body = gq_post(client, GQ_EDIT, mp, value)
+                    problems += gq_expect("edit, " + label, status, body, 400)
+                for method in ("GET", "HEAD", "OPTIONS", "PUT"):
+                    for path in (GQ_GEN, GQ_EDIT):
+                        status, hdrs, body, _first, _closed = gb_raw(client, gb_request(
+                            client, method=method, path=path, pairs=[bearer, close], length=None))
+                        label = "%s %s" % (method, path)
+                        if status != 405 or hdrs.get("allow") != "POST":
+                            problems.append("%s: status %r, Allow %r; expected 405, Allow: POST"
+                                            % (label, status, hdrs.get("allow")))
+                        elif method == "HEAD":
+                            if body:
+                                problems.append("%s: %d body byte(s), expected none" % (label, len(body)))
+                        else:
+                            problems += gq_expect(label, status, body, 405)
+                for query in ("?x=1", "?beta=true"):
+                    status, _h, body = gq_post(client, GQ_GEN + query, gq_json_body(GQ_IMG))
+                    problems += gq_expect("generations" + query, status, body, 404)
+                # F5/Marple: only the multipart-body defects are tolerated on an image path; a header line
+                # without a colon is still a malformed header (400), multipart Content-Type or not.
+                for label, path, ct, payload in (("generations", GQ_GEN, "application/json", gq_json_body(GQ_IMG)),
+                                                 ("edits", GQ_EDIT, ctype, mp)):
+                    request = gb_request(client, path=path, body=payload,
+                                         pairs=[bearer, ("Content-Type", ct), close]).replace(
+                        b"Connection: close\r\n", b"Connection: close\r\nNoColonHeaderLine\r\n", 1)
+                    status, _h, body, _first, _closed = gb_raw(client, request)
+                    # Header defects are refused before the path is classified, so the envelope is the
+                    # Anthropic one (existing behaviour); the status and the message are what is pinned.
+                    _t, msg, why = gb_envelope(body)
+                    if status != 400 or why or msg != "malformed header":
+                        problems.append("%s with a header line without a colon: status %r %s %r, expected a 400 "
+                                        "malformed header" % (label, status, why or "", msg))
+                problems += untouched(before, "415/400/405/404 refusals")
+                return problems, ["415         : /v1/messages+multipart (Anthropic), generations+multipart, "
+                                  "text/plain, two Content-Type headers (OpenAI)",
+                                  "400         : edit with a missing, duplicated, empty, malformed boundary",
+                                  "405         : GET HEAD OPTIONS PUT on both paths, Allow: POST; 404 on a query"]
+
+            def q6():
+                problems = []
+                before = len(peer.requests)
+                status, _h, body = gq_post(client, GQ_GEN, gq_json_body(GQ_CHAT_OA))
+                problems += gq_expect("chat model on generations", status, body, 400, needle="chat model")
+                status, _h, body = gq_post(client, GQ_EDIT, gq_json_body(GQ_CHAT))
+                problems += gq_expect("passthrough chat model on edits", status, body, 400, needle="chat model")
+                for path in (MESSAGES_PATH, MESSAGES_PATH + "/count_tokens"):
+                    status, _h, body = client.post(path=path, obj=gd_body(GQ_IMG))
+                    etype, msg, why = gb_envelope(body)
+                    if status != 400 or why or "image model" not in msg:
+                        problems.append("image model on %s: status %r, %s; expected a 400 Anthropic envelope "
+                                        "naming an image model" % (path, status, why or gi_redact(msg or "")[:100]))
+                for path in (GQ_GEN, GQ_EDIT):
+                    status, _h, body = gq_post(client, path, gq_json_body("tf-q-no-such-route"))
+                    problems += gq_expect("unknown model on " + path, status, body, 404)
+                problems += untouched(before, "wrong-endpoint refusals")
+                return problems, ["400         : a chat route on both image endpoints; an image route on "
+                                  "/v1/messages and /v1/messages/count_tokens",
+                                  "404         : an unknown model on an image endpoint, though a default route exists",
+                                  "peer        : never contacted"]
+
+            def q7():
+                problems = []
+                before = len(peer.requests)
+                status, _h, body = gq_post(client, GQ_GEN, gq_json_body(GQ_IMG, stream=True))
+                problems += gq_expect("JSON stream true", status, body, 400, needle="streaming is not supported yet")
+                ctype, mp = gq_multipart("tfq7b", [("model", GQ_IMG), ("prompt", "x"), ("stream", "true")],
+                                         [("image", "a.png", "image/png", b"\x89PNG")])
+                status, _h, body = gq_post(client, GQ_EDIT, mp, ctype)
+                problems += gq_expect("multipart stream=true", status, body, 400,
+                                      needle="streaming is not supported yet")
+                problems += untouched(before, "stream true")
+                status, _h, body = gq_post(client, GQ_GEN, gq_json_body(GQ_IMG, stream=False))
+                problems += [] if status == 200 else gq_expect("JSON stream false", status, body, 200)
+                ctype, mp = gq_multipart("tfq7b", [("model", GQ_IMG), ("prompt", "x"), ("stream", "false")],
+                                         [("image", "a.png", "image/png", b"\x89PNG")])
+                status, _h, body = gq_post(client, GQ_EDIT, mp, ctype)
+                problems += [] if status == 200 else gq_expect("multipart stream=false", status, body, 200)
+                if len(peer.requests) != before + 2:
+                    problems.append("the peer saw %d request(s) for the two stream:false controls, expected 2"
+                                    % (len(peer.requests) - before))
+                return problems, ["refused     : stream true as a JSON boolean and as a multipart text field, "
+                                  "peer untouched; stream false passes (both forms)"]
+
+            def q8():
+                problems = []
+                before = len(peer.requests)
+                status, hdrs, body = gq_post(client, GQ_GEN, gq_json_body(GQ_IMG),
+                                             headers={"Authorization": "Bearer tf-wrong-" + secrets.token_hex(16)})
+                problems += gq_expect("bad bearer", status, body, 401)
+                if hdrs.get("www-authenticate") != "Bearer":
+                    problems.append("bad bearer: WWW-Authenticate %r, expected Bearer" % hdrs.get("www-authenticate"))
+                status, _h, body, _first, _closed = gb_raw(client, gb_request(
+                    client, path=GQ_GEN, host=False, body=b"{}",
+                    pairs=[("Host", "evil:%d" % client.port), bearer, ("Content-Type", "application/json"), close]))
+                problems += gq_expect("bad Host", status, body, 403)
+                status, _h, body, _first, _closed = gb_raw(client, gb_request(
+                    client, path=GQ_GEN, body=b"{}", length=str(33 << 20),
+                    pairs=[bearer, ("Content-Type", "application/json"), close]))
+                problems += gq_expect("body over the limit", status, body, 413)
+                status, _h, body = gq_post(client, GQ_GEN, b"{not json")
+                problems += gq_expect("invalid JSON", status, body, 400)
+                status, _h, body = gq_post(client, GQ_GEN, b'{"prompt": "x"}')
+                problems += gq_expect("missing model", status, body, 400, needle="model")
+                problems += untouched(before, "the refusals so far")
+
+                def answer(label, up_status, up_body, headers=(), want=None, absent=(), needle=None):
+                    state["script"] = lambda _i, _r: [("respond_json", up_status, up_body, list(headers))]
+                    try:
+                        status, hdrs, body = gq_post(client, GQ_GEN, gq_json_body(GQ_IMG))
+                    finally:
+                        state["script"] = None
+                    return status, hdrs, body, gq_expect(label, status, body, want, needle=needle, absent=absent)
+
+                err400 = {"error": {"message": "tf q8 bad prompt " + TF_KEY_OPENAI + " " + TF_ROUTER_TOKEN,
+                                    "type": "invalid_request_error", "param": "prompt", "code": None}}
+                _s, _h, _b, more = answer("upstream 400", 400, err400, want=400, needle="tf q8 bad prompt",
+                                          absent=(TF_KEY_OPENAI, TF_ROUTER_TOKEN))
+                problems += more
+                _s, hdrs, _b, more = answer("upstream 429", 429, {"error": {"message": "tf q8 slow down",
+                                                                          "type": "requests", "param": None,
+                                                                          "code": "rate_limit_exceeded"}},
+                                            headers=[("Retry-After", "7")], want=429)
+                problems += more
+                if hdrs.get("retry-after") != "7":
+                    problems.append("upstream 429: Retry-After %r, expected 7" % hdrs.get("retry-after"))
+                marker = GQ_SENTINELS[0][1]
+                _s, _h, _b, more = answer("upstream 500", 500, {"error": {"message": "tf q8 boom " + marker,
+                                                                         "type": "server_error", "param": None,
+                                                                         "code": None}},
+                                          want=502, absent=(marker, "tf q8 boom"))
+                problems += more
+                _s, _h, _b, more = answer("upstream 200, not JSON", 200, b"this is not json at all", want=502)
+                problems += more
+                state["script"] = lambda _i, _r: [("respond_json", 200, GQ_OK, [("Content-Type", "text/plain")])]
+                try:
+                    status, _h, body = gq_post(client, GQ_GEN, gq_json_body(GQ_IMG))
+                finally:
+                    state["script"] = None
+                problems += gq_expect("upstream 200, Content-Type text/plain", status, body, 502)
+                # M1: the envelope flag is per request on one keep-alive connection.
+                conn = client.connect()
+                try:
+                    shapes = []
+                    for path, body, want in ((GQ_GEN, gq_json_body("tf-q-nope"), "openai"),
+                                             (MESSAGES_PATH, json.dumps(gd_body(GQ_IMG)).encode(), "anthropic"),
+                                             (GQ_GEN, gq_json_body("tf-q-nope"), "openai")):
+                        conn.putrequest("POST", path, skip_host=True, skip_accept_encoding=True)
+                        for key, value in client.headers().items():
+                            conn.putheader(key, value)
+                        conn.putheader("Content-Length", str(len(body)))
+                        conn.endheaders(body)
+                        resp = conn.getresponse()
+                        data = resp.read()
+                        if want == "openai":
+                            _e, why = gq_err(data)
+                        else:
+                            _t, _m, why = gb_envelope(data)
+                        shapes.append((resp.status, why))
+                    for i, (st, why) in enumerate(shapes):
+                        if st not in (400, 404) or why:
+                            problems.append("keep-alive request %d: status %r, %s" % (i + 1, st, why or "ok"))
+                except (OSError, http.client.HTTPException) as exc:
+                    problems.append("keep-alive: the connection broke: %s" % type(exc).__name__)
+                finally:
+                    conn.close()
+                return problems, ["envelope   : {error: {message, type, param, code}} on 401, 403, 413, 400, 429, 502, "
+                                  "and a 502 for a non-JSON 2xx or a non-JSON Content-Type",
+                                  "keep-alive  : image refusal, /v1/messages refusal (Anthropic), image refusal on "
+                                  "one connection"]
+
+            def q8b():
+                problems = []
+                masked = ("Incorrect API key provided: sk-proj-****abcd. You can find your API key at "
+                          "https://platform.openai.com/account/api-keys.")
+                long_text = "tf q8b " + masked + " " + "x" * 600
+
+                def ask(up_status, text):
+                    state["script"] = lambda _i, _r: [("respond_json", up_status, {
+                        "error": {"message": text, "type": "invalid_request_error", "param": None,
+                                  "code": "invalid_api_key"}})]
+                    try:
+                        return gq_post(client, GQ_GEN, gq_json_body(GQ_IMG))
+                    finally:
+                        state["script"] = None
+
+                status, _h, body = ask(401, masked)
+                problems += gq_expect("upstream 401", status, body, GQ_UPSTREAM_STATUS[401],
+                                      needle="rejected the router's credential",
+                                      absent=("sk-proj", "****", "Incorrect API key"))
+                status, _h, body = ask(400, long_text)
+                problems += gq_expect("upstream 400 with a masked key", status, body, 400, needle="tf q8b",
+                                      absent=("sk-proj", "****abcd"))
+                err, _why = gq_err(body)
+                if err is not None:
+                    if len(err["message"]) > 300:
+                        problems.append("upstream 400: the relayed message is %d characters, expected at most 300"
+                                        % len(err["message"]))
+                    if "[redacted]" not in err["message"]:
+                        problems.append("upstream 400: the masked key is not replaced by [redacted]: %r"
+                                        % gi_redact(err["message"])[:120])
+                for up in (403, 500, 502, 503):
+                    marker = "tf-q8b-upstream-%d-%s" % (up, secrets.token_hex(4))
+                    status, _h, body = ask(up, marker + " " + masked)
+                    problems += gq_expect("upstream %d" % up, status, body, GQ_UPSTREAM_STATUS[up],
+                                          needle="rejected the router's credential" if up == 403 else None,
+                                          absent=(marker, "sk-proj", "Incorrect"))
+                # F7: upper-case and id-shaped credential fragments in a relayed 400/429 text.
+                leaks = ("BEARER abc", "SK-abc12345", "org-abc123", "proj_abc123", "req_abc123", "****abcd")
+                for up in (400, 429):
+                    status, _h, body = ask(up, "tf q8b leak " + " | ".join(leaks) + " end")
+                    problems += gq_expect("upstream %d with credential-shaped fragments" % up, status, body,
+                                          GQ_UPSTREAM_STATUS[up], needle="tf q8b leak", absent=leaks)
+                for up in (422, 429):
+                    marker = "tf-q8b-relayed-%d" % up
+                    status, _h, body = ask(up, marker + " " + masked)
+                    problems += gq_expect("upstream %d" % up, status, body, GQ_UPSTREAM_STATUS[up],
+                                          needle=marker, absent=("sk-proj", "****"))
+                return problems, ["mapped      : 401/403/500 -> 502, 502/503 -> 529, 422 -> 400, 400 and 429 as is",
+                                  "text        : 401 and 403 the fixed credential text; 400, 422, 429 relayed cut at "
+                                  "300 with sk-... replaced; 500, 502, 503 fixed"]
+
+            def q9():
+                problems = []
+                want_mod = [(GQ_IMG, "image"), (GQ_IMG_B, "image"), (GQ_IMG_FAST, "image"),
+                            (GQ_IMG_SLOW, "image"), (GQ_CHAT, "chat"), (GQ_CHAT_OA, "chat")]
+                entry_keys = ["type", "id", "display_name", "created_at", "object", "created", "owned_by",
+                              "modality", "max_input_tokens", "max_tokens", "context_window"]
+                before = len(peer.requests)
+
+                def check_entry(label, entry, key, modality):
+                    out = []
+                    if not isinstance(entry, dict) or list(entry) != entry_keys:
+                        return ["%s: keys %r, expected %r" % (label, list(entry) if isinstance(entry, dict) else entry,
+                                                              entry_keys)]
+                    if entry["id"] != key or entry["type"] != "model" or entry["object"] != "model":
+                        out.append("%s: type/id/object %r/%r/%r" % (label, entry["type"], entry["id"], entry["object"]))
+                    if entry["owned_by"] != "llm-router":
+                        out.append("%s: owned_by %r" % (label, entry["owned_by"]))
+                    if entry["modality"] != modality:
+                        out.append("%s: modality %r, expected %r" % (label, entry["modality"], modality))
+                    created = entry["created"]
+                    if isinstance(created, bool) or not isinstance(created, int) \
+                            or not int(launched) - 2 <= created <= time.time() + 2:
+                        out.append("%s: created %r is not the router's start as an integer" % (label, created))
+                    return out
+
+                def listing(query, want):
+                    path = GB_MODELS_PATH + query
+                    status, hdrs, body = gb_get(client, path)
+                    obj, bad = gb_json_200("GET " + path, status, hdrs, body)
+                    out = list(bad)
+                    if obj is None:
+                        return out
+                    if list(obj) != ["data", "has_more", "first_id", "last_id", "object"] or obj["object"] != "list":
+                        out.append("GET %s: list keys %r / object %r" % (path, list(obj), obj.get("object")))
+                    ids = [e.get("id") for e in obj["data"]]
+                    if ids != [k for k, _m in want]:
+                        out.append("GET %s: ids %r, expected %r" % (path, ids, [k for k, _m in want]))
+                    for entry, (key, modality) in zip(obj["data"], want):
+                        out += check_entry("GET %s [%s]" % (path, key), entry, key, modality)
+                    if want and (obj["first_id"], obj["last_id"]) != (want[0][0], want[-1][0]):
+                        out.append("GET %s: first_id/last_id %r/%r" % (path, obj["first_id"], obj["last_id"]))
+                    return out
+
+                problems += listing("", want_mod)
+                problems += listing("?modality=all", want_mod)
+                problems += listing("?modality=image", [r for r in want_mod if r[1] == "image"])
+                problems += listing("?modality=chat", [r for r in want_mod if r[1] == "chat"])
+                for query in ("?modality=bogus", "?modality=", "?modality=image&modality=chat"):
+                    status, _h, body = gb_get(client, GB_MODELS_PATH + query)
+                    if status != 400:
+                        problems.append("GET /v1/models%s: status %r, expected 400" % (query, status))
+                for key, modality in (want_mod[0], want_mod[4]):
+                    path = "/v1/models/" + key
+                    status, hdrs, body = gb_get(client, path)
+                    entry, bad = gb_json_200("GET " + path, status, hdrs, body)
+                    problems += bad
+                    if entry is not None:
+                        problems += check_entry("GET " + path, entry, key, modality)
+                status, _h, body = gb_get(client, "/v1/models/tf-q-no-such-route")
+                problems += gb_not_found("GET /v1/models/tf-q-no-such-route", status, body, "tf-q-no-such-route")
+                problems += untouched(before, "GET /v1/models")
+                return problems, ["list        : object list; every entry object model, integer created, owned_by "
+                                  "llm-router, modality, in the pinned order",
+                                  "filter      : ?modality=image|chat|all; bogus, blank and repeated -> 400; "
+                                  "GET /v1/models/{id} the same entry for either modality"]
+
+            def q10():
+                problems = missing_names(mod, ("_rt_image_fields",)) if mod is not None else ["cannot import the router"]
+                if problems:
+                    return problems, []
+                B = "tfq10b"
+                CT = "multipart/form-data; boundary=" + B
+
+                def part(name, value=b"", **kw):
+                    return gq_part(B, name, value, **kw)
+
+                def body(*parts, close_it=True):
+                    return b"".join(parts) + (gq_close(B) if close_it else b"")
+
+                def run(ctype, raw, wanted=frozenset()):
+                    try:
+                        return "ok", mod._rt_image_fields(ctype, raw, wanted)
+                    except mod.ApiError as exc:
+                        return exc.status, exc.message
+                    except Exception as exc:  # noqa: BLE001 -- any other type is the finding
+                        return "raised", type(exc).__name__
+
+                model = part("model", GQ_IMG)
+                planted = "TFQ10CONTENT"
+                prompt = frozenset({"prompt"})
+                accepted = [
+                    ("model after a file part", CT, body(part("image", b"x", filename="a.png", ctype="image/png"), model),
+                     frozenset(), {"model": GQ_IMG}),
+                    ("quoted boundary", 'multipart/form-data; boundary="%s"' % B, body(model), frozenset(),
+                     {"model": GQ_IMG}),
+                    # A plain-text preamble is ignorable; one that holds a delimiter-looking line is refused below.
+                    ("a plain-text preamble", CT, b"preamble text\r\n" + body(model), frozenset(), {"model": GQ_IMG}),
+                    ("a preamble that mentions the boundary mid-line", CT,
+                     b"see --%s here\r\n" % B.encode() + body(model), frozenset(), {"model": GQ_IMG}),
+                    ("no final CRLF", CT, body(model)[:-2], frozenset(), {"model": GQ_IMG}),
+                    ("a quoted boundary with a space", 'multipart/form-data; boundary="tfq 10"',
+                     b"".join(gq_part("tfq 10", n, v) for n, v in (("model", GQ_IMG),)) + gq_close("tfq 10"),
+                     frozenset(), {"model": GQ_IMG}),
+                    ("a bare --boundary inside a line", CT,
+                     body(model, part("prompt", "look --%s here" % B)), prompt,
+                     {"model": GQ_IMG, "prompt": "look --%s here" % B}),
+                    ("a multi-line prompt", CT, body(model, part("prompt", "line1\nline2\r\nline3")), prompt,
+                     {"model": GQ_IMG, "prompt": "line1\nline2\r\nline3"}),
+                    ("a 32 KiB prompt", CT, body(model, part("prompt", "p" * 32768)), prompt,
+                     {"model": GQ_IMG, "prompt": "p" * 32768}),
+                    ("a prompt not asked for is skipped", CT, body(model, part("prompt", "x" * 100000)),
+                     frozenset(), {"model": GQ_IMG}),
+                    ("image[] and mask parts with a filename", CT,
+                     body(part("image[]", b"\x00\x01", filename="a.png"), part("mask", b"\x02", filename="m.png"),
+                          model), frozenset(), {"model": GQ_IMG}),
+                    ("a text part with Content-Type text/plain", CT,
+                     body(part("model", GQ_IMG, ctype="text/plain")), frozenset(), {"model": GQ_IMG}),
+                    ("a text part with text/plain; charset=UTF-8", CT,
+                     body(part("model", GQ_IMG, ctype="text/plain; charset=UTF-8")), frozenset(), {"model": GQ_IMG}),
+                    ("a prompt file part when the prompt is not asked for", CT,
+                     body(part("prompt", b"x", filename="p.txt"), model), frozenset(), {"model": GQ_IMG}),
+                    ("exactly 64 parts", CT,
+                     body(model, *[part("image[]", b"x", filename="f%d.png" % i) for i in range(63)]),
+                     frozenset(), {"model": GQ_IMG}),
+                    ("JSON", "application/json", b'{"model":"m","n":2,"stream":false,"size":"1024x1024"}',
+                     frozenset(), {"model": "m", "n": "2", "stream": "false", "size": "1024x1024"}),
+                    ("JSON stream true", "application/json", b'{"model":"m","stream":true}', frozenset(),
+                     {"model": "m", "stream": "true"}),
+                ]
+                for value in ("true", "false"):
+                    accepted.append(("stream=%s" % value, CT, body(model, part("stream", value)), frozenset(),
+                                     {"model": GQ_IMG, "stream": value}))
+                for n in range(1, 17):
+                    accepted.append(("n=%d" % n, CT, body(model, part("n", str(n))), frozenset(),
+                                     {"model": GQ_IMG, "n": str(n)}))
+                for field, value in (("output_format", "png"), ("output_format", "jpeg"), ("output_format", "webp"),
+                                     ("response_format", "b64_json"), ("response_format", "url"),
+                                     ("size", "auto"), ("size", "1024x1024")):
+                    accepted.append(("%s=%s" % (field, value), CT, body(model, part(field, value)), frozenset(),
+                                     {"model": GQ_IMG, field: value}))
+                refused = [
+                    ("no boundary parameter", "multipart/form-data", body(model), frozenset()),
+                    ("boundary over 70 characters", "multipart/form-data; boundary=" + "b" * 71, body(model),
+                     frozenset()),
+                    ("a duplicated boundary parameter", CT + "; boundary=other", body(model), frozenset()),
+                    ("an extra charset parameter", CT + "; charset=utf-8", body(model), frozenset()),
+                    ("an illegal char in an unquoted boundary", "multipart/form-data; boundary=a/b", body(model),
+                     frozenset()),
+                    ("CR LF in the content type", CT + "\r\n x=y", body(model), frozenset()),
+                    ("a duplicate model", CT, body(model, model), frozenset(), "more than once"),
+                    ("no model", CT, body(part("prompt", planted)), frozenset(), "required"),
+                    ("model only in a filename", CT, body(part("image", b"x", filename="model")), frozenset(),
+                     "required"),
+                    ("model as a file part", CT, body(part("model", GQ_IMG, filename="m.txt")), frozenset(),
+                     "not a file part"),
+                    ("a text model then a file model", CT, body(model, part("model", GQ_IMG, filename="m.txt")),
+                     frozenset(), "not a file part"),
+                    ("a file model then a text model", CT, body(part("model", GQ_IMG, filename="m.txt"), model),
+                     frozenset(), "not a file part"),
+                    # F2: a bare-LF delimiter anywhere, the empty-body shape, a delimiter-looking preamble line.
+                    ("a part with an empty body swallowing the next part", CT,
+                     body(model, part("x")[:-2], part("stream", "true")), frozenset(), "delimiter"),
+                    ("a bare-LF delimiter in skipped file data", CT,
+                     body(part("image", b"a\n--" + B.encode() + b"\nb", filename="a.png"), model), frozenset(),
+                     "bare"),
+                    ("a bare-LF delimiter in a preamble", CT, b"junk\n--" + B.encode() + b"\r\n" + body(model),
+                     frozenset(), "bare"),
+                    ("a bare-LF delimiter in a prompt", CT, body(model, part("prompt", "a\n--" + B + " b")), prompt,
+                     "bare"),
+                    ("no closing boundary", CT, body(model, close_it=False), frozenset(), "closing"),
+                    ("a part header block over 8 KiB", CT,
+                     body(model, part("image", b"x", filename="a.png", ctype="a" * 9000)), frozenset()),
+                    ("a model over 4 KiB", CT, body(part("model", "m" * 5000)), frozenset()),
+                    ("a model over 256 characters", CT, body(part("model", "m" * 257)), frozenset()),
+                    ("an output_format over 4 KiB", CT, body(model, part("output_format", "p" * 4097)), frozenset()),
+                    ("a prompt over 32 KiB", CT, body(model, part("prompt", "p" * 32769)), prompt),
+                    ("more than 64 parts", CT,
+                     body(model, *[part("image[]", b"x", filename="f%d.png" % i) for i in range(65)]), frozenset(),
+                     "64 parts"),
+                    ("a non-UTF-8 field", CT, body(part("model", b"\xff\xfe")), frozenset()),
+                    ("a control character in a field", CT, body(part("model", "m\x01x")), frozenset()),
+                    ("bare-LF framing", CT, body(model).replace(b"\r\n", b"\n"), frozenset()),
+                    ("a delimiter followed by neither CRLF nor --", CT,
+                     model + b"--" + B.encode() + b"X rest\r\n" + gq_close(B), frozenset()),
+                    ("a duplicate Content-Disposition", CT,
+                     body(part("model", GQ_IMG, headers=['Content-Disposition: form-data; name="x"'])), frozenset()),
+                    ("name*=", CT, body(part("", GQ_IMG, disposition="form-data; name*=UTF-8''model")), frozenset()),
+                    ("a percent-encoded name", CT, body(part("", GQ_IMG, disposition='form-data; name="mo%64el"')),
+                     frozenset()),
+                    ("a backslash in a name", CT, body(part("", GQ_IMG, disposition='form-data; name="mo\\del"')),
+                     frozenset()),
+                    ("an unquoted name", CT, body(part("", GQ_IMG, disposition="form-data; name=model")), frozenset()),
+                    ("Content-Transfer-Encoding", CT,
+                     body(part("model", GQ_IMG, headers=["Content-Transfer-Encoding: base64"])), frozenset()),
+                    ("an unknown part header", CT, body(part("model", GQ_IMG, headers=["X-Tf: 1"])), frozenset()),
+                    ("a non-empty epilogue", CT, body(model) + b"epilogue " + planted.encode(), frozenset(),
+                     "epilogue"),
+                    ("JSON duplicate model", "application/json", b'{"model":"a","model":"b"}', frozenset()),
+                    # F4: a key that only a case-insensitive reader would take for a guard field.
+                    ("JSON Model", "application/json", b'{"Model":"m"}', frozenset(), "lower case"),
+                    ("JSON STREAM", "application/json", b'{"model":"m","STREAM":true}', frozenset(), "lower case"),
+                    ("JSON model and Model", "application/json", b'{"model":"a","Model":"b"}', frozenset(),
+                     "lower case"),
+                    ("JSON Prompt when asked for", "application/json", b'{"model":"m","Prompt":"x"}', prompt,
+                     "lower case"),
+                    ("JSON array", "application/json", b'[1,2]', frozenset()),
+                    ("JSON without model", "application/json", b'{"prompt":"x"}', frozenset()),
+                    ("JSON stream as a string", "application/json", b'{"model":"m","stream":"true"}', frozenset()),
+                    ("JSON n as a bool", "application/json", b'{"model":"m","n":true}', frozenset()),
+                    ("JSON n as a float", "application/json", b'{"model":"m","n":1.5}', frozenset()),
+                    ("JSON not UTF-8", "application/json", b'\xff\xfe{}', frozenset()),
+                ]
+                # F1: a filename on a wanted name, either order against a text part of the same name.
+                for field, value in (("stream", "false"), ("n", "1"), ("size", "auto"), ("output_format", "png"),
+                                     ("response_format", "url"), ("prompt", "x")):
+                    file_part = part(field, b"\x00\x01", filename="f.bin")
+                    refused.append(("a %s file part" % field, CT, body(model, file_part), prompt, "not a file part"))
+                    refused.append(("a %s text part then a file part" % field, CT,
+                                    body(model, part(field, value), file_part), prompt, "not a file part"))
+                    refused.append(("a %s file part then a text part" % field, CT,
+                                    body(model, file_part, part(field, value)), prompt, "not a file part"))
+                # F3: a text part may carry no Content-Type but text/plain (with charset=utf-8).
+                for ctype in ("application/octet-stream", "text/html", "text/plain; charset=latin-1",
+                              "text/plain; charset=utf-8; x=y"):
+                    refused.append(("a text part with Content-Type %s" % ctype, CT,
+                                    body(part("model", GQ_IMG, ctype=ctype)), frozenset(), "Content-Type"))
+                for value in ("1", "True", " true", "yes", "TRUE"):
+                    refused.append(("stream=%r" % value, CT, body(model, part("stream", value)), frozenset()))
+                for value in ("04", "+1", " 2", "-1", "100", "1.5", "x"):
+                    refused.append(("n=%r" % value, CT, body(model, part("n", value)), frozenset()))
+                for field, value in (("output_format", "PNG"), ("output_format", "gif"),
+                                     ("response_format", "URL"), ("response_format", "json"),
+                                     ("size", "1024"), ("size", "1024X1024"), ("size", "123456x1")):
+                    refused.append(("%s=%r" % (field, value), CT, body(model, part(field, value)), frozenset()))
+                for label, ctype, raw, wanted, want in accepted:
+                    kind, got = run(ctype, raw, wanted)
+                    if kind != "ok" or got != want:
+                        problems.append("%s: %s %r, expected %r" % (label, kind, got if kind != "ok" else
+                                                                    dict(got), want))
+                for label, ctype, raw, wanted, *why in refused:
+                    kind, got = run(ctype, raw, wanted)
+                    if kind != 400:
+                        problems.append("%s: %s %s, expected an ApiError 400" % (
+                            label, "accepted" if kind == "ok" else kind, "" if kind == "ok" else got))
+                    elif why and why[0] not in got:
+                        problems.append("%s: the refusal %r does not name the rule (%r)" % (label, got[:120], why[0]))
+                    elif planted in got or GQ_IMG in got or any(v in got for _l, v in GQ_SENTINELS):
+                        problems.append("%s: the refusal text echoes content: %r" % (label, got[:120]))
+                # F13: the default `fields` of an InboundRequest is a read-only mapping, not a shared dict.
+                default = getattr(mod.InboundRequest, "_field_defaults", {}).get("fields")
+                if not isinstance(default, types.MappingProxyType):
+                    problems.append("InboundRequest.fields default is %r, expected a types.MappingProxyType"
+                                    % (type(default).__name__,))
+                return problems, ["accepted    : %d cases (canonical forms, boundaries, field vocabulary)" % len(accepted),
+                                  "refused     : %d cases, each a 400 naming field and rule, never content" % len(refused)]
+
+            def q11():
+                problems = []
+                before = len(peer.requests)
+                limit = 1 << 20
+                box = new_sandbox(fixture_root, "q11")
+                small = RouterProc(box, write_config(box, gq_config(peer.url())), ("--body-limit", limit),
+                                   label="q11")
+                try:
+                    if small.wait_ready() is None:
+                        return [gb_not_ready(small)], []
+                    sc = small.client()
+                    shape = [("model", GQ_IMG), ("prompt", "tf q11")]
+                    _c, empty = gq_multipart("tfq11b", shape, [("image", "a.png", "image/png", b"")])
+                    for label, size, want in (("exactly the body limit", limit, 200),
+                                              ("one byte over the body limit", limit + 1, 413)):
+                        pad = size - len(empty)
+                        ctype, mp = gq_multipart("tfq11b", shape, [("image", "a.png", "image/png", b"A" * pad)])
+                        if len(mp) != size:
+                            problems.append("%s: the test body is %d bytes, expected %d" % (label, len(mp), size))
+                            continue
+                        mark = len(peer.requests)
+                        status, _h, body, _first, _closed = gb_raw(sc, gb_request(
+                            sc, path=GQ_EDIT, body=mp, pairs=[("Authorization", "Bearer " + sc.token),
+                                                              ("Content-Type", ctype), ("Connection", "close")]),
+                                                                   timeout=HTTP_TIMEOUT_S)
+                        problems += gq_expect(label, status, body, 413) if want == 413 else \
+                            ([] if status == 200 else gq_expect(label, status, body, 200))
+                        if want == 413:
+                            problems += untouched(mark, label)
+                finally:
+                    small.close()
+                upstream_limit = getattr(mod, "_UPSTREAM_BODY_LIMIT", 64 << 20) if mod is not None else 64 << 20
+                prefix, suffix = b'{"data":[{"b64_json":"', b'"}]}'
+                for label, total, want in (("an answer just under the upstream limit", upstream_limit - 1024, 200),
+                                           ("an answer one byte over the upstream limit", upstream_limit + 1, 502)):
+                    big = prefix + b"A" * (total - len(prefix) - len(suffix)) + suffix
+                    state["script"] = lambda _i, _r, b=big: [("respond_json", 200, b)]
+                    try:
+                        status, _h, body = gq_post_raw(client, GQ_GEN, gq_json_body(GQ_IMG), timeout=60.0)
+                    finally:
+                        state["script"] = None
+                    if want == 200:
+                        if status != 200 or body != big:
+                            problems.append("%s: status %r, %d byte(s); expected the %d bytes back identical"
+                                            % (label, status, len(body), len(big)))
+                    else:
+                        problems += gq_expect(label, status, body, 502)
+                        if len(body) > 4096:
+                            problems.append("%s: %d body byte(s), expected a small envelope and no partial body"
+                                            % (label, len(body)))
+                    del big
+                return problems, ["request     : --body-limit 1 MiB: exactly the limit passes, +1 byte is a 413 "
+                                  "before the body is read",
+                                  "answer      : _UPSTREAM_BODY_LIMIT - 1 KiB relayed identical; +1 byte a 502"]
+
+            def q12():
+                problems = []
+                box = new_sandbox(fixture_root, "q12")
+                log_path = os.path.join(box, "q12.log")
+                lp = RouterProc(box, write_config(box, gq_config(peer.url())), ("--debug", "--log-file", log_path),
+                                label="q12")
+                prompt_s, b64_s, file_s = (v for _l, v in GQ_SENTINELS)
+                try:
+                    if lp.wait_ready() is None:
+                        return [gb_not_ready(lp)], []
+                    lc = lp.client()
+                    ok_body = ('{"created":1,"data":[{"b64_json":"%s"}]}' % b64_s).encode()
+                    state["script"] = lambda _i, _r: [("respond_json", 200, ok_body)]
+                    sent = []
+                    try:
+                        jb = gq_json_body(GQ_IMG, prompt_s)
+                        status, _h, back = gq_post_raw(lc, GQ_GEN, jb)
+                        sent.append(jb)
+                        if status != 200 or back != ok_body:
+                            problems.append("generations: status %r or the b64 body not back byte-exact" % status)
+                        ctype, mp = gq_multipart("tfq12b", [("model", GQ_IMG), ("prompt", prompt_s)],
+                                                 [("image", "a.png", "image/png", b"\x89PNG" + file_s.encode())])
+                        status, _h, back = gq_post_raw(lc, GQ_EDIT, mp, ctype)
+                        sent.append(mp)
+                        if status != 200 or back != ok_body:
+                            problems.append("edits: status %r or the b64 body not back byte-exact" % status)
+                        state["script"] = lambda _i, _r: [("respond_json", 500, {
+                            "error": {"message": "tf q12 " + prompt_s, "type": "server_error", "param": None,
+                                      "code": None}})]
+                        status, _h, body = gq_post(lc, GQ_GEN, gq_json_body(GQ_IMG, prompt_s))
+                        problems += gq_expect("upstream 500", status, body, 502, absent=(prompt_s, b64_s, file_s))
+                    finally:
+                        state["script"] = None
+                    # The vacuous-pass guard (compare i3): the peer really received the planted bytes.
+                    got = [r["body"] for r in peer.requests[-3:]]
+                    if len(got) < 3 or prompt_s.encode() not in got[0] or prompt_s.encode() not in got[1] \
+                            or file_s.encode() not in got[1]:
+                        problems.append("the peer did not receive the planted prompt and file bytes: the sweep would "
+                                        "prove nothing")
+                    time.sleep(0.3)
+                    try:
+                        with open(log_path, "r", encoding="utf-8", errors="replace") as fh:
+                            log_text = fh.read()
+                    except OSError:
+                        log_text = ""
+                    if not log_text.strip():
+                        problems.append("the --debug --log-file is empty: nothing to sweep")
+                    elif "endpoint='images_generations'" not in log_text:
+                        problems.append("no `req endpoint='images_generations'` line in the log")
+                    stderr = lp.stderr_text()
+                    for label, value in GQ_SENTINELS:
+                        if value in log_text or value in stderr:
+                            problems.append("%s reached the log or stderr" % label)
+                finally:
+                    lp.close()
+                return problems, ["planted     : prompt in a JSON and a multipart field, file bytes, b64 in the answer, "
+                                  "the prompt in an upstream error text",
+                                  "swept       : the --debug --log-file and stderr; the 502 answer"]
+
+            def q14():
+                problems = []
+                if mod is None:
+                    return ["cannot import the router"], []
+                box = new_sandbox(fixture_root, "q14")
+                cfg = mod.load_config(write_config(box, {
+                    "auth_token": TF_ROUTER_TOKEN,
+                    "backends": {"oa": {"kind": "openai", "api_key": TF_KEY_OPENAI}},
+                    "routes": {GQ_IMG: {"backend": "oa", "model": GQ_IMG, "modality": "image"}}}))
+                fake = types.SimpleNamespace(backend=cfg.backends["oa"], client_headers={}, stream=False)
+
+                def headers_for(value):
+                    return mod._rt_upstream_headers(fake, (None, (("content-type", value),)), None)
+
+                good = "multipart/form-data; boundary=abc"
+                try:
+                    pairs = headers_for(good)
+                    if pairs[0] != ("Content-Type", good):
+                        problems.append("Q14a: first pair %r, expected ('Content-Type', %r)" % (pairs[0], good))
+                    if [n for n, _v in pairs].count("Content-Type") != 1:
+                        problems.append("Q14a: Content-Type appears more than once")
+                    if headers_for("application/json")[0] != ("Content-Type", "application/json"):
+                        problems.append("Q14a: application/json is not accepted")
+                    plain = mod._rt_upstream_headers(fake, None, None)
+                    if plain[0] != ("Content-Type", "application/json"):
+                        problems.append("Q14a: no extra -> %r, expected the JSON default" % (plain[0],))
+                except Exception as exc:  # noqa: BLE001
+                    problems.append("Q14a: a valid content-type extra raised %s" % type(exc).__name__)
+                for label, value in (("an extra parameter", good + "; charset=utf-8"),
+                                     ("CR LF", good + "\r\nX-Evil: 1"), ("another type", "text/plain"),
+                                     ("JSON with a parameter", "application/json; charset=utf-8"),
+                                     ("a 71-character boundary", "multipart/form-data; boundary=" + "b" * 71)):
+                    try:
+                        headers_for(value)
+                    except mod.UpstreamError:
+                        pass
+                    except Exception as exc:  # noqa: BLE001
+                        problems.append("Q14a: %s raised %s, expected UpstreamError" % (label, type(exc).__name__))
+                    else:
+                        problems.append("Q14a: %s was accepted" % label)
+                before = len(peer.requests)
+                boundary = "tfq14b"
+                ctype, mp = gq_multipart(boundary, [("model", GQ_IMG), ("prompt", "x")], [])
+                status, _h, body = gq_post(client, GQ_EDIT, mp, ctype + "; charset=utf-8")
+                problems += gq_expect("an extra Content-Type parameter", status, body, 400)
+                status, _h, body, _first, _closed = gb_raw(client, gb_request(
+                    client, path=GQ_EDIT, body=mp, pairs=[bearer, ("Content-Type", ctype + "\r\n x=y"), close]))
+                problems += gq_expect("CR LF in the Content-Type", status, body, 400)
+                problems += untouched(before, "the refused content types")
+                status, _h, body = gq_post(client, GQ_EDIT, mp, 'multipart/form-data; boundary="%s"' % boundary,
+                                           headers={"X-Forwarded-For": "10.0.0.1", "Cookie": "tf=1"})
+                problems += [] if status == 200 else gq_expect("quoted boundary", status, body, 200)
+                if len(peer.requests) == before + 1:
+                    seen = gq_hdrs(peer.requests[-1])
+                    if seen.get("content-type") != [ctype]:
+                        problems.append("the upstream Content-Type is %r, expected the rebuilt %r"
+                                        % (seen.get("content-type"), ctype))
+                    for name in ("x-forwarded-for", "cookie", "origin", "x-api-key"):
+                        if name in seen:
+                            problems.append("a client %s header reached the peer" % name)
+                    if peer.requests[-1]["body"] != mp:
+                        problems.append("the body changed")
+                else:
+                    problems.append("the quoted-boundary control reached the peer %d time(s), expected 1"
+                                    % (len(peer.requests) - before))
+                # Marple: a JSON Content-Type with a parameter is accepted and goes upstream rebuilt, bare.
+                before = len(peer.requests)
+                status, _h, body = gq_post(client, GQ_GEN, gq_json_body(GQ_IMG), "application/json; charset=utf-8")
+                problems += [] if status == 200 else gq_expect("JSON with charset=utf-8", status, body, 200)
+                if len(peer.requests) == before + 1:
+                    if gq_hdrs(peer.requests[-1]).get("content-type") != ["application/json"]:
+                        problems.append("JSON with charset=utf-8: the upstream Content-Type is %r, expected exactly "
+                                        "application/json" % (gq_hdrs(peer.requests[-1]).get("content-type"),))
+                else:
+                    problems.append("JSON with charset=utf-8 reached the peer %d time(s), expected 1"
+                                    % (len(peer.requests) - before))
+                return problems, ["rebuilt     : a quoted token boundary goes upstream as the canonical unquoted form; "
+                                  "application/json; charset=utf-8 goes upstream as application/json",
+                                  "refused     : charset=, CR LF; no X-Forwarded-For, Cookie or Origin upstream"]
+
+            def q15():
+                problems = []
+                before = len(peer.requests)
+                ctype, mp = gq_multipart("tfq15b", [("model", GQ_IMG), ("prompt", "x")],
+                                         [("image", "a.png", "image/png", b"\x89PNG" * 64)])
+                status, _h, body, _first, _closed = gb_raw(client, gb_request(
+                    client, path=GQ_GEN, body=b"{}", length=None, pairs=gb_auth_pairs(client)))
+                problems += gq_expect("no Content-Length", status, body, 411)
+                status, _h, body, _first, _closed = gb_raw(client, gb_request(
+                    client, path=GQ_EDIT, body=b"0\r\n\r\n", length=None,
+                    pairs=gb_auth_pairs(client, ctype) + [("Transfer-Encoding", "chunked")]))
+                problems += gq_expect("a chunked multipart upload", status, body, 411)
+                problems += untouched(before, "411s")
+                with socket.create_connection((client.host, client.port), timeout=HTTP_TIMEOUT_S) as sock:
+                    sock.sendall(gb_request(client, path=GQ_EDIT, body=b"", length=len(mp),
+                                            pairs=gb_auth_pairs(client, ctype) + [("Expect", "100-continue")]))
+                    deadline = time.monotonic() + 5.0
+                    data = b""
+                    while b"\r\n\r\n" not in data and time.monotonic() < deadline:
+                        sock.settimeout(max(0.01, deadline - time.monotonic()))
+                        try:
+                            chunk = sock.recv(4096)
+                        except socket.timeout:
+                            break
+                        if not chunk:
+                            break
+                        data += chunk
+                    interim, _sep, rest = data.partition(b"\r\n\r\n")
+                    if not interim.startswith(b"HTTP/1.1 100"):
+                        problems.append("Expect: %r before the body, expected HTTP/1.1 100 Continue" % interim[:40])
+                    else:
+                        sock.settimeout(HTTP_TIMEOUT_S)
+                        sock.sendall(mp)
+                        _closed, more = socket_closed_by_peer(sock, time.monotonic() + HTTP_TIMEOUT_S)
+                        status, _h, body, _first = gb_parse_raw(rest + more)
+                        if status != 200:
+                            problems.append("Expect: the answer after the body is %r, expected 200" % status)
+                return problems, ["411         : no Content-Length, a chunked multipart upload (OpenAI envelope)",
+                                  "Expect      : 100 Continue after auth and framing, then the multipart body"]
+
+            def q16():
+                problems = []
+                for route, want, label in ((GQ_IMG_FAST, 504, "idle_timeout 1 against a 3 s stall"),
+                                           (GQ_IMG_SLOW, 200, "idle_timeout 6 against the same stall")):
+                    state["script"] = lambda _i, _r: [("stall", 3), ("respond_json", 200, GQ_OK)]
+                    t0 = time.monotonic()
+                    try:
+                        status, _h, body = gq_post(client, GQ_GEN, gq_json_body(route))
+                    finally:
+                        state["script"] = None
+                    took = time.monotonic() - t0
+                    problems += [] if status == 200 and want == 200 else gq_expect(label, status, body, want)
+                    if want == 504 and took > 2.8:
+                        problems.append("%s: the 504 took %.1f s, expected about 1 s" % (label, took))
+                return problems, ["stall       : the peer is silent 3 s: idle_timeout 1 -> 504 (OpenAI envelope), "
+                                  "idle_timeout 6 -> 200"]
+
+            def q17():
+                problems = []
+                box = new_sandbox(fixture_root, "q17")
+                plan = []
+                peer17 = ScriptedPeer(script=lambda _i, r: (
+                    [("respond_json", 200, GQ_CHAT_OK)] if r["line"].split(" ")[1].startswith("/v1/messages")
+                    else {"stall3": [("stall", 3), ("respond_json", 200, GQ_OK)],
+                          "stall15": [("stall", 1.5), ("respond_json", 200, GQ_OK)],
+                          "err500": [("respond_json", 500, {"error": {"message": "tf q17", "type": "server_error",
+                                                                        "param": None, "code": None}})],
+                          }.get(plan.pop(0) if plan else "", [("respond_json", 200, GQ_OK)])))
+                cfgpath = write_config(box, gq_config(peer17.url()))
+                capped = RouterProc(box, cfgpath, ("--max-image-requests", 1), label="q17")
+                try:
+                    if capped.wait_ready() is None:
+                        return [gb_not_ready(capped)], []
+                    cc = capped.client()
+
+                    def images():
+                        return len([r for r in peer17.requests if r["line"].split(" ")[1].startswith("/v1/images")])
+
+                    def wait_images(n, seconds=3.0):
+                        end = time.monotonic() + seconds
+                        while images() < n and time.monotonic() < end:
+                            time.sleep(0.02)
+                        return images() >= n
+
+                    plan[:] = ["stall3"]
+                    first = {}
+
+                    def worker():
+                        try:
+                            first["r"] = gq_post(cc, GQ_GEN, gq_json_body(GQ_IMG_SLOW))
+                        except Exception as exc:  # noqa: BLE001
+                            first["r"] = (type(exc).__name__, {}, b"")
+
+                    thread = threading.Thread(target=worker, daemon=True)
+                    thread.start()
+                    if not wait_images(1):
+                        problems.append("the first image request never reached the peer")
+                    t0 = time.monotonic()
+                    status, hdrs, body = gq_post(cc, GQ_GEN, gq_json_body(GQ_IMG_SLOW))
+                    problems += gq_expect("second image request while the first waits", status, body, 429)
+                    if hdrs.get("retry-after") != "1":
+                        problems.append("the 429 carries Retry-After %r, expected 1" % hdrs.get("retry-after"))
+                    if time.monotonic() - t0 > 1.5:
+                        problems.append("the 429 took %.1f s: it must be immediate" % (time.monotonic() - t0))
+                    if images() != 1:
+                        problems.append("the peer saw %d image request(s), expected only the first" % images())
+                    status, _h, body = cc.post(path=MESSAGES_PATH, obj=gd_body(GQ_CHAT))
+                    if status != 200:
+                        problems += answer_status("a chat request while an image request waits", status, body, 200)
+                    thread.join(10.0)
+                    if first.get("r", (None,))[0] != 200:
+                        problems.append("the first image request ended with %r, expected 200" % (first.get("r", (None,))[0],))
+                    status, _h, body = gq_post(cc, GQ_GEN, gq_json_body(GQ_IMG_SLOW))
+                    problems += [] if status == 200 else gq_expect("after the first completed", status, body, 200)
+                    plan[:] = ["err500"]
+                    status, _h, body = gq_post(cc, GQ_GEN, gq_json_body(GQ_IMG_SLOW))
+                    problems += gq_expect("upstream error", status, body, 502)
+                    status, _h, body = gq_post(cc, GQ_GEN, gq_json_body(GQ_IMG_SLOW))
+                    problems += [] if status == 200 else gq_expect("after an upstream error", status, body, 200)
+                    plan[:] = ["stall15"]
+                    n = images()
+                    request = gb_request(cc, path=GQ_GEN, body=gq_json_body(GQ_IMG_SLOW),
+                                         pairs=[("Authorization", "Bearer " + cc.token),
+                                                ("Content-Type", "application/json"), ("Connection", "close")])
+                    with socket.create_connection((cc.host, cc.port), timeout=HTTP_TIMEOUT_S) as sock:
+                        sock.sendall(request)
+                        wait_images(n + 1)
+                    time.sleep(2.5)       # the orphaned request finishes; nothing notices the client left
+                    status, _h, body = gq_post(cc, GQ_GEN, gq_json_body(GQ_IMG_SLOW))
+                    problems += [] if status == 200 else gq_expect("after a client disconnect", status, body, 200)
+                finally:
+                    capped.close()
+                    peer17.close()
+                for flag, value in (("low", "0"), ("high", "65")):
+                    problems += ga_cli_refused(box, cfgpath, "q17-" + flag, ["--max-image-requests", value],
+                                               ["--max-image-requests"])
+                # F10: a cap that is not below --max-connections can never refuse anything: one WARNING at start.
+                for label, argv, want in (("cap >= connections", ("--max-image-requests", 8, "--max-connections", 4), True),
+                                          ("cap < connections", ("--max-image-requests", 3, "--max-connections", 4), False)):
+                    wp = RouterProc(box, cfgpath, argv, label="q17w" + ("1" if want else "0"))
+                    try:
+                        if wp.wait_ready() is None:
+                            problems.append("%s: the router did not start" % label)
+                            continue
+                        lines = [ln for ln in wp.stderr_text().splitlines() if "--max-image-requests" in ln]
+                        if want and (len(lines) != 1 or "WARNING" not in lines[0] or "8" not in lines[0]
+                                     or "4" not in lines[0]):
+                            problems.append("%s: expected one WARNING naming both caps, got %r" % (label, lines[:2]))
+                        elif not want and lines:
+                            problems.append("%s: unexpected warning %r" % (label, lines[0][:120]))
+                    finally:
+                        wp.close()
+                return problems, ["cap         : --max-image-requests 1: a second image request is an immediate 429 "
+                                  "(Retry-After: 1), a chat request is not starved",
+                                  "release     : after a success, an upstream error and a departed client",
+                                  "flag        : 0 and 65 are refused at start; a cap not below --max-connections "
+                                  "warns once"]
+
+            def q18():
+                problems = []
+                before = len(peer.requests)
+                for label, model in (("dot-dot", "../sdcpp/v1/models/load"), ("encoded dot-dot", "%2e%2e/models"),
+                                     ("embedded dot-dot", GQ_IMG + "/../x"), ("a query", GQ_IMG + "?x=1")):
+                    status, _h, body = gq_post(client, GQ_GEN, gq_json_body(model))
+                    problems += gq_expect("model " + label, status, body, 404)
+                for path in (GQ_GEN + "?x=1", GQ_GEN + "/../models/load", "/v1/images/generations%2f..",
+                             "/v1/images//generations", GQ_EDIT + "/", "/v1/images/variations"):
+                    status, _h, body = gq_post(client, path, gq_json_body(GQ_IMG))
+                    if status not in (400, 404):
+                        problems.append("POST %s: status %r, expected 400 or 404" % (path, status))
+                problems += untouched(before, "the hostile models and paths")
+                ctype, mp = gq_multipart("tfq18b", [("model", GQ_IMG), ("prompt", "x")], [])
+                for path, raw, ct in ((GQ_GEN, gq_json_body(GQ_IMG), "application/json"), (GQ_EDIT, mp, ctype)):
+                    status, _h, body = gq_post(client, path, raw, ct)
+                    if status != 200:
+                        problems += gq_expect("control " + path, status, body, 200)
+                lines = sorted(r["line"] for r in peer.requests[before:])
+                want = sorted(["POST /v1/images/generations HTTP/1.1", "POST /v1/images/edits HTTP/1.1"])
+                if lines != want:
+                    problems.append("the peer saw %r, expected exactly %r" % (lines, want))
+                return problems, ["refused     : a model or path spelled like a traversal or a query is a 404 with "
+                                  "the peer untouched",
+                                  "peer        : only POST /v1/images/generations and /v1/images/edits"]
+
+            for cid, fn in zip(GQ_CASES, (q1, q2, q3, q4, q5, q6, q7, q8, q8b, q9, q10, q11, q12, q14, q15,
+                                          q16, q17, q18)):
+                if router_why is not None and fn not in (q1, q10):
+                    got[cid] = ([router_why], [])
+                    continue
+                try:
+                    got[cid] = fn()
+                except Exception as exc:  # noqa: BLE001 -- a broken case fails, never aborts the group
+                    got[cid] = (["case raised %s: %s" % (type(exc).__name__, gi_redact(str(exc))[:200])], [])
+            results = got
+    except Exception as exc:  # noqa: BLE001 -- a setup failure fails every case not yet run
+        setup = "the group setup raised %s: %s" % (type(exc).__name__, gi_redact(str(exc))[:200])
+    finally:
+        if proc is not None:
+            proc.close()
+        peer.close()
+    for cid, qid in zip(GQ_CASES, GQ_IDS):
+        problems, detail = results.get(cid, ([setup], []))
+        suite.record(GQ, cid, problems, detail=["case        : " + qid] + list(detail))
+
+
+# ---------------------------------------------------------------------------
 # Group I: secret leak
 # ---------------------------------------------------------------------------
 
@@ -18653,6 +19937,9 @@ GJ_CASES = (
     "duplicate key -> ValueError",       # J34
     "role refusal logs type name only",  # J35
     "kind registry values pinned",       # J39 (R-0084)
+    "image hooks: chat kinds inherit",   # J42
+    "no format receives the request",    # J43
+    "image path only from IMAGE_PATHS",  # J44
 )
 
 # J34 (F10): a key that appears twice in one object, at any depth, is a ValueError from
@@ -19703,6 +20990,90 @@ def gj_control(checker, clean, planted, needles):
         ["planted     : %s" % finding for finding in (got or ["no finding"])]
 
 
+# J42-J44 (the image endpoints): the hooks a chat kind must not override, the rule that nothing
+# formats an InboundRequest (its raw bytes and sniffed fields hold prompts and images), and the
+# rule that an upstream image path is only ever an IMAGE_PATHS[...] subscript.
+GJ_IMG_HOOKS = ("image_request", "image_head", "image_response")
+GJ_LOG_CALLS = frozenset({"debug", "info", "warning", "error", "exception", "critical", "log"})
+# Calls whose arguments become text: a logging call, str.format, and the helpers that build a message.
+GJ_FORMAT_CALLS = GJ_LOG_CALLS | frozenset({"format", "_log_value", "_rt_bad", "ApiError", "UpstreamError",
+                                            "ConfigError", "repr", "str"})
+
+
+def gj_inbound_tainted(node):
+    """True when *node* is the InboundRequest itself or its .raw / .fields, or holds one (an attribute
+    chain, a call, a container).  inbound.route.name and the like are not tainted."""
+    if isinstance(node, ast.Name):
+        return node.id == "inbound"
+    if isinstance(node, ast.Attribute):
+        if gj_is_name(node.value, "inbound"):
+            return node.attr in ("raw", "fields")
+        return gj_inbound_tainted(node.value)
+    return any(gj_inbound_tainted(child) for child in ast.iter_child_nodes(node))
+
+
+def rule_j43(source):
+    """J43: no logging call, str.format, f-string, `%` format or message-building helper receives
+    `inbound`, `inbound.raw` or `inbound.fields`, and the request summary `rec` never gets a `fields`
+    or `raw` key."""
+    tree, found = gj_parse(source)
+    if tree is None:
+        return found
+    for node, scope in gj_scopes(tree):
+        line = getattr(node, "lineno", 0)
+        where = gj_scope_text(scope)
+        if isinstance(node, ast.Call) and gj_callee(node) in GJ_FORMAT_CALLS:
+            args = list(node.args) + [kw.value for kw in node.keywords]
+            if any(gj_inbound_tainted(arg) for arg in args):
+                found.append("%d: %s passes the request, its raw bytes or its fields to %s(...)"
+                             % (line, where, gj_callee(node)))
+        elif isinstance(node, ast.JoinedStr):
+            if any(isinstance(v, ast.FormattedValue) and gj_inbound_tainted(v.value) for v in node.values):
+                found.append("%d: %s formats the request, its raw bytes or its fields in an f-string" % (line, where))
+        elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mod) \
+                and isinstance(node.left, ast.Constant) and isinstance(node.left.value, str) \
+                and gj_inbound_tainted(node.right):
+            found.append("%d: %s formats the request, its raw bytes or its fields with %%" % (line, where))
+        elif isinstance(node, ast.Subscript) and gj_is_name(node.value, "rec") \
+                and isinstance(node.slice, ast.Constant) and node.slice.value in ("fields", "raw"):
+            found.append("%d: %s puts a %r key on rec" % (line, where, node.slice.value))
+        elif isinstance(node, ast.Assign) and isinstance(node.value, ast.Dict) \
+                and any(isinstance(t, ast.Attribute) and t.attr == "_rt_rec" for t in node.targets):
+            for key in node.value.keys:
+                if isinstance(key, ast.Constant) and key.value in ("fields", "raw"):
+                    found.append("%d: %s puts a %r key on rec" % (line, where, key.value))
+    return found
+
+
+def rule_j44(source):
+    """J44: every image_request implementation (a function with a return) returns a tuple whose first
+    element is an `IMAGE_PATHS[...]` subscript with no f-string or `+` / `%` in the index, so the upstream
+    path never comes from client input; at least one implementation exists (no vacuous pass)."""
+    tree, found = gj_parse(source)
+    if tree is None:
+        return found
+    implementations = 0
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.FunctionDef) and node.name == "image_request"):
+            continue
+        returns = [n for n in ast.walk(node) if isinstance(n, ast.Return)]
+        if not returns:
+            continue                      # the base hook raises
+        implementations += 1
+        for ret in returns:
+            value = ret.value
+            first = value.elts[0] if isinstance(value, ast.Tuple) and value.elts else None
+            table = first.value if isinstance(first, ast.Subscript) else None
+            named = (isinstance(table, ast.Attribute) and table.attr == "IMAGE_PATHS") or gj_is_name(table, "IMAGE_PATHS")
+            if not named:
+                found.append("%d: image_request returns a path that is not an IMAGE_PATHS[...] subscript" % ret.lineno)
+            elif isinstance(first.slice, (ast.JoinedStr, ast.BinOp)):
+                found.append("%d: image_request builds its IMAGE_PATHS index with a format or an operator" % ret.lineno)
+    if not implementations:
+        found.append("no image_request implementation returns a path: the rule would pass vacuously")
+    return found
+
+
 def group_j_static(suite):
     """J1-J4, J13, J37 and J40 over the live router, then their planted controls J15-J19, J23, J36,
     J38 and J41."""
@@ -20632,9 +22003,73 @@ def group_j(suite, fixture_root, pyc_before, tree_before):
         return problems, ["kinds       : %s (reserved: %s)" % (", ".join(GJ_REG_KINDS), ", ".join(GJ_REG_RESERVED))] + \
             ["refused     : " + s for s in shown]
 
+    def j42():
+        problems = gj_missing(mod, ("Adapter", "ADAPTERS", "_RT_IMAGE_ENDPOINTS"))
+        if problems:
+            return problems, []
+        base = mod.Adapter
+        for hook in GJ_IMG_HOOKS + ("MODALITIES", "IMAGE_PATHS"):
+            if not hasattr(base, hook):
+                problems.append("Adapter defines no %s" % hook)
+        if problems:
+            return problems, []
+        if base.MODALITIES != frozenset({"chat"}):
+            problems.append("Adapter.MODALITIES is %r, expected {'chat'}" % (set(base.MODALITIES),))
+        shown = []
+        for kind in GJ_BASE_HOOK_KINDS:
+            cls = type(mod.ADAPTERS[kind])
+            for hook in GJ_IMG_HOOKS:
+                if getattr(cls, hook, None) is not getattr(base, hook, None):
+                    problems.append("%s overrides %s: a chat kind keeps the base image hooks" % (kind, hook))
+            if cls.MODALITIES != frozenset({"chat"}):
+                problems.append("%s.MODALITIES is %r, expected {'chat'}" % (kind, set(cls.MODALITIES)))
+            shown.append(kind)
+        want = {"openai": frozenset({"chat", "image"}), "codex": frozenset({"chat"})}
+        for kind, modalities in want.items():
+            got = mod.ADAPTERS[kind].MODALITIES
+            if got != modalities:
+                problems.append("%s.MODALITIES is %r, expected %r" % (kind, set(got), set(modalities)))
+        with open(SERVER, "r", encoding="utf-8") as fh:
+            tree, findings = gj_parse(fh.read())
+        problems += findings
+        post = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "_post"] if tree else []
+        if len(post) != 1:
+            problems.append("_post is defined %d time(s), expected once" % len(post))
+        elif not any(isinstance(n, ast.Name) and n.id == "_RT_IMAGE_ENDPOINTS" for n in ast.walk(post[0])):
+            problems.append("_post never references _RT_IMAGE_ENDPOINTS: the image endpoints are not dispatched there")
+        return problems, ["kinds       : %s keep the base image hooks and MODALITIES {'chat'}" % ", ".join(shown),
+                          "modalities  : openai chat+image, codex chat; _post references _RT_IMAGE_ENDPOINTS"]
+
+    def gj_control_hits(rule, planted_tail, needles):
+        """Problems unless *rule* is silent on the live source and names each needle once *planted_tail* is appended."""
+        with open(SERVER, "r", encoding="utf-8") as fh:
+            source = fh.read()
+        problems = ["live: " + f for f in rule(source)]
+        got = rule(source + planted_tail)
+        for needle in needles:
+            if not any(needle in finding for finding in got):
+                problems.append("the planted control was not caught for %r (findings: %s)" % (needle, got[:3] or "none"))
+        return problems, got
+
+    def j43():
+        tail = ("\n\ndef _tf_plant(inbound, rec):\n    log.debug('x %s', inbound)\n    log.debug('y %s', inbound.fields)\n"
+                "    text = f'{inbound.raw}'\n    other = 'z %s' % (inbound.raw,)\n    rec['fields'] = 1\n"
+                "    shown = repr(inbound)\n    shown2 = str(inbound.fields)\n")
+        problems, got = gj_control_hits(rule_j43, tail, ("debug", "f-string", "with %", "'fields' key on rec",
+                                                         "to repr(", "to str("))
+        return problems, ["planted     : %d finding(s) on a doctored copy" % len(got)]
+
+    def j44():
+        tail = ("\n\nclass _TfPlant:\n    def image_request(self, inbound):\n"
+                "        return '/v1/images/' + inbound.endpoint, inbound.raw\n")
+        problems, got = gj_control_hits(rule_j44, tail, ("not an IMAGE_PATHS[...] subscript",))
+        return problems, ["planted     : %d finding(s) on a doctored copy" % len(got)]
+
     try:
+        if len(GJ_CASES) != 21:
+            raise AssertionError("GJ_CASES holds %d cases, expected 21 (the dispatch tuple must match)" % len(GJ_CASES))
         for cid, fn in zip(GJ_CASES, (j6, j7, j8, j12, j21, j24, j25, j26, j27, j28, j29, j30, j31, j32, j33,
-                                      j34, j35, j39)):
+                                      j34, j35, j39, j42, j43, j44)):
             try:
                 results[cid] = fn()
             except Exception as exc:  # noqa: BLE001 -- a broken case fails, never aborts the group
@@ -21049,12 +22484,12 @@ def group_j_hygiene(suite, fixture_root, pyc_before, tree_before):
 # ---------------------------------------------------------------------------
 
 # The groups in run order.  A group whose step has not landed yet is absent
-# from this module and is simply not called.  K-O run before I and J: I1 sweeps
+# from this module and is simply not called.  K-Q run before I and J: I1 sweeps
 # every stderr and log file the run collected, and J9/J10 compare the bytecode
 # and repo snapshots taken at the start, so both must run last.
 GROUP_ORDER = ("group_a", "group_b", "group_c", "group_d", "group_e",
                "group_f", "group_g", "group_h", "group_k", "group_l",
-               "group_m", "group_n", "group_o", "group_p", "group_i", "group_j")
+               "group_m", "group_n", "group_o", "group_p", "group_q", "group_i", "group_j")
 
 
 def run(opts=None):
