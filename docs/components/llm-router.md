@@ -11,8 +11,8 @@ sources:
   - tests/test_llm_router.py
   - tests/files/llm_router/README.md
 verified:
-  commit: bf17f0c
-  date: 2026-10-08
+  commit: abdd186
+  date: 2026-10-27
 links:
   - 0028-route-by-model-translate-at-the-edge
   - mcp-proxy
