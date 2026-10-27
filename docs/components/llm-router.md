@@ -994,12 +994,20 @@ whitelisted `type`/`code` (for example `usage_limit_reached`) are relayed as
 above `Scripts/llm-router.py:ResponsesImageAdapter`. The `openai` kind's
 `openai-oauth` profile is still refused for image routes. **Declared status:**
 the endpoint is private and unstable, not available on Free plans and limited by
-the plan's quota; the JSON and the multipart edit forms are both accepted and
-neither is proven there; the paths and headers are taken from the open-source
-Codex CLI and are **not yet measured live** (live smoke: pending), and the test
-group S uses synthetic fixtures. The login's account id (8 or more characters) is
-pinned in the scrubber beside the tokens, so an upstream error text that echoes it
-is relayed with `[redacted]` in its place (S4).
+the plan's quota; the paths and headers are taken from the open-source Codex CLI.
+**Measured live on 2026-10-27** through the router with `gpt-image-2`: a
+generation answered 200 in about 22 s and a JSON edit carrying
+`images[].image_url` 200 in about 16 s, each answer holding the keys
+`background`, `created`, `data` (`[{b64_json, generation_id}]`), `output_format`,
+`quality` (`auto` came back resolved to `low`), `safety_identifier`, `size`
+(`auto` came back resolved to `1254x1254`) and `usage`. Not tried there: a
+multipart edit and `output_format` `jpeg`. A successful answer carries no quota
+or limit information, and the shape of a quota-exhausted error has not been
+seen. The test group S still uses synthetic fixtures. The login's account id
+(at least `Scripts/llm-router.py:_RT_ACCOUNT_PIN_MIN` characters) is pinned in
+the scrubber beside the tokens, from the token store's seed, a login adopted from
+disk and every refresh, so an upstream error text that echoes it is relayed with
+`[redacted]` in its place `Scripts/llm-router.py:_rt_scrub_pin_account` (S4).
 
 **The `sdcpp` kind: a stable-diffusion.cpp sd-server.** An `sdcpp` backend serves
 image routes only (`MODALITIES` is `{image}`; its chat hooks are the base ones and
@@ -1029,9 +1037,9 @@ never a value, with the peer untouched `Scripts/llm-router.py:SdcppAdapter`:
   router refuses instead.
 - **An edit needs an explicit `WxH` `size`.** Absent or `auto` is a 400 "size: an
   explicit WxH is required on this route", because sd-server derives an edit's size
-  from the uploaded image when `size` is absent or `auto` (measured in the sd.cpp
-  source, `set_width_and_height_if_unset`; clamped to 4096 per side), which would
-  sidestep `max_pixels`. A generation keeps `auto` and absent: the server's
+  from the uploaded image when `size` is absent or `auto` (read in the sd.cpp
+  source, `set_width_and_height_if_unset`, clamped to 4096 per side; the absent
+  case also measured live), which would sidestep `max_pixels`. A generation keeps `auto` and absent: the server's
   operator-set default applies.
 - **The prompt rule.** A prompt that holds `sd_cpp_extra_args` in any letter case
   (the decoded JSON string or the multipart `prompt` field, so a `_` escape does
@@ -1081,6 +1089,17 @@ path is only ever `/v1/images/generations` or `/edits`. The limits are measured 
 one sd.cpp commit and one model; re-measure when the build changes, and note that
 `size: auto` and the server's request-size cap are unmeasured. A direct sd.cpp
 change that accepts `stream` or webp is not followed until the router is.
+
+**Measured live (2026-10-27)** against a real sd-server, FLUX Klein at sd.cpp
+`be486498`, the backing for the R group's fixtures: a 512 x 512 generation in
+about 2.7 s and a multipart edit in about 5.3 s through the router; an edit with
+no `size` takes the uploaded image's size; this build refuses `webp` on both
+endpoints; a malformed `size` silently falls back to 1024 x 1024; `n` is clamped
+to 1-8; a 404 has an empty body; every answer carries
+`Access-Control-Allow-Origin: *`; an unparseable JSON body is a 500
+`{"error": "server_error", "message": ...}`; and the server answers an invalid
+extra-args tag with a 400 (the router refuses any prompt holding the marker
+before it is sent).
 
 ## OAuth: the token store and the write-back
 
@@ -1268,8 +1287,11 @@ token store — single-flight refresh, the forced refresh on 401, the shared
 failure, the bounded wait, a login landing mid-refresh, and the learned Mistral
 effort `tests/test_llm_router.py:group_n` — and the `login` subcommand against
 a scripted auth peer `tests/test_llm_router.py:group_o`, the `upstream failed:`
-line `tests/test_llm_router.py:group_p` and the image endpoints
-`tests/test_llm_router.py:group_q`. K-Q run before I and
+line `tests/test_llm_router.py:group_p`, the image endpoints
+`tests/test_llm_router.py:group_q`, the `sdcpp` kind
+`tests/test_llm_router.py:group_r`, the codex image routes
+`tests/test_llm_router.py:group_s` and the streamed image answers
+`tests/test_llm_router.py:group_t`. K-T run before I and
 J, because I sweeps every log the run collected and J compares start-of-run
 snapshots `tests/test_llm_router.py:GROUP_ORDER`. Its case count is declared
 once, per group, in `tests/run.py:SUITES`, and checked against the run; the
@@ -1349,8 +1371,19 @@ in-flight slot freed after a client hang-up (the upstream closed too), a
 completed stream and a stall (T6); the idle stall as an in-band error after about
 `idle_timeout` (T7); no prompt or image sentinel in a log and an upstream error
 event scrubbed (T8); non-2xx upstream answers as OpenAI JSON with no SSE head and
-a non-event-stream 2xx as a 502 (T9); and `ImageEventRelay` as a sans-IO unit with
-the adapter's policy (T10).
+a non-event-stream 2xx as a 502 (T9); `ImageEventRelay` as a sans-IO unit with
+the adapter's policy (T10); completion read from a data-only event's `type`
+within the first `Scripts/llm-router.py:_RT_IMAGE_TYPE_WINDOW` bytes, end to end with a completed event over 2 MiB, and a
+`type` past that window not completing (T11)
+`tests/test_llm_router.py:gt_t11`; the relay hardening as a sans-IO unit -- the
+size check before the append, the line cap per event
+(`Scripts/llm-router.py:_RT_IMAGE_SSE_EVENT_LINES`), the bare CR in a long line, a
+second `event:` or a foreign field, `completed` only after a real completion
+(T12) `tests/test_llm_router.py:gt_t12`; and the same end to end -- an upstream
+`event: error` mentioning `.completed` recorded as an error with its slot freed,
+a 70 KiB line with a bare CR, a real completion still `end=message_stop`, and a
+comment-only trickle past `idle_timeout` a stall (T13)
+`tests/test_llm_router.py:gt_t13`.
 
 **Codex image routes (experimental).** Group S `tests/test_llm_router.py:group_s`
 `tests/test_llm_router.py:GS_IDS` drives a codex OAuth backend through the N
@@ -1360,8 +1393,11 @@ byte-identical bodies of a generation, a JSON edit and a multipart edit, the
 login's Bearer and account id, `Accept: application/json`, no `session_id`, and
 a chat request on the same backend unchanged (S2); a 401, one refresh and the
 same raw body resent, then the OpenAI-shaped re-login answer (S3); the
-usage-limit and plan error mapping and the token scrub (S4); and no token,
-account id or prompt in the log or stderr (S5).
+usage-limit and plan error mapping and the token scrub, with a 400 and a 429
+echoing the account id relayed with `[redacted]` (S4)
+`tests/test_llm_router.py:gs_s4`; and no token, account id or prompt in the log
+or stderr (S5). The live run of 2026-10-27 is recorded above and in ADR 0028's
+addendum, not as a fixture.
 
 **The sdcpp kind.** Group R `tests/test_llm_router.py:group_r`
 `tests/test_llm_router.py:GR_IDS` drives an `sdcpp` backend on a scripted peer whose
@@ -1519,11 +1555,23 @@ read before relying on one of them. In brief:
   first byte and the size bound, and neither parses nor scrubs the body.
 - **A JSON edit's `image_url` values are fetched by OpenAI,** outside this
   router's address policy.
-- **The image endpoints are unmeasured live.** No call has reached
-  api.openai.com; whether it accepts the JSON edit form alongside multipart is
-  open, and how its multipart parser reads an odd body is unknown — which is why
-  the sniffer accepts only the canonical spelling rather than guessing the
-  upstream's.
+- **The `openai` image endpoints are unmeasured live.** No OpenAI Images API
+  call has succeeded: the API-key account used had no credits. Whether
+  api.openai.com accepts the JSON edit form alongside multipart (OQ-1) is open,
+  and how its multipart parser reads an odd body is unknown — which is why the
+  sniffer accepts only the canonical spelling rather than guessing the
+  upstream's. The live SSE event names and sizes are unverified too (the bullet
+  above). Measured live, by contrast: the codex image routes (generations and a
+  JSON edit, not a multipart edit or `jpeg`) and an `sdcpp` backend against one
+  sd-server build, both in *Image endpoints* above.
+- **The codex image routes ride a private, unstable endpoint.** It may change or
+  vanish without notice; a successful answer says nothing about the remaining
+  quota, and what a quota-exhausted error looks like has not been seen, so its
+  `type` and `code` reach the client only if they pass the token rule. The
+  codex image stream is not relayed (`stream: true` is a 400).
+- **An sd-server has no authentication,** so the router's bearer protects only
+  the router: the sd-server must be reachable through the router alone (see
+  *Declared limits of `sdcpp`* above).
 - **Two refusals on an image path stay Anthropic-shaped:** a header-defect 400
   and an unknown-path 404, both answered before the path is known.
 - **A stalled resolve is given up, not interrupted.** `getaddrinfo` cannot be

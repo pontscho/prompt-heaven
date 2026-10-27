@@ -5563,8 +5563,9 @@ class ResponsesImageAdapter(ResponsesAdapter):
 class CodexAdapter(ResponsesImageAdapter):
     """kind codex: the ChatGPT-subscription Responses endpoint (profile codex) and, EXPERIMENTAL, the
     private ChatGPT backend image endpoints beside it (POST <codex base>/codex/images/generations and
-    /edits, authenticated like /responses; the Codex CLI's JSON bodies are relayed raw). Unmeasured live,
-    unstable, not on Free plans; both the JSON and the multipart edit forms are accepted, neither proven."""
+    /edits, authenticated like /responses; the Codex CLI's JSON bodies are relayed raw). Measured live
+    2026-10-27 (generations and the JSON edit form answered 200); unstable, not on Free plans; the
+    multipart edit form is accepted but unproven."""
 
     kind = "codex"
     ROUTE_OPTIONS: Mapping[str, _RtOptionValidator] = {
@@ -9458,7 +9459,8 @@ example config (chmod 600; token: python3 -c 'import secrets;print(secrets.token
   login), a route key equal to its model, and is not allowed on "default" (an image path never falls
   back to it). EXPERIMENTAL: a codex backend (ChatGPT login) also takes image routes, relayed to
   the private <base>/codex/images/... endpoints with the client's body as sent (the Codex CLI
-  shape); unstable, not on Free plans, quota-limited, not measured live. The router reads only
+  shape); unstable, not on Free plans, quota-limited; generations and the JSON edit form were
+  measured live (2026-10-27), the multipart edit form was not. The router reads only
   model and a few guard fields and forwards the body as it came;
   raise --body-limit for large edit uploads. A sdcpp backend (a stable-diffusion.cpp sd-server;
   loopback needs allow_private AND allow_loopback, a LAN host allow_private) takes image routes
