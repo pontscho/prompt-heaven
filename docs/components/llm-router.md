@@ -764,7 +764,8 @@ the `openai` kind forwards no client header.
 the path is an image path, every refusal — the bearer 401, Host and Origin 403,
 405, 411, 413, 415, the parser's 400s, the in-flight 429, an upstream failure —
 is `{"error": {"message", "type", "param", "code"}}`, its `type` picked by the
-status (`invalid_request_error`, `requests` for 429, `server_error` for 5xx)
+status (`invalid_request_error`, `requests` for 429, `server_error` for 5xx;
+a relayed upstream 400/404/413/422/429 may carry its own, see below)
 and its `code` the caller's or the status's default (`invalid_api_key`,
 `rate_limit_exceeded`) `Scripts/llm-router.py:_rt_openai_error_body`
 `Scripts/llm-router.py:_rt_err`. The flag is reset for every request of a
@@ -847,9 +848,15 @@ most 64 KiB, with every non-printable character a space, through the KD-9
 scrubber and a case-insensitive pattern strip of `sk-...` keys, `Bearer`
 credentials, `org-`/`proj-`/`req-`/`sess-` ids and `****abcd` key tails, then
 cut at `Scripts/llm-router.py:_ERROR_TEXT_WIDTH` (300); every other status gets a
-fixed text `Scripts/llm-router.py:_rt_image_error_text`
+fixed text `Scripts/llm-router.py:_rt_image_error`
 `Scripts/llm-router.py:_RT_IMAGE_TEXT_STATUSES`
-`Scripts/llm-router.py:_RT_IMAGE_SECRET_RES`. A 429's `Retry-After` is relayed
+`Scripts/llm-router.py:_RT_IMAGE_SECRET_RES`. With a relayed message, the
+upstream error's `type`, `code` and `param` ride along as well, each only when
+it is a string of 1-64 characters of `[A-Za-z0-9_.-]` that the same scrub leaves
+unchanged (otherwise the status-derived `type`/`code` and a null `param`), so a
+client can tell `insufficient_quota` from a rate limit
+`Scripts/llm-router.py:_rt_image_token`; the fixed-text statuses carry none of
+them. A 429's `Retry-After` is relayed
 when it is all digits. A failure logs the structure-only `upstream failed:` line.
 
 **The in-flight cap.** Once an image route resolves, the handler takes one slot

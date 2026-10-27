@@ -429,14 +429,15 @@ _RT_OPENAI_ERRORS = {
 
 
 def _rt_openai_error_body(status: int, message: str, param: Optional[str] = None,
-                          code: Optional[str] = None) -> dict:
+                          code: Optional[str] = None, err_type: Optional[str] = None) -> dict:
     """The OpenAI error envelope {"error": {message, type, param, code}} an image endpoint answers:
-    the type from the status (400-level invalid_request_error, 429 requests, 5xx server_error), the
-    code the caller's, else the status's default (401 invalid_api_key, 429 rate_limit_exceeded)."""
-    err_type, default_code = _RT_OPENAI_ERRORS.get(
+    the type the caller's (a relayed upstream type), else the status's (400-level invalid_request_error,
+    429 requests, 5xx server_error); the code the caller's, else the status's default (401
+    invalid_api_key, 429 rate_limit_exceeded)."""
+    default_type, default_code = _RT_OPENAI_ERRORS.get(
         status, ("server_error", None) if status >= 500 else ("invalid_request_error", None))
-    return {"error": {"message": message, "type": err_type, "param": param,
-                      "code": code if code is not None else default_code}}
+    return {"error": {"message": message, "type": err_type if err_type is not None else default_type,
+                      "param": param, "code": code if code is not None else default_code}}
 
 
 def _rt_dumps(obj: Any) -> bytes:
@@ -472,8 +473,13 @@ def _rt_bounded_int(text: str) -> int:
     return int(text)
 
 
+class _RtDuplicateKey(ValueError):
+    """A repeated object key (F10): a ValueError, so every caller's malformed-JSON path still takes
+    it; the image JSON parser alone tells it from a syntax error."""
+
+
 def _rt_unique_pairs(pairs: List[Tuple[str, Any]]) -> dict:
-    """json object_pairs_hook: an object whose key appears twice is a ValueError (F10).
+    """json object_pairs_hook: an object whose key appears twice is a _RtDuplicateKey, a ValueError (F10).
 
     json.loads keeps the last value of a repeated key; two values for one key are
     an ambiguity refused rather than resolved (ADR 0015), as load_config refuses
@@ -482,7 +488,7 @@ def _rt_unique_pairs(pairs: List[Tuple[str, Any]]) -> dict:
     out: Dict[str, Any] = {}
     for key, value in pairs:
         if key in out:
-            raise ValueError("duplicate key")
+            raise _RtDuplicateKey("duplicate key")
         out[key] = value
     return out
 
@@ -2152,6 +2158,8 @@ def _rt_image_json_fields(raw: bytes, names: FrozenSet[str]) -> Dict[str, str]:
     that case-folds to one of *names* without being spelled exactly so ("Model") is a 400."""
     try:
         obj = _rt_loads(raw.decode("utf-8"))
+    except _RtDuplicateKey:
+        raise _rt_bad("body", "a key appears more than once") from None
     except (UnicodeDecodeError, ValueError, RecursionError):
         raise ApiError(400, "invalid_request_error", "request body is not valid JSON") from None
     if not isinstance(obj, dict):
@@ -5307,16 +5315,34 @@ _RT_IMAGE_SECRET_RES = (re.compile(r"sk-[A-Za-z0-9_*.-]{4,}", re.I), re.compile(
 _RT_JSON_LEAD_RE = re.compile(rb"[ \t\r\n]*")
 
 
-def _rt_image_error_text(inbound: InboundRequest, status: int, body: bytes) -> str:
-    """The message of an upstream non-2xx image answer as the client may read it.
+# An upstream error's type, code or param is relayed only as a short token of this alphabet.
+_RT_IMAGE_TOKEN_RE = re.compile(r"[A-Za-z0-9_.-]{1,64}")
 
-    Fixed ("backend <n> answered <status>") unless the status is in _RT_IMAGE_TEXT_STATUSES and the
-    body is a JSON object of at most _RT_LEARN_BODY_LIMIT bytes with a string message (error.message,
-    error as a string, or message): then that text with control characters turned to spaces, run
-    through the KD-9 scrubber and the _RT_IMAGE_SECRET_RES pattern strip (sk-..., Bearer ..., org-/proj-/
-    req-/sess- ids, ****abcd key tails; any case), whitespace collapsed and cut at
-    _ERROR_TEXT_WIDTH. Never logged."""
-    fixed = "backend %s answered %d" % (inbound.backend.name, status)
+
+def _rt_image_token(inbound: InboundRequest, value: Any) -> Optional[str]:
+    """*value* when it is a short [A-Za-z0-9_.-] token that the KD-9 scrubber and the
+    _RT_IMAGE_SECRET_RES strip leave unchanged, else None (the caller's default)."""
+    if not isinstance(value, str) or _RT_IMAGE_TOKEN_RE.fullmatch(value) is None:
+        return None
+    text = inbound.scrub(value)
+    for pattern in _RT_IMAGE_SECRET_RES:
+        text = pattern.sub("[redacted]", text)
+    return value if text == value else None
+
+
+def _rt_image_error(inbound: InboundRequest, status: int,
+                    body: bytes) -> Tuple[str, Optional[str], Optional[str], Optional[str]]:
+    """(message, type, code, param) of an upstream non-2xx image answer as the client may read them.
+
+    The message is fixed ("backend <n> answered <status>") unless the status is in
+    _RT_IMAGE_TEXT_STATUSES and the body is a JSON object of at most _RT_LEARN_BODY_LIMIT bytes with a
+    string message (error.message, error as a string, or message): then that text with control
+    characters turned to spaces, run through the KD-9 scrubber and the _RT_IMAGE_SECRET_RES pattern
+    strip (sk-..., Bearer ..., org-/proj-/req-/sess- ids, ****abcd key tails; any case), whitespace
+    collapsed and cut at _ERROR_TEXT_WIDTH. Only with a relayed message are error.type, error.code
+    and error.param read from the same parsed body, each through _rt_image_token (a value that is not a
+    short token, or that the scrub changes, is None); on the fixed text all three are None. Never logged."""
+    fixed = ("backend %s answered %d" % (inbound.backend.name, status), None, None, None)
     if status not in _RT_IMAGE_TEXT_STATUSES or len(body) > _RT_LEARN_BODY_LIMIT:
         return fixed
     try:
@@ -5324,6 +5350,7 @@ def _rt_image_error_text(inbound: InboundRequest, status: int, body: bytes) -> s
     except (UnicodeDecodeError, ValueError, RecursionError):
         return fixed
     message: Any = None
+    err: Any = None
     if isinstance(obj, dict):
         err = obj.get("error")
         if isinstance(err, dict):
@@ -5337,7 +5364,13 @@ def _rt_image_error_text(inbound: InboundRequest, status: int, body: bytes) -> s
     text = inbound.scrub("".join(ch if ch.isprintable() else " " for ch in message))
     for pattern in _RT_IMAGE_SECRET_RES:
         text = pattern.sub("[redacted]", text)
-    return " ".join(text.split())[:_ERROR_TEXT_WIDTH] or fixed
+    text = " ".join(text.split())[:_ERROR_TEXT_WIDTH]
+    if not text:
+        return fixed
+    if not isinstance(err, dict):
+        return text, None, None, None
+    return (text, _rt_image_token(inbound, err.get("type")), _rt_image_token(inbound, err.get("code")),
+            _rt_image_token(inbound, err.get("param")))
 
 
 class OpenaiAdapter(ResponsesAdapter):
@@ -5366,8 +5399,9 @@ class OpenaiAdapter(ResponsesAdapter):
                        content_type: str) -> Tuple[int, bytes]:
         """A 2xx whose Content-Type is application/json and whose body starts with `{` is relayed as
         it came (a different media type or lead byte is a 502); a non-2xx is an OpenAI error envelope:
-        the status through _UPSTREAM_STATUS, the fixed credential text for 401/403, otherwise
-        _rt_image_error_text."""
+        the status through _UPSTREAM_STATUS, the fixed credential text for 401/403 (type and code from
+        the mapped status), otherwise _rt_image_error (an upstream type, code and param ride along
+        only with a relayed message)."""
         name = inbound.backend.name
         if 200 <= status < 300:
             media = content_type.split(";", 1)[0].strip().lower()
@@ -5379,10 +5413,11 @@ class OpenaiAdapter(ResponsesAdapter):
         mapped = _UPSTREAM_STATUS.get(status, 502)
         if status in (401, 403):
             log.warning("upstream credential rejected: backend %s", _log_value(name))
-            text = "backend %s rejected the router's credential" % name
-        else:
-            text = _rt_image_error_text(inbound, status, body)
-        return mapped, _rt_dumps(_rt_openai_error_body(mapped, text))
+            return mapped, _rt_dumps(_rt_openai_error_body(
+                mapped, "backend %s rejected the router's credential" % name))
+        text, up_type, up_code, up_param = _rt_image_error(inbound, status, body)
+        return mapped, _rt_dumps(_rt_openai_error_body(mapped, text, param=up_param, code=up_code,
+                                                       err_type=up_type))
 
 
 class _RtKindRow(NamedTuple):
@@ -8050,7 +8085,7 @@ class _RouterHandler(BaseHTTPRequestHandler):
 
     def _rt_err(self, status: int, err_type: str, message: str, code: Optional[str] = None) -> dict:
         """The error envelope of the request in hand: the OpenAI one on an image path (the status picks
-        its type; *code* overrides the status's default code), else the Anthropic one with *err_type*."""
+        its type, here never an upstream's; *code* overrides the status's default code), else the Anthropic one with *err_type*."""
         if getattr(self, "_rt_image", False):
             return _rt_openai_error_body(status, message, code=code)
         return _rt_error_body(err_type, message)

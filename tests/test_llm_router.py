@@ -18099,9 +18099,93 @@ def group_q(suite, fixture_root):
                     status, _h, body = ask(up, marker + " " + masked)
                     problems += gq_expect("upstream %d" % up, status, body, GQ_UPSTREAM_STATUS[up],
                                           needle=marker, absent=("sk-proj", "****"))
+                # Upstream type/code/param: relayed for the relayed-text statuses when each is null or a short
+                # [A-Za-z0-9_.-] token; anything else falls back to the status's own type/code and a null param.
+                def ask_err(up_status, error):
+                    state["script"] = lambda _i, _r: [("respond_json", up_status, {"error": error})]
+                    try:
+                        status, _h, body = gq_post(client, GQ_GEN, gq_json_body(GQ_IMG))
+                    finally:
+                        state["script"] = None
+                    return status, body
+
+                def triple(label, status, body, want_status, want):
+                    out = gq_expect(label, status, body, want_status)
+                    err, _why = gq_err(body)
+                    if err is not None and (err["type"], err["code"], err["param"]) != want:
+                        out.append("%s: type/code/param %r/%r/%r, expected %r" % (
+                            label, err["type"], err["code"], err["param"], want))
+                    return out
+
+                status, body = ask_err(429, {"message": "You have no credits remaining.",
+                                             "type": "insufficient_quota", "code": "insufficient_quota",
+                                             "param": None})
+                problems += triple("upstream 429 insufficient_quota", status, body, 429,
+                                   ("insufficient_quota", "insufficient_quota", None))
+                err, _why = gq_err(body)
+                if err is not None and "no credits remaining" not in err["message"]:
+                    problems.append("upstream 429 insufficient_quota: the message is %r" % err["message"][:80])
+                status, body = ask_err(400, {"message": "tf q8b below min", "type": "invalid_request_error",
+                                             "code": "integer_below_min_value", "param": "n"})
+                problems += triple("upstream 400 integer_below_min_value", status, body, 400,
+                                   ("invalid_request_error", "integer_below_min_value", "n"))
+                status, body = ask_err(404, {"message": "tf q8b gone", "type": "Not.Found-Err_1",
+                                             "code": None, "param": None})
+                problems += triple("upstream 404 case-preserved type, null code", status, body, 404,
+                                   ("Not.Found-Err_1", None, None))
+                status, body = ask_err(422, {"message": "tf q8b x", "type": "t" * 64, "code": "c" * 64,
+                                             "param": "p" * 64})
+                problems += triple("upstream 422 tokens of exactly 64 characters", status, body, 400,
+                                   ("t" * 64, "c" * 64, "p" * 64))
+                for label, bad in (("a space", "has space"), ("a newline", "line\nbreak"), ("overlong", "x" * 65),
+                                   ("empty", ""), ("non-ASCII", "café"), ("a number", 7), ("a list", ["a"]),
+                                   ("a bool", True)):
+                    status, body = ask_err(429, {"message": "tf q8b slow", "type": bad, "code": "ok_code",
+                                                 "param": None})
+                    problems += triple("upstream 429, type is %s" % label, status, body, 429,
+                                       ("requests", "ok_code", None))
+                    status, body = ask_err(429, {"message": "tf q8b slow", "type": "ok_type", "code": bad,
+                                                 "param": "ok_param"})
+                    problems += triple("upstream 429, code is %s" % label, status, body, 429,
+                                       ("ok_type", "rate_limit_exceeded", "ok_param"))
+                    status, body = ask_err(429, {"message": "tf q8b slow", "type": "ok_type", "code": "ok_code",
+                                                 "param": bad})
+                    problems += triple("upstream 429, param is %s" % label, status, body, 429,
+                                       ("ok_type", "ok_code", None))
+                for label, error in (("code sk-...", {"type": "t", "code": "sk-abcdef123456", "param": None}),
+                                     ("type Bearer-ish", {"type": "sk-abcdef123456", "code": "c", "param": None}),
+                                     ("param org-id", {"type": "t", "code": "c", "param": "org-abc123"}),
+                                     ("code req_ id", {"type": "t", "code": "req_abc123", "param": None})):
+                    status, body = ask_err(429, dict(error, message="tf q8b slow"))
+                    want = ("requests" if error["type"].startswith("sk-") else error["type"],
+                            "rate_limit_exceeded" if error["code"] in ("sk-abcdef123456", "req_abc123")
+                            else error["code"],
+                            None if error["param"] == "org-abc123" else error["param"])
+                    problems += triple("upstream 429, secret-looking %s" % label, status, body, 429, want)
+                    if "abcdef123456" in gb_text(body) or "abc123" in gb_text(body):
+                        problems.append("upstream 429, secret-looking %s: the value is in the answer" % label)
+                # The image-only duplicate-key wording stays off /v1/messages (its message is pinned).
+                status, _h, body = gq_post(client, MESSAGES_PATH, b'{"model":"a","tfq8bdup":1,"tfq8bdup":2}')
+                _t, message, why = gb_envelope(body)
+                if status != 400 or why or message != "request body is not valid JSON":
+                    problems.append("/v1/messages duplicate key: status %r, message %r (%s), expected 400 and "
+                                    "'request body is not valid JSON'" % (status, message, why or "ok"))
+                # No upstream type/code/param leaks where the text is fixed.
+                leak = {"message": "tf q8b leak", "type": "tf_leak_type", "code": "tf_leak_code", "param": "tf_leak_p"}
+                for up, want_status, want in ((401, GQ_UPSTREAM_STATUS[401], ("server_error", None, None)),
+                                              (403, GQ_UPSTREAM_STATUS[403], ("server_error", None, None)),
+                                              (500, GQ_UPSTREAM_STATUS[500], ("server_error", None, None)),
+                                              (503, GQ_UPSTREAM_STATUS[503], ("server_error", None, None))):
+                    status, body = ask_err(up, dict(leak))
+                    problems += triple("upstream %d keeps the status-derived envelope" % up, status, body,
+                                       want_status, want)
+                    if "tf_leak" in gb_text(body):
+                        problems.append("upstream %d: an upstream type, code or param leaked" % up)
                 return problems, ["mapped      : 401/403/500 -> 502, 502/503 -> 529, 422 -> 400, 400 and 429 as is",
                                   "text        : 401 and 403 the fixed credential text; 400, 422, 429 relayed cut at "
-                                  "300 with sk-... replaced; 500, 502, 503 fixed"]
+                                  "300 with sk-... replaced; 500, 502, 503 fixed",
+                                  "type/code   : relayed for 400/404/413/422/429 when null or a short token, else "
+                                  "the status's own; never on 401/403/5xx"]
 
             def q9():
                 problems = []
@@ -18301,6 +18385,13 @@ def group_q(suite, fixture_root):
                     ("a non-empty epilogue", CT, body(model) + b"epilogue " + planted.encode(), frozenset(),
                      "epilogue"),
                     ("JSON duplicate model", "application/json", b'{"model":"a","model":"b"}', frozenset()),
+                    # The duplicate-key refusal names the rule, not the key; a syntax error keeps its own text.
+                    ("JSON duplicate other key", "application/json", b'{"model":"m","tfq10dupkey":1,"tfq10dupkey":2}',
+                     frozenset(), "a key appears more than once"),
+                    ("JSON duplicate key in a nested object", "application/json",
+                     b'{"model":"m","o":{"tfq10dupkey":1,"tfq10dupkey":2}}', frozenset(),
+                     "a key appears more than once"),
+                    ("JSON syntax error", "application/json", b'{"model":', frozenset(), "not valid JSON"),
                     # F4: a key that only a case-insensitive reader would take for a guard field.
                     ("JSON Model", "application/json", b'{"Model":"m"}', frozenset(), "lower case"),
                     ("JSON STREAM", "application/json", b'{"model":"m","STREAM":true}', frozenset(), "lower case"),
@@ -18349,7 +18440,8 @@ def group_q(suite, fixture_root):
                             label, "accepted" if kind == "ok" else kind, "" if kind == "ok" else got))
                     elif why and why[0] not in got:
                         problems.append("%s: the refusal %r does not name the rule (%r)" % (label, got[:120], why[0]))
-                    elif planted in got or GQ_IMG in got or any(v in got for _l, v in GQ_SENTINELS):
+                    elif planted in got or GQ_IMG in got or "tfq10dupkey" in got \
+                            or any(v in got for _l, v in GQ_SENTINELS):
                         problems.append("%s: the refusal text echoes content: %r" % (label, got[:120]))
                 # F13: the default `fields` of an InboundRequest is a read-only mapping, not a shared dict.
                 default = getattr(mod.InboundRequest, "_field_defaults", {}).get("fields")
