@@ -175,9 +175,12 @@ addendum the limits of the codex/openai kinds, OAuth and Mistral reasoning)
     and holds its slot. A streamed image answer (openai kind, stream true) holds its slot for the
     whole stream and frees it on a client hang-up (polled each tick), a stall or the completed
     event; it allows one SSE line up to 48 MiB and one event up to 64 MiB (a partial image is one
-    base64 line), so one stream can hold roughly 3x its largest line in memory and --max-image-requests
-    streams add up (the ~6 GiB documented worst case for chat is extended, not restated); idle_timeout
-    must exceed the time to the first partial image (the `: ping` comments do not reset it).
+    base64 line), so one stream can hold roughly four to five times its largest line in memory (the
+    queue item or one accepted oversize line, the pump's next line, the held lines, the join copy) and
+    --max-image-requests streams add up (the ~6 GiB documented worst case for chat is extended, not
+    restated); idle_timeout must exceed the time to the first partial image (neither the `: ping`
+    comments nor the upstream's own `:` comments reset it). There is no cumulative client-write budget:
+    a slow reader holds an image slot (per write 30 s, --max-image-requests bounds the damage).
     The upstream error text is relayed (scrubbed, cut) for 400/404/413/422/429
     only. The image_url values of a JSON edit are fetched by OpenAI, outside this router's address
     policy. A header-defect 400 and an unknown-path 404 keep the Anthropic envelope.
@@ -329,10 +332,12 @@ _SSE_EVENT_LIMIT = 2 * 1024 * 1024  # one upstream SSE event (G-M45 default)
 _RT_QUEUE_BYTES = 16 * 1024 * 1024  # pump queue bound, counted in bytes (NFR-2b)
 # A streamed image answer (openai kind, stream:true): a partial image is ONE base64 `data:` line, so the
 # line cap sits far above the chat default; the event cap above it (a few lines per event) is read only by
-# ImageEventRelay. Each stream can hold up to roughly 3x its largest line at once (the line, the event's
-# accumulated lines and the joined event), and --max-image-requests streams may run together.
+# ImageEventRelay. Each stream can hold roughly four to five times its largest line at once (the queue item
+# or one accepted oversize line, the pump's next line, the event's held lines, the one join copy), and
+# --max-image-requests streams may run together. An event has at most _RT_IMAGE_SSE_EVENT_LINES lines.
 _RT_IMAGE_SSE_LINE_LIMIT = 48 * 1024 * 1024
 _RT_IMAGE_SSE_EVENT_LIMIT = 64 * 1024 * 1024
+_RT_IMAGE_SSE_EVENT_LINES = 256
 # A data-only image event (no `event:` line) completes the stream when its data JSON's "type" ends in
 # ".completed" within the first _RT_IMAGE_TYPE_WINDOW bytes of the data line.
 _RT_IMAGE_TYPE_WINDOW = 512
@@ -2917,26 +2922,33 @@ class ImageEventRelay:
     byte-exact, in the Images API's own vocabulary -- nothing Anthropic.
 
     Sans-IO, the same five methods as EventRelay. An image event is a few lines of which one `data:` line
-    is a whole base64 image, so an event may reach _RT_IMAGE_SSE_EVENT_LIMIT (an event over it is dropped
-    whole and the relay fails). feed(line) accumulates lines to the blank line and returns that event's
-    bytes unchanged; a `:` comment is dropped (the keep-alive below is the router's only one). The relay
-    is closed after an event whose `event:` name ends in `.completed` (image_generation.completed,
+    is a whole base64 image, so an event may reach _RT_IMAGE_SSE_EVENT_LIMIT (an event over it, or over
+    _RT_IMAGE_SSE_EVENT_LINES lines, is dropped whole and the relay fails; both are checked before a line
+    is appended). feed(line) accumulates lines to the blank line and returns that event's bytes unchanged;
+    a `:` comment is dropped (the keep-alive below is the router's only one). An event carries at most one
+    `event:` field and no field but `event:` and `data:` (retry:, id:, a second name or an unknown field is
+    an in-band error: a client and this relay must read one event the same way). The relay is closed after an event whose `event:` name ends in `.completed` (image_generation.completed,
     image_edit.completed; documented names, not measured live) or, when the event has no `event:` line,
     whose `data:` JSON `type` ends in `.completed` within the line's first 512 bytes (a regex, never a
-    parse): `end_marker` tells _relay_loop to read that as a clean end. ping() is an SSE comment `: ping`, available from the start (the first partial
-    image can be a minute away). fail() and finish() emit one OpenAI-shaped `event: error` with
+    parse): `completed` is then True and is what _relay_loop reads as the clean end (never the bytes of a
+    chunk). ping() is an SSE comment `: ping`, available from the start (the first partial image can be a
+    minute away). fail() and finish() emit one OpenAI-shaped `event: error` with
     data {"error": {message, type, param, code}} and close; an upstream `event: error` is re-emitted the
     same way, its message through the KD-9 scrubber and the _RT_IMAGE_SECRET_RES strip, its type, code and
     param only as short tokens (_rt_image_error). Every method returns b"" once closed. A line over 64 KiB
-    (an image) is not scanned for a bare CR: the bytes relayed are the upstream's either way."""
-
-    end_marker = b".completed"
+    (an image) is not split at a CR; a bare CR inside it (before its one terminator) is an in-band
+    `malformed line` error, because a client would split it there. Memory: per stream roughly four to five
+    times the largest line at once (the queue item or one accepted oversize line, the pump's next line, the
+    held lines, the one join copy), times --max-image-requests. No cumulative client-write budget: a slow
+    reader holds an image slot, bounded only per write (30 s) and by --max-image-requests."""
 
     def __init__(self, inbound: InboundRequest) -> None:
         self.inbound = inbound
         self.backend_name = inbound.backend.name
         self.lines: List[bytes] = []
         self.size = 0
+        self.named = False              # the held event already has its one `event:` line
+        self.completed = False          # True only after a real completion event (the clean end, read by _relay_loop)
         self.started = True             # a ping is due while the first partial image is still being made
         self.closed = False
         self.fresh = True               # no line fed yet: a leading BOM is dropped (V30)
@@ -2963,7 +2975,7 @@ class ImageEventRelay:
         if self.closed:
             return b""
         self.closed = True
-        self.lines, self.size = [], 0
+        self.lines, self.size, self.named = [], 0, False
         return self.error_event(529 if err_type == "overloaded_error" else 502, message)
 
     def finish(self) -> bytes:
@@ -2973,13 +2985,21 @@ class ImageEventRelay:
         return self.fail("api_error", "backend %s ended the stream early" % self.backend_name)
 
     def feed(self, line: bytes) -> bytes:
-        """One upstream read line -> b"" or whole events' bytes (split at every CRLF, LF and bare CR
-        unless the line is an image; a stream-leading BOM is dropped)."""
+        """One upstream read line -> b"" or whole events' bytes (split at every CRLF, LF and bare CR;
+        a line over 64 KiB, an image, is not split but fails closed on a bare CR; a stream-leading BOM
+        is dropped)."""
         if self.fresh:
             self.fresh = False
             if line.startswith(_SSE_BOM):
                 line = line[len(_SSE_BOM):]
         if len(line) > 65536:
+            if self.closed:
+                return b""
+            # A client splits at a bare CR the line this relay holds whole: refuse it (one bytes.find,
+            # cheap on a 20 MiB line). The terminator is one CRLF, LF or CR at the very end.
+            end = len(line) - (2 if line.endswith(b"\r\n") else 1 if line[-1:] in (b"\n", b"\r") else 0)
+            if line.find(b"\r", 0, end) != -1:
+                return self.fail("api_error", "backend %s sent a malformed line" % self.backend_name)
             return self._feed_line(line)
         return b"".join(self._feed_line(part) for part in _rt_sse_split(line))
 
@@ -2988,14 +3008,23 @@ class ImageEventRelay:
         if self.closed or line.startswith(b":"):
             return b""
         if len(line) > 2 or line.strip(b"\r\n"):
+            # The checks come before the append: an event never exceeds the limit by up to one line.
+            if self.size + len(line) > _RT_IMAGE_SSE_EVENT_LIMIT:
+                return self.fail("api_error", "backend %s sent an oversized event" % self.backend_name)
+            if len(self.lines) >= _RT_IMAGE_SSE_EVENT_LINES:
+                return self.fail("api_error", "backend %s sent an event with too many lines" % self.backend_name)
+            if line.startswith(b"event:"):
+                if self.named:
+                    return self.fail("api_error", "backend %s sent an unexpected event field" % self.backend_name)
+                self.named = True
+            elif not line.startswith(b"data:"):
+                return self.fail("api_error", "backend %s sent an unexpected event field" % self.backend_name)
             self.lines.append(line)
             self.size += len(line)
-            if self.size > _RT_IMAGE_SSE_EVENT_LIMIT:
-                return self.fail("api_error", "backend %s sent an oversized event" % self.backend_name)
             return b""
         if not self.lines:
             return b""
-        lines, self.lines, self.size = self.lines, [], 0
+        lines, self.lines, self.size, self.named = self.lines, [], 0, False
         name = ""
         for held in lines:
             if held.startswith(b"event:"):
@@ -3003,10 +3032,10 @@ class ImageEventRelay:
                 break
         if name == "error":
             return self._upstream_error(lines)
-        event = b"".join(lines) + line
         if name.endswith(".completed") or (not name and self._data_completed(lines)):
-            self.closed = True
-        return event
+            self.closed = self.completed = True
+        lines.append(line)          # the blank line ends the event: one join, one copy
+        return b"".join(lines)
 
     @staticmethod
     def _data_completed(lines: List[bytes]) -> bool:
@@ -3024,7 +3053,7 @@ class ImageEventRelay:
         if text == "backend %s answered 400" % self.backend_name:
             text = "backend %s sent an error" % self.backend_name
         self.closed = True
-        self.lines, self.size = [], 0
+        self.lines, self.size, self.named = [], 0, False
         return self.error_event(502, text, param=up_param, code=up_code, err_type=up_type)
 
 
@@ -9137,18 +9166,27 @@ class _RouterHandler(BaseHTTPRequestHandler):
             if srv.closing.is_set():
                 write(translator.fail("overloaded_error", "router shutting down"))
                 return "shutdown"
+            chunk = None
             if isinstance(item, bytes):
                 # A pass that just got an upstream line has seen no silence:
                 # reset BEFORE the idle check (a slow client write on the
                 # previous pass must not read as a stalled backend).
-                last_line = now
+                if hasattr(translator, "completed"):
+                    # An image stream: only a line that made the relay emit bytes is progress; an
+                    # upstream trickling `:` comments (dropped, nothing relayed) trips idle_timeout.
+                    chunk = translator.feed(item)
+                    if chunk:
+                        last_line = now
+                else:
+                    last_line = now
             if now - last_line > backend.idle_timeout:
                 rec["fail_reason"] = "stalled"
                 write(translator.fail("api_error", "backend %s stalled" % backend.name))
                 return "error"
             if item is not None:
                 if isinstance(item, bytes):
-                    chunk = translator.feed(item)
+                    if chunk is None:
+                        chunk = translator.feed(item)
                 elif item is _EOF:
                     chunk = translator.finish()
                     rec["fail_reason"] = "stream_ended_early"   # read only when no message_stop follows
@@ -9168,10 +9206,13 @@ class _RouterHandler(BaseHTTPRequestHandler):
                 write(chunk)
                 if translator.closed or not isinstance(item, bytes):
                     rec["up_t1"] = time.monotonic()
-                    # The translator names its clean end: Anthropic's message_stop by default, an image
-                    # stream's completed event; the value stays "message_stop" for the summary line.
-                    end = getattr(translator, "end_marker", b"event: message_stop")
-                    return "message_stop" if end in chunk else "error"
+                    # The translator names its clean end: an image stream's `completed` flag (set by a
+                    # real completion event, never read off the bytes of a chunk), else Anthropic's
+                    # message_stop in the chunk; the value stays "message_stop" for the summary line.
+                    clean = getattr(translator, "completed", None)
+                    if clean is None:
+                        clean = b"event: message_stop" in chunk
+                    return "message_stop" if clean else "error"
             now = time.monotonic()
             if getattr(translator, "started", False) and now - last_write() >= _PING_INTERVAL_S:
                 write(translator.ping())
@@ -9419,8 +9460,10 @@ example config (chmod 600; token: python3 -c 'import secrets;print(secrets.token
   other than none (a config error); keep the server reachable only through the router. GET /v1/models lists every route with its modality
   (?modality=chat|image|all filters it); --max-image-requests caps image requests in flight.
   An openai image route also takes "stream": true (partial_images 0-3 passes through): the Images
-  API's SSE events are relayed whole, byte for byte, with a `: ping` comment while idle; codex and
-  sdcpp image routes answer stream true with a 400.
+  API's SSE events are relayed whole, byte for byte, with a `: ping` comment while idle (an event
+  with a field but event: and data:, a second event:, over 256 lines, or a bare CR in a line over
+  64 KiB ends the stream with an in-band error); codex and sdcpp image routes answer stream true
+  with a 400.
   A mistral route's option tool_result_images (boolean, default true): an image inside a
   tool_result goes upstream as image_url parts in the tool message; false sends "[image omitted]".
   Route options temperature (0-2) / top_p (0-1) override the client's; one a backend cannot take

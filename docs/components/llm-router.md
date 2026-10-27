@@ -917,8 +917,10 @@ upstream comment lines, and closes after an event whose `event:` name ends in
 in `.completed` within the data line's first 512 bytes (a regex over that slice,
 never a parse of a multi-MiB line; a `type` further in is not read, and the stream
 then ends as an early EOF); `_relay_loop` reads that clean end from the translator's
-`end_marker` (`b".completed"`; the Anthropic translators keep
-`b"event: message_stop"`) and the summary line still says `end=message_stop`
+`completed` flag, True only after a real completion event (never from the bytes of
+a chunk, so an upstream `event: error` whose message mentions `.completed` is
+recorded as an error; the Anthropic translators have no such attribute and keep
+the `b"event: message_stop"` test) and the summary line still says `end=message_stop`
 `Scripts/llm-router.py:_relay_loop`. The head is the usual `200 text/event-stream`,
 with nothing Anthropic-specific in it or after it `Scripts/llm-router.py:_relay_stream`.
 
@@ -939,7 +941,9 @@ with nothing Anthropic-specific in it or after it `Scripts/llm-router.py:_relay_
   writes the SSE comment `: ping` and a blank line, never Anthropic's `event:
   ping`; it can do so before the first partial image, which can be a minute away.
   The pings do not reset `idle_timeout`, so a backend serving image streams needs
-  one longer than the time to the first partial image.
+  one longer than the time to the first partial image. Nor does an upstream line
+  the relay drops: on an image stream the line clock restarts only when a line
+  made the relay emit bytes, so an upstream that trickles `:` comments is a stall.
 - *The slot.* The `--max-image-requests` slot is held for the whole stream and
   released on every exit: the completed event, a stall or error, and a client
   hang-up (the stream loop polls for it each `_RT_TICK_S`, which also closes the
@@ -949,11 +953,22 @@ with nothing Anthropic-specific in it or after it `Scripts/llm-router.py:_relay_
   `Scripts/llm-router.py:_RT_IMAGE_SSE_EVENT_LIMIT` (64 MiB per event, enforced by
   the translator), against 1 MiB and 2 MiB for chat. The pump queue's 16 MiB
   budget (`Scripts/llm-router.py:_RT_QUEUE_BYTES`) admits one line larger than
-  itself into an empty queue, so a 20 MiB line passes. One stream can hold roughly
-  three times its largest line at once (the line, the event's accumulated lines
-  and the joined event), and streams multiply: the worst case is the existing
-  authenticated-memory figure under Declared limits, with `--max-image-requests`
-  streams each holding up to that.
+  itself into an empty queue, so a 20 MiB line passes. An event is also capped at
+  `Scripts/llm-router.py:_RT_IMAGE_SSE_EVENT_LINES` (256) lines, and both caps are
+  checked before a line is appended, so an event never exceeds the limit by a
+  line; the event is emitted with one `join` (the blank line is appended to the
+  held list first), not a join plus a concatenation. One stream can hold roughly
+  four to five times its largest line at once (the queue item or one accepted
+  oversize line, the pump's next line, the held lines, the join copy), and streams
+  multiply: the worst case is the existing authenticated-memory figure under
+  Declared limits, with `--max-image-requests` streams each holding up to that.
+- *Event framing.* The relay reads one event the way a client does or refuses it,
+  in-band: an event with a second `event:` field, or any field but `event:` and
+  `data:` (`retry:`, `id:`, an unknown name; comment lines are dropped), is
+  "unexpected event field"; a line over 64 KiB (an image) is not split at a CR,
+  but one with a bare CR before its terminator is "malformed line", because a
+  client would split it there (one `bytes.find`, cheap on a 20 MiB line); a
+  CRLF-, LF- or CR-terminated CR-free long line passes.
 
 The `codex` and `sdcpp` kinds keep the 400: the codex image stream is unmeasured and
 sd-server has none.
@@ -1492,10 +1507,13 @@ read before relying on one of them. In brief:
 - **Streamed image answers are unmeasured live and memory-heavy.** The event
   names, the payload fields and the sizes come from the OpenAI documentation; a
   real partial image may exceed the 48 MiB line or 64 MiB event limits, which then
-  end the stream with an in-band error. One stream can hold roughly three times its
-  largest line, and `--max-image-requests` streams run at once, on top of the
-  figure above. `idle_timeout` must exceed the wait for the first partial image
-  (pings do not reset it). The codex image stream is not relayed at all.
+  end the stream with an in-band error. One stream can hold roughly four to five
+  times its largest line, and `--max-image-requests` streams run at once, on top
+  of the figure above. `idle_timeout` must exceed the wait for the first partial
+  image (neither the router's pings nor the upstream's own `:` comments reset it).
+  The codex image stream is not relayed at all. There is no cumulative
+  client-write budget: a slow reader holds an image slot, bounded only by the
+  30 s per-write socket timeout and by `--max-image-requests`.
 - **The image relay trusts the upstream's 2xx.** It checks the media type and the
   first byte and the size bound, and neither parses nor scrubs the body.
 - **A JSON edit's `image_url` values are fetched by OpenAI,** outside this

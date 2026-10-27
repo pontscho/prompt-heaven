@@ -20021,8 +20021,10 @@ GT_CASES = (
     "non-2xx JSON, non-SSE 2xx",         # T9
     "ImageEventRelay sans-IO unit",      # T10
     "data-only completed event ends",    # T11
+    "relay hardening: sans-IO unit",     # T12
+    "relay hardening: end to end",       # T13
 )
-GT_IDS = ("T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9", "T10", "T11")
+GT_IDS = ("T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9", "T10", "T11", "T12", "T13")
 GT_NAMES = {"generations": ("image_generation.partial_image", "image_generation.completed"),
             "edits": ("image_edit.partial_image", "image_edit.completed")}
 GT_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB"
@@ -20256,6 +20258,9 @@ def gt_t1(ctx):
     ctype, mp = gq_multipart("tft1d", [("model", GQ_IMG), ("prompt", "x"), ("stream", "True")], [])
     status, _h, answer = gq_post(client, GQ_EDIT, mp, ctype)
     problems += gq_expect("multipart stream=True", status, answer, 400, needle="stream")
+    ctype, mp = gq_multipart("tft1e", [("model", GQ_IMG), ("prompt", "x"), ("Stream", "true")], [])
+    status, _h, answer = gq_post(client, GQ_EDIT, mp, ctype)
+    problems += gq_expect("multipart part Stream", status, answer, 400, needle="lower case")
     if len(peer.requests) != mark:
         problems.append("the peer saw %d request(s) for the non-canonical stream spellings, expected none"
                         % (len(peer.requests) - mark))
@@ -20403,14 +20408,16 @@ def gt_t4(ctx):
     finally:
         lp.close()
     if mod is not None:
-        if getattr(getattr(mod, "ImageEventRelay", None), "end_marker", None) != b".completed":
-            problems.append("ImageEventRelay.end_marker is not b'.completed'")
-        if hasattr(getattr(mod, "EventRelay", None), "end_marker"):
-            problems.append("EventRelay defines end_marker: the Anthropic streams must keep the default marker")
+        if hasattr(getattr(mod, "ImageEventRelay", None), "end_marker"):
+            problems.append("ImageEventRelay still defines end_marker: the clean end is its `completed` flag (F8)")
+        if hasattr(getattr(mod, "EventRelay", None), "completed"):
+            problems.append("EventRelay defines completed: the Anthropic streams must keep the message_stop test")
     with open(SERVER, "r", encoding="utf-8") as fh:
         source = fh.read()
-    if 'getattr(translator, "end_marker", b"event: message_stop")' not in source:
-        problems.append("_relay_loop does not ask the translator for its end_marker (default b'event: message_stop')")
+    if 'getattr(translator, "completed", None)' not in source:
+        problems.append("_relay_loop does not ask the translator for its `completed` flag (F8)")
+    if 'b"event: message_stop" in chunk' not in source:
+        problems.append("_relay_loop lost the Anthropic message_stop test for translators without `completed`")
     return problems, ["image       : ends on image_generation.completed (a stray event after it is dropped): "
                       "end=message_stop; early EOF -> in-band error, end=error, WARNING stream_ended_early",
                       "anthropic   : the passthrough stream still ends on event: message_stop"]
@@ -20845,6 +20852,227 @@ def gt_t11(ctx):
                       "bound       : `type` past 512 bytes on a data-only event is not read; an early EOF stays an error"]
 
 
+def gt_feed_all(relay, chunks):
+    """The bytes relay.feed returns for each of *chunks* in turn, joined."""
+    return b"".join(relay.feed(chunk) for chunk in chunks)
+
+
+def gt_expect_error(label, relay, out, needle):
+    """Problems unless *out* is exactly one in-band error event holding *needle* and *relay* is closed."""
+    err, why = gt_error_event(out)
+    if why:
+        return ["%s: %s" % (label, why)]
+    problems = [] if needle in err["message"] else ["%s: error message %r does not hold %r"
+                                                    % (label, err["message"][:100], needle)]
+    if not relay.closed:
+        problems.append("%s: the relay is not closed after the error" % label)
+    return problems
+
+
+def gt_t12(ctx):
+    """T12: ImageEventRelay hardening, sans-IO: the event size is checked before a line is appended and an
+    event over 256 lines is an in-band error (S1); a bare CR in a line over 64 KiB is `malformed line` while a
+    CRLF-terminated or CR-free long line passes (S3); a second `event:` field or any field but event/data is
+    `unexpected event field` (S4); `completed` is True only after a real completion event (F8)."""
+    mod = ctx["mod"]
+    if mod is None or not hasattr(mod, "ImageEventRelay"):
+        return ["cannot import the router (ImageEventRelay)"], []
+    problems = []
+    fake = types.SimpleNamespace(scrub=lambda t: t, backend=types.SimpleNamespace(name="tfq"))
+    part, done = GT_NAMES["generations"]
+    # S1: the number of lines.
+    tiny = b"data: a\n"
+    relay = mod.ImageEventRelay(fake)
+    out = gt_feed_all(relay, [tiny] * 300 + [b"\n"])
+    problems += gt_expect_error("an event of 300 lines", relay, out, "too many lines")
+    relay = mod.ImageEventRelay(fake)
+    out = gt_feed_all(relay, [tiny] * 256 + [b"\n"])
+    if out != tiny * 256 + b"\n" or relay.closed:
+        problems.append("an event of exactly 256 lines was not relayed whole (%d byte(s) back)" % len(out))
+    relay = mod.ImageEventRelay(fake)
+    out = gt_feed_all(relay, [tiny] * 257 + [b"\n"])
+    problems += gt_expect_error("an event of 257 lines", relay, out, "too many lines")
+    # S1: the size, checked before the append.
+    saved = getattr(mod, "_RT_IMAGE_SSE_EVENT_LIMIT", None)
+    if not isinstance(saved, int):
+        problems.append("the module defines no _RT_IMAGE_SSE_EVENT_LIMIT")
+    else:
+        class Recorder(list):
+            def __init__(self):
+                super().__init__()
+                self.appended = []
+
+            def append(self, item):
+                self.appended.append(item)
+                super().append(item)
+
+        mod._RT_IMAGE_SSE_EVENT_LIMIT = 100
+        try:
+            relay = mod.ImageEventRelay(fake)
+            out = gt_feed_all(relay, [b"data: " + b"A" * 43 + b"\n", b"data: " + b"A" * 43 + b"\n", b"\n"])
+            if out != (b"data: " + b"A" * 43 + b"\n") * 2 + b"\n" or relay.closed:
+                problems.append("an event just under the size limit was not relayed whole")
+            relay = mod.ImageEventRelay(fake)
+            out = gt_feed_all(relay, [b"data: " + b"A" * 43 + b"\n", b"data: " + b"A" * 43 + b"\n"])
+            if out != b"" or relay.closed:
+                problems.append("an event of exactly the size limit (100 bytes) was refused")
+            relay = mod.ImageEventRelay(fake)
+            relay.lines = Recorder()
+            held = relay.lines
+            first = relay.feed(b"data: " + b"A" * 43 + b"\n")
+            second = relay.feed(b"data: " + b"A" * 44 + b"\n")
+            problems += gt_expect_error("an event one byte over the size limit", relay, first + second, "oversized")
+            if len(held.appended) != 1:
+                problems.append("the over-limit line was appended before the size check (%d append(s), expected 1)"
+                                % len(held.appended))
+        finally:
+            mod._RT_IMAGE_SSE_EVENT_LIMIT = saved
+    # S3: a bare CR in a line over 64 KiB.
+    big = b"A" * 70000
+    relay = mod.ImageEventRelay(fake)
+    out = relay.feed(b"data: " + big + b"\revent: error\rX\n")
+    problems += gt_expect_error("a 70 KiB line with a bare CR", relay, out, "malformed line")
+    if relay.feed(b"\n") != b"" or relay.finish() != b"":
+        problems.append("a relay failed on a bare CR still produced bytes")
+    relay = mod.ImageEventRelay(fake)
+    out = relay.feed(b"data: " + big + b"\n") + relay.feed(b"\n")
+    if relay.closed or out != b"data: " + big + b"\n\n":
+        problems.append("a CR-free 70 KiB line was not relayed whole and open")
+    relay = mod.ImageEventRelay(fake)
+    wire = b"event: " + part.encode() + b"\r\ndata: " + big + b"\r\n\r\n"
+    if gt_feed_all(relay, [b"event: " + part.encode() + b"\r\n", b"data: " + big + b"\r\n", b"\r\n"]) != wire \
+            or relay.closed:
+        problems.append("a CRLF-terminated 70 KiB line was not relayed whole")
+    relay = mod.ImageEventRelay(fake)
+    out = relay.feed(b"data: " + big + b"\r\r\n")
+    problems += gt_expect_error("a 70 KiB line ending in CR CR LF", relay, out, "malformed line")
+    # S4: event fields.
+    for label, lines in (("two event: fields", [b"event: a\n", b"event: b\n", b"data: x\n", b"\n"]),
+                         ("a retry: field", [b"retry: 0\n", b"data: x\n", b"\n"]),
+                         ("an id: field", [b"id: 1\n", b"data: x\n", b"\n"]),
+                         ("an unknown field", [b"foo: bar\n", b"data: x\n", b"\n"]),
+                         ("a retry: field after the name", [b"event: a\n", b"retry: 0\n", b"\n"])):
+        relay = mod.ImageEventRelay(fake)
+        problems += gt_expect_error(label, relay, gt_feed_all(relay, lines), "unexpected event field")
+    ok = [b"event: " + part.encode() + b"\n", b": a comment\n", b"data: x\n", b"\n"]
+    relay = mod.ImageEventRelay(fake)
+    if gt_feed_all(relay, ok) != b"event: " + part.encode() + b"\ndata: x\n\n" or relay.closed:
+        problems.append("a normal event with a comment line was not relayed whole")
+    relay = mod.ImageEventRelay(fake)
+    if gt_feed_all(relay, [b"data: x\n", b"data: y\n", b"\n"]) != b"data: x\ndata: y\n\n" or relay.closed:
+        problems.append("a data-only event was not relayed whole")
+    # F8: `completed`.
+    relay = mod.ImageEventRelay(fake)
+    if getattr(relay, "completed", None) is not False:
+        problems.append("a fresh relay's `completed` is %r, expected False" % getattr(relay, "completed", None))
+    gt_feed_all(relay, gt_wire(gt_event(part, GT_B64, 0)).splitlines(True))
+    if getattr(relay, "completed", None) is not False:
+        problems.append("`completed` is %r after a partial image" % getattr(relay, "completed", None))
+    gt_feed_all(relay, gt_wire(gt_event(done, GT_B64)).splitlines(True))
+    if getattr(relay, "completed", None) is not True or not relay.closed:
+        problems.append("`completed` is %r after the completed event" % getattr(relay, "completed", None))
+    relay = mod.ImageEventRelay(fake)
+    body = json.dumps({"error": {"message": "tf t12 image_generation.completed", "type": "server_error"}}).encode()
+    out = gt_feed_all(relay, [b"event: error\n", b"data: " + body + b"\n", b"\n"])
+    problems += gt_expect_error("an upstream error mentioning .completed", relay, out, "tf t12")
+    if getattr(relay, "completed", None) is not False:
+        problems.append("`completed` is %r after an upstream error event" % getattr(relay, "completed", None))
+    for label, call in (("fail()", lambda r: r.fail("api_error", "m")), ("finish()", lambda r: r.finish())):
+        relay = mod.ImageEventRelay(fake)
+        call(relay)
+        if getattr(relay, "completed", None) is not False:
+            problems.append("`completed` is %r after %s" % (getattr(relay, "completed", None), label))
+    with open(SERVER, "r", encoding="utf-8") as fh:
+        source = fh.read()
+    if 'b"".join(lines) + line' in source:
+        problems.append("ImageEventRelay still builds the event with a second copy (`b\"\".join(lines) + line`)")
+    return problems, ["lines       : 256 lines pass, 257 and 300 are `too many lines`",
+                      "size        : exactly the limit passes; one byte over fails before the append",
+                      "bare CR     : a 70 KiB line with a CR is `malformed line`; CRLF and CR-free lines pass",
+                      "fields      : a second event:, retry:, id: and an unknown field are `unexpected event field`",
+                      "completed   : False until a real completion event; an error mentioning .completed leaves it False"]
+
+
+def gt_t13(ctx):
+    """T13: the hardened relay end to end. An upstream `event: error` whose message holds `.completed` is
+    recorded as an error (WARNING `upstream failed`, end=error) and frees the single image slot; a 70 KiB
+    line with a bare CR is an in-band `malformed line` and frees the slot; a real completion is still
+    end=message_stop; an upstream that only trickles `:` comments past idle_timeout is `stalled` (S6)."""
+    client, state, peer = ctx["client"], ctx["state"], ctx["peer"]
+    problems = []
+    part, done = GT_NAMES["generations"]
+    box = new_sandbox(ctx["fixture_root"], "t13")
+    log_path = os.path.join(box, "t13.log")
+    lp = RouterProc(box, write_config(box, gq_config(peer.url())),
+                    ("--debug", "--log-file", log_path, "--max-image-requests", 1), label="t13")
+    first = gt_event(part, GT_B64, 0)
+    full = gt_stream_lines(1)
+    body = gq_json_body(GQ_IMG, "tf t13", stream=True)
+    try:
+        if lp.wait_ready() is None:
+            return [gb_not_ready(lp)], []
+        lc = lp.client()
+        note = "tf t13 oops %s" % done
+        err_event = [b"event: error", b"data: " + json.dumps({"error": {
+            "message": note, "type": "server_error", "param": None, "code": "upstream_boom"}}).encode(), b""]
+        crlines = [b"event: " + part.encode(), b"data: " + b"A" * 70000 + b"\rX", b""]
+        try:
+            for label, script, needle in (("upstream error mentioning .completed", first + err_event, "tf t13 oops"),
+                                          ("a completed stream", full, None),
+                                          ("a 70 KiB line with a bare CR", first + crlines + gt_event(done, GT_B64),
+                                           "malformed line"),
+                                          ("a completed stream after it", full, None)):
+                state["script"] = lambda _i, _r, s=script: [("respond_sse", s)]
+                status, _h, raw = gq_post_raw(lc, GQ_GEN, body, timeout=30.0)
+                if status != 200:
+                    problems.append("%s: status %r (the slot was not freed, or the head was refused)" % (label, status))
+                elif needle is None:
+                    if raw != gt_wire(script):
+                        problems.append("%s: %d byte(s) back, expected the peer's %d" % (label, len(raw), len(gt_wire(script))))
+                else:
+                    problems += gt_tail_error(label, raw, gt_wire(first), needle=needle)
+        finally:
+            state["script"] = None
+        time.sleep(0.3)
+        try:
+            with open(log_path, "r", encoding="utf-8", errors="replace") as fh:
+                log_text = fh.read()
+        except OSError:
+            log_text = ""
+        got = gt_req_lines(log_text)
+        want = [("images_generations", "error"), ("images_generations", "message_stop"),
+                ("images_generations", "error"), ("images_generations", "message_stop")]
+        if got != want:
+            problems.append("the req summary lines are %r, expected %r" % (got, want))
+        failed = [ln for ln in log_text.splitlines() if "upstream failed" in ln and "images_generations" in ln]
+        if len(failed) != 2:
+            problems.append("expected two `upstream failed` WARNINGs (the error event, the bare CR), got %d" % len(failed))
+    finally:
+        lp.close()
+    # S6: comments only, past idle_timeout 1 s on the shared router.
+    trickle = first + [b":"] * 8 + gt_event(done, GT_B64)
+    gaps = [0, 0, 0] + [0.45] * 8 + [0, 0, 0]
+    try:
+        state["script"] = lambda _i, _r: [("respond_sse", trickle, gaps)]
+        t0 = time.monotonic()
+        status, _h, raw = gq_post_raw(client, GQ_GEN, gq_json_body(GQ_IMG_FAST, "tf t13", stream=True), timeout=30.0)
+        took = time.monotonic() - t0
+    finally:
+        state["script"] = None
+    if status != 200:
+        problems.append("comment trickle: status %r" % status)
+    else:
+        problems += gt_tail_error("comment trickle", raw, gt_wire(first), needle="stalled")
+        if done.encode() in raw:
+            problems.append("comment trickle: the completed event after the comments reached the client")
+        if took > 3.4:
+            problems.append("comment trickle: ended after %.1f s, expected about idle_timeout 1 s" % took)
+    return problems, ["error event  : message holds .completed -> in-band error, WARNING upstream failed, end=error; "
+                      "--max-image-requests 1 slot freed",
+                      "bare CR     : 70 KiB line with a CR -> `malformed line`, slot freed; completions end=message_stop",
+                      "trickle     : only `:` lines for 3.6 s at idle_timeout 1 -> `stalled` after %.1f s" % took]
+
+
 def group_t(suite, fixture_root):
     """T. streamed image responses (Plan phase 4).  One openai api_key router in front of one scripted peer
     serves T1-T3, T7, T9 and T11; T4, T6 and T8 start their own (a debug log, an image cap); T5 runs in-process
@@ -20871,9 +21099,9 @@ def group_t(suite, fixture_root):
             ctx = {"mod": mod, "mod_why": mod_why, "peer": peer, "state": state, "fixture_root": fixture_root,
                    "client": proc.client() if port is not None else None, "router_why": router_why}
             got = {}
-            in_process = (gt_t5, gt_t10)
+            in_process = (gt_t5, gt_t10, gt_t12)
             for cid, fn in zip(GT_CASES, (gt_t1, gt_t2, gt_t3, gt_t4, gt_t5, gt_t6, gt_t7, gt_t8, gt_t9, gt_t10,
-                                 gt_t11)):
+                                 gt_t11, gt_t12, gt_t13)):
                 if router_why is not None and fn not in in_process and fn is not gt_t1:
                     got[cid] = ([router_why], [])
                     continue
