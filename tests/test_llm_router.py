@@ -45,10 +45,12 @@ Groups:
   D  passthrough          -- an Anthropic-compatible backend, relayed (D17: images unchanged)
   E  llamacpp             -- request and event quirks against a llama.cpp peer (E15: images unchanged)
   F  mistral request      -- Anthropic -> chat-completions translation (F26: the image-free estimate;
-                             F27-F29: an image inside a tool_result, its tool_result_images switch)
+                             F27-F29: an image inside a tool_result, its tool_result_images switch;
+                             F30-F31: output_config.effort as the reasoning_effort, and ignored values)
   G  mistral stream       -- chat-completions SSE -> Anthropic SSE translation
   H  timeouts/disconnect  -- idle and total deadlines, a client that hangs up
-  K  responses request    -- Anthropic -> Responses translation (codex, openai; K27: tool_result images)
+  K  responses request    -- Anthropic -> Responses translation (codex, openai; K27: tool_result images;
+                             K28-K29: output_config.effort as reasoning.effort, max -> xhigh, ignored values)
   L  config write-back    -- the atomic, directory-relative rewrite of backends.<n>.oauth
   N  token store          -- refresh, the per-backend lock, one forced refresh per 401 (codex)
   O  login                -- the codex login subcommand: browser callback, paste, device flow
@@ -6459,6 +6461,8 @@ GF_CASES = (
     "tool_result image -> parts list",   # F27
     "tool_result_images option",         # F28
     "tool message estimate, vision",     # F29
+    "output_config.effort -> effort",    # F30
+    "output_config ignored, fallback",   # F31
 )
 
 GF_BACKEND = "tff"
@@ -7822,6 +7826,75 @@ def group_f(suite, fixture_root):
         return problems, ["estimate    : tool-message image 64 vs 400000 chars -> %r/%r; +1 image -> +%r"
                           % (small, large, None if None in (one, two) else two - one)]
 
+    def f30():
+        # The client's output_config.effort (adaptive or enabled thinking) is the effort: "max" is a
+        # Mistral effort and passes through; the route's reasoning_effort_map and the learned remap
+        # then act on it as on any computed effort; the route's fixed option still wins.
+        problems, shown = [], []
+        msgs = [{"role": "user", "content": "tf oc effort"}]
+        adaptive = {"type": "adaptive"}
+        enabled = {"type": "enabled", "budget_tokens": 1024}
+        for label, options, thinking, sent, supported, want in (
+                ("low", {}, adaptive, "low", frozenset(), "low"),
+                ("medium", {}, adaptive, "medium", frozenset(), "medium"),
+                ("high", {}, adaptive, "high", frozenset(), "high"),
+                ("xhigh", {}, adaptive, "xhigh", frozenset(), "xhigh"),
+                ("max passes through", {}, adaptive, "max", frozenset(), "max"),
+                ("enabled 1024 (low), output_config max", {}, enabled, "max", frozenset(), "max"),
+                ("max through the map", {"reasoning_effort_map": GF_EFFORT_MAP}, adaptive, "max", frozenset(),
+                 "high"),
+                ("low through the map", {"reasoning_effort_map": GF_EFFORT_MAP}, adaptive, "low", frozenset(),
+                 "high"),
+                ("map {max: xhigh}", {"reasoning_effort_map": {"max": "xhigh"}}, adaptive, "max", frozenset(),
+                 "xhigh"),
+                ("learned {high, none}, low", {}, adaptive, "low", GF_LEARNED, "high"),
+                ("learned {high, none}, max", {}, adaptive, "max", GF_LEARNED, "high"),
+                ("map {low: medium} then learned {medium, none}", {"reasoning_effort_map": {"low": "medium"}},
+                 adaptive, "low", frozenset({"medium", "none"}), "medium"),
+                ("option beats output_config", {"reasoning_effort": "minimal"}, adaptive, "max", frozenset(),
+                 "minimal"),
+                ("option beats map and learned", {"reasoning_effort": "low", "reasoning_effort_map": {"low": "high"}},
+                 adaptive, "max", GF_LEARNED, "low")):
+            body = gf_body(msgs, thinking=thinking, output_config={"effort": sent})
+            got, more = gf_effort(body, gf_route(mod, **options), supported, label)
+            problems += more
+            if got != want:
+                problems.append("%s: reasoning_effort %r, expected %r" % (label, got, want))
+            shown.append("%s -> %s" % (label, got))
+        effort = getattr(mod, "_rt_rs_effort", None)
+        if callable(effort):
+            got = effort(gf_body(msgs, thinking=adaptive, output_config={"effort": "max"}), gf_route(mod))
+            if got != "max":
+                problems.append("_rt_rs_effort(adaptive, output_config max) = %r, expected 'max' (the Responses "
+                                "translation clamps it, the shared function does not)" % (got,))
+        # Thinking absent or disabled: the effort stays omitted whatever output_config says.
+        for label, extra in (("thinking absent", {}), ("thinking disabled", {"thinking": {"type": "disabled"}})):
+            body = gf_body(msgs, output_config={"effort": "max"}, **extra)
+            got, more = gf_effort(body, gf_route(mod, reasoning_effort_map=GF_EFFORT_MAP), GF_LEARNED, label)
+            problems += more
+            if got != "<absent>":
+                problems.append("%s + output_config max: reasoning_effort %r, expected no key" % (label, got))
+            shown.append("%s + output_config max -> %s" % (label, got))
+        return problems, ["output_config: " + s for s in shown]
+
+    def f31():
+        problems, shown = [], []
+        msgs = [{"role": "user", "content": "tf oc ignored"}]
+        for label, config in GK_OC_IGNORED:
+            for thinking, emap, want in (({"type": "adaptive"}, {}, "medium"),
+                                         ({"type": "adaptive"}, {"medium": "high"}, "high"),
+                                         ({"type": "enabled", "budget_tokens": 20000}, {}, "high")):
+                name = "%s, %s, output_config %s" % (thinking["type"], label, json.dumps(config))
+                options = {"reasoning_effort_map": emap} if emap else {}
+                body = gf_body(msgs, thinking=thinking, output_config=config)
+                got, more = gf_effort(body, gf_route(mod, **options), frozenset(), name)
+                problems += more
+                if got != want:
+                    problems.append("%s: reasoning_effort %r, expected %r (the value ignored)" % (name, got, want))
+                if not emap and thinking["type"] == "adaptive":
+                    shown.append("%s -> %s" % (label, got))
+        return problems, ["ignored     : " + s for s in shown]
+
     def needs(fn, *names):
         """The case, failing once with the missing names before it runs (one red line, not one per call)."""
         def case():
@@ -7835,7 +7908,8 @@ def group_f(suite, fixture_root):
            needs(f11, tr), f12, needs(f13, tr), needs(f14, tr), needs(f15, idmap, tr), needs(f16, idmap, tr),
            needs(f17, tr), needs(f18, tr), needs(f19, tr), needs(f20, tr), needs(f21, tr),
            needs(f22, tr), needs(f23, tr), needs(f24, "_rt_ms_effort_remap"), needs(f25, "_rt_ms_unsupported_effort"),
-           needs(f26, "_rt_ms_estimate"), needs(f27, tr), needs(f28, tr), needs(f29, "_rt_ms_estimate"))
+           needs(f26, "_rt_ms_estimate"), needs(f27, tr), needs(f28, tr), needs(f29, "_rt_ms_estimate"),
+           needs(f30, tr), needs(f31, tr))
     try:
         for cid, fn in zip(GF_CASES, fns):
             try:
@@ -10102,9 +10176,19 @@ GK_CASES = (
     "apikey: override in, learned out",  # K25
     "deep tool schema -> 400, not 500",  # K26
     "tool_result image -> list output",  # K27
+    "output_config.effort -> effort",    # K28
+    "output_config ignored, fallback",   # K29
 )
 GK_IDS = ("K1", "K2", "K3", "K4", "K5", "K6", "K7", "K8", "K9", "K10", "K11", "K12", "K13", "K14", "K15",
-          "K16", "K17", "K18", "K19", "K20", "K21", "K22", "K23", "K24", "K25", "K26", "K27")
+          "K16", "K17", "K18", "K19", "K20", "K21", "K22", "K23", "K24", "K25", "K26", "K27", "K28", "K29")
+# K28/K29, F30/F31 (Claude Code 2.1.299 capture): the client sends thinking {"type": "adaptive"} plus
+# output_config {"effort": low|medium|high|xhigh|max}; written here, never read from the module.
+GK_OC_EFFORTS = (("low", "low"), ("medium", "medium"), ("high", "high"), ("xhigh", "xhigh"), ("max", "xhigh"))
+# Values the router must ignore (forward compatibility), never answer with a 400: (label, output_config).
+GK_OC_IGNORED = (("unknown level", {"effort": "ultra"}), ("wrong case", {"effort": "HIGH"}),
+                 ("int", {"effort": 5}), ("None", {"effort": None}), ("list", {"effort": ["high"]}),
+                 ("dict", {"effort": {"level": "high"}}), ("no effort key", {"format": "x"}),
+                 ("a string", "high"), ("a list", ["high"]), ("None config", None))
 # K26 (F22): the deepest tool input_schema translated, in nested containers (dict or list)
 # counting the schema itself as 1 -- written here, never read from the module.  One level
 # more is a 400 invalid_request_error; so is a nesting past the interpreter's recursion
@@ -11319,6 +11403,81 @@ def group_k(suite, fixture_root):
         return problems, ["result      : " + s for s in shown[:6]] + \
             ["result      : %d outcome(s) in all" % len(shown)]
 
+    def gk_oc_reasoning(label, body, route, profile):
+        """(the translated body's reasoning dict or None, problems)."""
+        out, more = gk_translate(mod, body, route=route, profile=profile, label="%s (%s)" % (label, profile))
+        return (None if out is None else out.get("reasoning")), more
+
+    def k28():
+        # The client's output_config.effort reaches reasoning.effort (adaptive or enabled thinking);
+        # "max" is clamped to "xhigh" in the Responses body (the API has no "max"); the route's
+        # reasoning_effort option still wins; an enabled budget loses to the explicit effort.
+        problems, shown = [], []
+        adaptive = {"type": "adaptive"}
+        for profile in GK_PROFILES:
+            for sent, want in GK_OC_EFFORTS:
+                body = gk_body(user_hi, thinking=adaptive, output_config={"effort": sent})
+                got, more = gk_oc_reasoning("adaptive, effort %s" % sent, body, None, profile)
+                problems += more
+                if got is not None and got != {"effort": want, "summary": "auto"}:
+                    problems.append("adaptive, effort %s (%s): reasoning %r, expected effort %r"
+                                    % (sent, profile, got, want))
+                if profile == "codex":
+                    shown.append("adaptive, %s -> %r" % (sent, None if got is None else got.get("effort")))
+            for label, thinking, option, sent, want in (
+                    ("option low beats output_config max", adaptive, "low", "max", "low"),
+                    ("option minimal beats output_config high", adaptive, "minimal", "high", "minimal"),
+                    ("enabled 1024 (low), output_config high", {"type": "enabled", "budget_tokens": 1024}, None,
+                     "high", "high"),
+                    ("enabled 40000 (xhigh), output_config low", {"type": "enabled", "budget_tokens": 40000}, None,
+                     "low", "low"),
+                    ("enabled 1024, output_config max", {"type": "enabled", "budget_tokens": 1024}, None,
+                     "max", "xhigh"),
+                    ("enabled 1024, option medium, output_config max", {"type": "enabled", "budget_tokens": 1024},
+                     "medium", "max", "medium")):
+                route = gk_route(mod) if option is None else gk_route(mod, reasoning_effort=option)
+                body = gk_body(user_hi, thinking=thinking, output_config={"effort": sent})
+                got, more = gk_oc_reasoning(label, body, route, profile)
+                problems += more
+                if got is not None and got != {"effort": want, "summary": "auto"}:
+                    problems.append("%s (%s): reasoning %r, expected effort %r" % (label, profile, got, want))
+                if profile == "codex":
+                    shown.append("%s -> %r" % (label, None if got is None else got.get("effort")))
+        return problems, ["output_config: " + s for s in shown]
+
+    def k29():
+        # Without enabled/adaptive thinking there is no effort (as before); an unknown level or a
+        # value of the wrong type is ignored -- never a 400 -- and the old rules decide.
+        problems, shown = [], []
+        for profile in GK_PROFILES:
+            for label, thinking in (("thinking absent", None), ("thinking disabled", {"type": "disabled"})):
+                extra = {"output_config": {"effort": "high"}}
+                if thinking is not None:
+                    extra["thinking"] = thinking
+                got, more = gk_oc_reasoning(label + " + output_config high", gk_body(user_hi, **extra), None, profile)
+                problems += more
+                if got is not None and got != {"summary": "auto"}:
+                    problems.append("%s + output_config high (%s): reasoning %r, expected only the summary"
+                                    % (label, profile, got))
+                if profile == "codex":
+                    shown.append("%s -> %r" % (label, got))
+            for label, config in GK_OC_IGNORED:
+                for thinking, want in (({"type": "adaptive"}, "medium"),
+                                       ({"type": "enabled", "budget_tokens": 20000}, "high")):
+                    name = "%s, %s, output_config %s" % (thinking["type"], label, json.dumps(config))
+                    got, more = gk_oc_reasoning(name, gk_body(user_hi, thinking=thinking, output_config=config),
+                                             None, profile)
+                    problems += more
+                    if got is not None and got != {"effort": want, "summary": "auto"}:
+                        problems.append("%s (%s): reasoning %r, expected effort %r (the value ignored)"
+                                        % (name, profile, got, want))
+                    if profile == "codex" and thinking["type"] == "adaptive":
+                        shown.append("%s -> %r" % (label, None if got is None else got.get("effort")))
+            got = mod._rt_rs_effort(ge_clone(gk_body(user_hi, thinking={"type": "adaptive"})), gk_route(mod))
+            if got != "medium":
+                problems.append("adaptive without output_config: _rt_rs_effort %r, expected 'medium'" % (got,))
+        return problems, ["ignored     : " + s for s in shown]
+
     def needs(fn, *names):
         """The case, failing once with the missing names before it runs (one red line, not one per call)."""
         def case():
@@ -11332,7 +11491,8 @@ def group_k(suite, fixture_root):
            needs(k7, idmap, anth, tr), needs(k8, tr), needs(k9, tr), needs(k10, tr), needs(k11, tr, ck),
            needs(k12, tr), needs(k13, tr), needs(k14, tr, eff), needs(k15, tr, eff), needs(k16, tr, unsign),
            needs(k17, tr, unsign), needs(k18, tr, unsign), needs(k19, tr), needs(k20, tr), needs(k21, tr),
-           needs(k22, tr), needs(k23, tr), needs(k24, tr), needs(k25, tr), needs(k26, tr), needs(k27, tr))
+           needs(k22, tr), needs(k23, tr), needs(k24, tr), needs(k25, tr), needs(k26, tr), needs(k27, tr),
+           needs(k28, tr, eff), needs(k29, tr, eff))
     try:
         for cid, fn in zip(GK_CASES, fns):
             try:

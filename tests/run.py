@@ -946,9 +946,9 @@ SUITES = [
      "function does not read or holding its type's empty value dropped, "
      "a key outside it refused)",
      95),
-    # TYPED: a fixed case table (A 50, B 32, C 16, D 17, E 15, F 29, G 23,
-    # H 6 x 4 kinds + H7 + H8-H9 = 27, I 16, J 41, K 27, L 20, M 23, N 42,
-    # O 18, P 4 = 400), so a count that moves is the alarm, not noise.
+    # TYPED: a fixed case table (A 50, B 32, C 16, D 17, E 15, F 31, G 23,
+    # H 6 x 4 kinds + H7 + H8-H9 = 27, I 16, J 41, K 29, L 20, M 23, N 42,
+    # O 18, P 4 = 404), so a count that moves is the alarm, not noise.
     ("llm_router", run_llm_router,
      "llm-router, the Anthropic Messages router: config refusals (0600, "
      "duplicate keys), bearer/Host/Origin/misplaced token, GET /v1/models, "
@@ -956,7 +956,7 @@ SUITES = [
      "registry, Mistral translation and stream state machine, the codex "
      "and openai Responses kinds (request translation and stream), OAuth "
      "token store, login and config write-back, timeouts and disconnects "
-     "per kind, upstream failure log, secret leaks, static rules, hygiene", 400),
+     "per kind, upstream failure log, secret leaks, static rules, hygiene", 404),
     # TYPED: a fixed case table (A 7, E 3), so a count that moves is the alarm.
     ("tshark_fields", run_tshark_fields,
      "mcp-tshark analyze's `fields` parameter, in-process with tshark "

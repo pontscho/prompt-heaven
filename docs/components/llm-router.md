@@ -419,10 +419,10 @@ limits and `vision`; an unknown key or option is refused by name
 | mistral | `count_divisor` | integer 1-16, default 4; the count_tokens estimate's divisor `Scripts/llm-router.py:_rt_ms_estimate` |
 | mistral | `temperature`, `top_p` | 0-2, 0-1; override the client's values |
 | mistral | `max_tokens_cap` | integer ≥ 1; the client's `max_tokens` is cut to it |
-| mistral | `reasoning_effort` | one of `Scripts/llm-router.py:_RT_MS_EFFORTS` (`none` to `max`); sent as is whatever the client's thinking asks, and never remapped or learned |
-| mistral | `reasoning_effort_map` | an object of at most seven pairs, each key and value one of the same efforts; rewrites the effort computed from the client's thinking before it is sent, e.g. `{"low": "high", "xhigh": "high"}` for a model that takes only some `Scripts/llm-router.py:_rt_ms_opt_effort_map` |
+| mistral | `reasoning_effort` | one of `Scripts/llm-router.py:_RT_MS_EFFORTS` (`none` to `max`); sent as is whatever the client's `output_config.effort` or thinking asks, and never remapped or learned |
+| mistral | `reasoning_effort_map` | an object of at most seven pairs, each key and value one of the same efforts; rewrites the effort computed from the client's request (its `output_config.effort`, else its thinking) before it is sent, e.g. `{"low": "high", "xhigh": "high"}` for a model that takes only some `Scripts/llm-router.py:_rt_ms_opt_effort_map` |
 | codex, `openai` | `count_divisor` | as for mistral, over the translated Responses body |
-| codex, `openai` | `reasoning_effort` | one of `Scripts/llm-router.py:_RT_RS_EFFORTS` (`none` to `xhigh`); wins over the effort the client's thinking budget maps to |
+| codex, `openai` | `reasoning_effort` | one of `Scripts/llm-router.py:_RT_RS_EFFORTS` (`none` to `xhigh`); wins over the client's `output_config.effort` and over the effort its thinking budget maps to |
 | codex, `openai` | `verbosity` | `low`, `medium` or `high`; sent as `text.verbosity` |
 | `openai` with an `api_key` | `temperature`, `top_p`, `max_tokens_cap` | as for mistral; refused at load on the two OAuth profiles, which take no sampling |
 
@@ -520,11 +520,35 @@ A 422 answer's detail list is flattened to field names, never values
 `Scripts/llm-router.py:_rt_ms_detail_names`. A mid-conversation `system` turn
 is folded into the leading system message.
 
+*The effort, shared by mistral, codex and openai.* One function computes it
+`Scripts/llm-router.py:_rt_rs_effort`, first rule that answers wins: (1) the
+route's fixed `reasoning_effort` option; (2) while `thinking.type` is
+`adaptive` or `enabled`, the client's `output_config.effort` when it is one of
+`Scripts/llm-router.py:_RT_OC_EFFORTS` (`low`, `medium`, `high`, `xhigh`,
+`max`); (3) an `enabled` thinking's `budget_tokens` through the bands
+`Scripts/llm-router.py:_RT_RS_EFFORT_BANDS`, `xhigh` above the last bound;
+(4) `adaptive` thinking gives `medium`. Thinking absent or `disabled` gives no
+effort whatever `output_config` says. An `output_config` that is not an object,
+or an `effort` that is not a string of that set (an unknown level, another case,
+a number, `null`), is ignored and the next rule decides — never a 400 — so a
+level a newer client adds is harmless. Rule (2) exists because Claude Code
+2.1.299, measured by a loopback capture on 2026-10-27, sends `thinking`
+`{"type": "adaptive", "display": "omitted"}` with no `budget_tokens` and
+`output_config.effort` in `low`|`medium`|`high`|`xhigh`|`max` (default `high`),
+the same for passthrough, mistral and codex model names; with
+`MAX_THINKING_TOKENS=0` the `thinking` key is absent while
+`output_config.effort` stays — which rule (2)'s thinking condition turns into no
+effort. The capture is recorded in the code's comments only
+`Scripts/llm-router.py:_RT_OC_EFFORTS`, not as a fixture. The function may
+return `max`; what each kind does with it is below. passthrough and llamacpp
+compute no effort: `output_config` is forwarded as is, and no budget is mapped.
+
 *Mistral reasoning.* The effort sent as `reasoning_effort` is the route's fixed
-option when it has one; otherwise the client's thinking budget is mapped
-through the same bands as the Responses kinds, then through the route's
-`reasoning_effort_map`, then through what the router has learned about the
-model `Scripts/llm-router.py:_rt_ms_effort`; no thinking, or disabled thinking,
+option when it has one, sent as is; otherwise the shared effort above — `max`
+included, which is one of `Scripts/llm-router.py:_RT_MS_EFFORTS` — goes through
+the route's `reasoning_effort_map`, then through what the router has learned
+about the model, like any other computed effort
+`Scripts/llm-router.py:_rt_ms_effort`; no thinking, or disabled thinking,
 sends no key. Neither a `thinking` key nor a `reasoning_content` field is ever
 sent, because Mistral refuses both. Mistral's thinking chunks come back as one
 Anthropic thinking block whose signature is `lms1.` plus the base64 of
@@ -593,9 +617,11 @@ Responses streams get their own bounds: a line up to
 `Scripts/llm-router.py:_RT_RS_SSE_LINE_LIMIT` (8 MiB), an event up to
 `Scripts/llm-router.py:_RT_RS_SSE_EVENT_LIMIT` (16 MiB).
 
-*Reasoning.* The client's thinking budget picks `reasoning.effort` through
-fixed bands `Scripts/llm-router.py:_RT_RS_EFFORT_BANDS` (adaptive thinking is
-`medium`) unless the route fixes one, and the reasoning summary is asked for.
+*Reasoning.* `reasoning.effort` is the shared effort (*The effort, shared by
+mistral, codex and openai* above), except that `max`, which the Responses API
+lacks, is sent as `xhigh` — clamped when the body is built, not in the shared
+function `Scripts/llm-router.py:_rt_rs_translate`; without an effort only the
+summary is sent. The reasoning summary is always asked for.
 A reasoning item comes back as a thinking block whose text is the summary and
 whose signature carries the encrypted reasoning, `lrs1.<backend>.<content>`,
 or as a `redacted_thinking` block when there is no summary
@@ -877,6 +903,19 @@ mistral, codex and openai (F26) `tests/test_llm_router.py:group_f`; and the
 `tests/test_llm_router.py:group_k`. The static profile-row snapshot carries the
 `output_parts` column `tests/test_llm_router.py:GJ_RS_PROFILES`.
 
+**The client's effort.** Two cases per side. On mistral (F30) each
+`output_config.effort` level becomes the `reasoning_effort`, `max` included,
+then goes through a `reasoning_effort_map` and a learned set, the route's fixed
+option still wins, and absent or disabled thinking sends no key; F31 feeds the
+ignored values and checks the old rules decide `tests/test_llm_router.py:group_f`.
+On codex and openai, per profile (K28), each level reaches `reasoning.effort`
+with `max` sent as `xhigh`, an explicit level beats an `enabled` budget and the
+fixed option beats both; K29 covers absent and disabled thinking and the
+ignored values `tests/test_llm_router.py:group_k`. The levels and the ignored
+values are written in the test, never read from the module
+`tests/test_llm_router.py:GK_OC_EFFORTS`
+`tests/test_llm_router.py:GK_OC_IGNORED`.
+
 **Deadlines in milliseconds.** A case whose observable is one of the router's
 own deadlines — the ping interval, the relay tick, the pre-auth, header and
 body bounds, the OAuth idle timeout and the shared-failure window — runs
@@ -1018,6 +1057,8 @@ read before relying on one of them. In brief:
 - **Effort is learned on mistral only;** `reasoning_effort_map` is a mistral
   option, and the Responses kinds learn no effort. Learned sampling and effort
   sets live as long as the process and are never written down.
+- **`max` through the learned remap is exercised in-process only** (F30); a live
+  Mistral model refusing `max` and teaching a supported set is unverified.
 - **A non-stream answer's `dropped_thinking` is not on the `req` line,** and the
   refresh made before an access token expires leaves no trace on it.
 - **The SIWC login is unverified live.** The namespace tool shape and the

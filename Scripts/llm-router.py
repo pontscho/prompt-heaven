@@ -13,8 +13,8 @@ are five backend kinds (the sixth name, anthropic, is reserved and refused):
   llamacpp     llama-server's own /v1/messages, its quirks repaired;
   mistral      translated to and from the Mistral chat-completions API, with
                reasoning: thinking blocks out (signature "lms1."), back in on
-               replay, and a reasoning_effort from the route, the thinking
-               budget, the route's reasoning_effort_map and what a model's 400
+               replay, and a reasoning_effort from the route, the client's
+               output_config.effort, the thinking budget, the route's reasoning_effort_map and what a model's 400
                taught the router (learned per backend and model, one retry);
   codex        the OpenAI Responses API on the ChatGPT-subscription endpoint,
                OAuth only, sent with the omp client identity;
@@ -3081,7 +3081,8 @@ def _rt_ms_effort_remap(wanted: str, supported: FrozenSet[str]) -> str:
 
 def _rt_ms_effort(body: dict, route: RouteSpec, supported: FrozenSet[str] = frozenset()) -> Optional[str]:
     """A Mistral body's reasoning_effort: the route's fixed reasoning_effort option as is; else
-    _rt_rs_effort's value (budget band, adaptive) through the route's reasoning_effort_map,
+    _rt_rs_effort's value (output_config.effort -- "max" included --, budget band, adaptive)
+    through the route's reasoning_effort_map,
     then -- when (backend, model) learned its *supported* set -- _rt_ms_effort_remap. None: omitted."""
     effort = _rt_rs_effort(body, route)
     if effort is None or route.options.get("reasoning_effort") is not None:
@@ -3861,6 +3862,8 @@ _RT_RS_SSE_EVENT_LIMIT = 16 * 1024 * 1024   # one Responses SSE event (read only
 
 # reasoning.effort values the Responses API accepts (the reasoning_effort route option).
 _RT_RS_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh")
+# The output_config.effort levels Claude Code sends (2.1.299 capture); anything else is ignored.
+_RT_OC_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 # thinking.budget_tokens -> effort: the first band whose bound the budget does not exceed;
 # above the last bound the effort is "xhigh".
 _RT_RS_EFFORT_BANDS: Tuple[Tuple[int, str], ...] = ((4096, "low"), (16384, "medium"), (32768, "high"))
@@ -4104,18 +4107,30 @@ def _rt_rs_unsign(backend: str, value: Any) -> Optional[str]:
 
 
 def _rt_rs_effort(body: dict, route: RouteSpec) -> Optional[str]:
-    """reasoning.effort (KD-14): the route's reasoning_effort option always wins; else
-    thinking.type "enabled" maps budget_tokens through _RT_RS_EFFORT_BANDS (above the
-    last bound "xhigh"), "adaptive" gives "medium", and anything else None (omitted)."""
+    """reasoning.effort (KD-14), in this order: (1) the route's reasoning_effort option always
+    wins; (2) while thinking.type is "adaptive" or "enabled", the client's output_config.effort
+    when it is one of _RT_OC_EFFORTS (Claude Code sends low|medium|high|xhigh|max); (3) thinking
+    "enabled" maps budget_tokens through _RT_RS_EFFORT_BANDS (above the last bound "xhigh");
+    (4) "adaptive" gives "medium"; anything else None (omitted -- thinking absent or disabled
+    stays omitted whatever output_config says).
+
+    An output_config that is not an object, or an effort that is not a string of that set, is
+    IGNORED -- the next rule decides, never a 400 -- so a level a newer client adds is harmless.
+    The value may be "max", which the Responses API lacks: _rt_rs_translate clamps it to "xhigh",
+    while the Mistral path (_rt_ms_effort) takes it as is ("max" is one of _RT_MS_EFFORTS)."""
     option = route.options.get("reasoning_effort")
     if option is not None:
         return option
     thinking = body.get("thinking")
     kind = thinking.get("type") if isinstance(thinking, dict) else None
+    if kind not in ("adaptive", "enabled"):
+        return None
+    config = body.get("output_config")
+    asked = config.get("effort") if isinstance(config, dict) else None
+    if isinstance(asked, str) and asked in _RT_OC_EFFORTS:
+        return asked
     if kind == "adaptive":
         return "medium"
-    if kind != "enabled":
-        return None
     budget = thinking.get("budget_tokens")
     if not isinstance(budget, int) or isinstance(budget, bool):
         return None
@@ -4369,6 +4384,8 @@ def _rt_rs_translate(body: dict, route: RouteSpec, backend: str,
     out["include"] = ["reasoning.encrypted_content"]
     out["prompt_cache_key"] = _rt_rs_cache_key(body, backend)
     effort = _rt_rs_effort(body, route)
+    if effort == "max":             # the client's top level; the Responses API tops out at xhigh
+        effort = "xhigh"
     out["reasoning"] = {"summary": "auto"} if effort is None else {"effort": effort, "summary": "auto"}
     verbosity = options.get("verbosity")
     if verbosity is not None:
@@ -8352,8 +8369,12 @@ example config (chmod 600; token: python3 -c 'import secrets;print(secrets.token
   Route options temperature (0-2) / top_p (0-1) override the client's; one a backend cannot take
   is dropped (codex, openai oauth: always; an openai api_key model answering 400 "Unsupported
   parameter": learned per backend and model, the request retried once without it).
-  A mistral route's reasoning_effort option fixes the effort; else the thinking budget's band
-  goes through its reasoning_effort_map (e.g. {"low": "high", "xhigh": "high"}), and a model
+  Reasoning effort (codex, openai, mistral): a route's reasoning_effort option fixes it; else, with
+  thinking enabled or adaptive, the client's output_config.effort (low, medium, high, xhigh, max;
+  anything else ignored) is used -- codex and openai send max as xhigh -- else the thinking
+  budget's band (adaptive: medium); no or disabled thinking sends none. llama.cpp and passthrough
+  routes forward output_config untouched.
+  A mistral route's computed effort goes through its reasoning_effort_map (e.g. {"low": "high", "xhigh": "high"}), and a model
   answering 400 "reasoning_effort X is not supported ... supported values: [...]" has those
   values learned per backend and model, the request retried once with the nearest one.
   A codex backend needs `llm-router.py login` first (see `llm-router.py login --help`).
