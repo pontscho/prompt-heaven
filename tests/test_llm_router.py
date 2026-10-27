@@ -58,6 +58,9 @@ Groups:
   Q  image endpoints      -- /v1/images/generations and /edits on an openai api_key backend: the modality
                              route key, raw relay, per-endpoint Content-Type, multipart sniffer, OpenAI
                              error envelope, /v1/models additions, --max-image-requests (J42-J44: static)
+  S  codex images        -- EXPERIMENTAL: the same endpoints on a codex backend (private /codex/images/...
+                             upstream, unmeasured live): route config, path and headers, one refresh per
+                             401 with the raw body replayed, error mapping, leaks
   I  secret leak         -- no sentinel in stderr, the log, a body or a wrong peer
   J  static and hygiene   -- AST over the router source, writes, bytecode, tree
 """
@@ -17753,8 +17756,8 @@ def group_q(suite, fixture_root):
                         mod, write(lambda c, v=value: c.__setitem__("default", {"backend": "oa", "model": "gpt-5",
                                                                                  "modality": v})),
                         ["default.modality"], "modality %s on the default route" % label)
-                for backend, kind in (("ms", "mistral"), ("pt", "passthrough"), ("ll", "llamacpp"),
-                                      ("cx", "codex")):
+                # kind codex serves image routes since Phase 3 (group S); the other chat kinds still refuse.
+                for backend, kind in (("ms", "mistral"), ("pt", "passthrough"), ("ll", "llamacpp")):
                     problems += ga_refused(
                         mod, write(lambda c, b=backend: c["routes"][GQ_IMG].__setitem__("backend", b)),
                         [where + ".modality", "kind " + kind, "does not serve image routes"],
@@ -17767,7 +17770,7 @@ def group_q(suite, fixture_root):
                     [where + ".model"], "image route, model != key", absent=("tf-upstream-name",))
                 return problems, ["accepted    : image on openai api_key (model == key); a plain route is chat",
                                   "refused     : value not chat/image, non-string, any modality key on default, "
-                                  "kinds mistral/passthrough/llamacpp/codex, the openai-oauth profile, model != key"]
+                                  "kinds mistral/passthrough/llamacpp, the openai-oauth profile, model != key"]
 
             def q2():
                 body = b'{ "prompt" : "tf q2 prompt",  "model":"%s", "n": 1 }' % GQ_IMG.encode("ascii")
@@ -18848,6 +18851,362 @@ def group_q(suite, fixture_root):
     for cid, qid in zip(GQ_CASES, GQ_IDS):
         problems, detail = results.get(cid, ([setup], []))
         suite.record(GQ, cid, problems, detail=["case        : " + qid] + list(detail))
+
+
+# ---------------------------------------------------------------------------
+# Group S: codex image endpoints (EXPERIMENTAL; Plan Phase 3, Steps 15-16)
+# ---------------------------------------------------------------------------
+
+# The ChatGPT/Codex backend's private image endpoints (POST <codex base>/images/generations and /edits,
+# authenticated like /responses).  Nothing here is measured against the live service: the fixtures are
+# synthetic, shaped after the open-source Codex CLI's request and the usage-limit errors it reads.
+GS = "S. codex images"
+GS_CASES = (
+    "codex image route config",          # S1
+    "request path and headers",          # S2
+    "401 refresh once, raw replay",      # S3
+    "upstream error mapping",            # S4
+    "no token or account id leaks",      # S5
+)
+GS_IDS = ("S1", "S2", "S3", "S4", "S5")
+GS_IMG = "tf-img-codex"                  # an image route on the codex backend (route key == upstream model)
+GS_PATH_GEN = "/codex/images/generations"
+GS_PATH_EDIT = "/codex/images/edits"
+GS_ROUTES = {GS_IMG: {"backend": GN_BACKEND, "model": GS_IMG, "modality": "image"}}
+GS_PROMPT = "tf-s-prompt-SENTINEL-" + secrets.token_hex(8)
+
+
+def gs_body(prompt="tf s prompt"):
+    """A generations body shaped like the Codex CLI's {prompt, background, model, quality, size}, with
+    spacing a re-serialising router would change."""
+    return ('{ "prompt" : %s,  "background":"auto", "model":"%s", "quality" : "high", "size":"1024x1024" }'
+            % (json.dumps(prompt), GS_IMG)).encode("utf-8")
+
+
+def gs_ok_script(lines=None):
+    """The upstream's script: GQ_OK for an image path, the Responses text stream for anything else."""
+    def script(_index, request):
+        if request["line"].split(" ")[1].startswith("/codex/images/"):
+            return [("respond_json", 200, GQ_OK)]
+        return gn_up_ok(lines or [])
+    return script
+
+
+def gs_run(fixture_root, label, auth_script, up_script, body, argv=None):
+    return gn_run(fixture_root, label, auth_script, up_script, gn_one, body, argv=argv, routes=GS_ROUTES)
+
+
+def gs_s1(fixture_root, mod):
+    """S1: a codex backend takes image routes (model == key); a codex chat route is unchanged; the
+    openai-oauth profile and the passthrough / llamacpp / mistral kinds still refuse them."""
+    if mod is None or not hasattr(mod, "load_config"):
+        return ["cannot import the router (load_config)"], []
+    box = new_sandbox(fixture_root, "s1")
+    counter = [0]
+
+    def write(mutate=None):
+        cfg = {"auth_token": TF_ROUTER_TOKEN,
+               "backends": {
+                   "cx": {"kind": "codex", "oauth": {}},
+                   "oa": {"kind": "openai", "api_key": TF_KEY_OPENAI},
+                   "oa-oauth": {"kind": "openai", "oauth": {}},
+                   "ms": {"kind": "mistral", "base_url": "https://api.mistral.ai", "api_key": TF_KEY_MISTRAL},
+                   "pt": {"kind": "passthrough", "base_url": "https://pt.example.invalid",
+                          "api_key": TF_KEY_PASS, "auth_header": "x-api-key"},
+                   "ll": {"kind": "llamacpp", "base_url": "https://llama.lan:8443", "allow_private": True}},
+               "routes": {GS_IMG: {"backend": "cx", "model": GS_IMG, "modality": "image"},
+                          "tf-chat": {"backend": "cx", "model": "gpt-5",
+                                      "options": {"reasoning_effort": "low"}}}}
+        if mutate is not None:
+            mutate(cfg)
+        counter[0] += 1
+        return write_config(box, cfg, filename="s1-%d.json" % counter[0])
+
+    where = "routes.%s" % GS_IMG
+    cfg, problems = ga_accepted(mod, write(), "image on a codex backend, model == key")
+    if cfg is not None:
+        for key, want in ((GS_IMG, "image"), ("tf-chat", "chat")):
+            route = cfg.routes.get(key)
+            if getattr(route, "modality", None) != want:
+                problems.append("routes.%s.modality is %r, expected %r"
+                                % (key, getattr(route, "modality", "<no field>"), want))
+    _cfg, more = ga_accepted(mod, write(lambda c: c["routes"][GS_IMG].__setitem__("backend", "oa")),
+                             "control: image on an openai api_key backend")
+    problems += more
+    problems += ga_refused(mod, write(lambda c: c["routes"][GS_IMG].__setitem__("model", "tf-upstream-name")),
+                           [where + ".model"], "codex image route, model != key", absent=("tf-upstream-name",))
+    problems += ga_refused(
+        mod, write(lambda c: c.__setitem__("default", {"backend": "cx", "model": "gpt-5", "modality": "image"})),
+        ["default.modality"], "modality on the default route")
+    problems += ga_refused(mod, write(lambda c: c["routes"][GS_IMG].__setitem__("modality", "video")),
+                           [where + ".modality", "chat or image"], "an unknown modality", absent=("video",))
+    for backend, kind in (("ms", "mistral"), ("pt", "passthrough"), ("ll", "llamacpp")):
+        problems += ga_refused(
+            mod, write(lambda c, b=backend: c["routes"][GS_IMG].__setitem__("backend", b)),
+            [where + ".modality", "kind " + kind, "does not serve image routes"], "image route on kind %s" % kind)
+    problems += ga_refused(
+        mod, write(lambda c: c["routes"][GS_IMG].__setitem__("backend", "oa-oauth")),
+        [where + ".modality", "ChatGPT"], "image route on an openai-oauth backend")
+    return problems, ["accepted    : image on a codex backend (model == key); a codex chat route stays chat",
+                      "refused     : model != key, modality on the default route, an unknown modality, kinds "
+                      "mistral/passthrough/llamacpp, the openai-oauth profile"]
+
+
+def gs_s2(fixture_root, ctx):
+    """S2: on the peer, generations go to /codex/images/generations and edits (JSON and multipart) to
+    /codex/images/edits with the body byte-identical, the Content-Type as sent, the stored login's
+    Authorization, chatgpt-account-id and the chat identity pairs, Accept: application/json and NO
+    session_id; a chat request on the same backend keeps its session_id and event-stream Accept."""
+    rot = gn_mint_refresh("s2")
+
+    def body(rig):
+        problems = []
+        sent_gen = gs_body("tf s2")
+        sent_json = json.dumps({"model": GS_IMG, "prompt": "tf s2 edit",
+                                "images": [{"image_url": "data:image/png;base64,iVBORw0KGgo="},
+                                           {"file_id": "file-tf-s2"}]}, indent=1).encode("utf-8")
+        ctype, sent_mp = gq_multipart("tfs2b", [("model", GS_IMG), ("prompt", "tf s2 mp")],
+                                      [("image", "a.png", "image/png", b"\x89PNG\r\n\x1a\n")])
+        shown = []
+        for label, path, want_path, payload, ct in (
+                ("generations", GQ_GEN, GS_PATH_GEN, sent_gen, "application/json"),
+                ("JSON edit", GQ_EDIT, GS_PATH_EDIT, sent_json, "application/json"),
+                ("multipart edit", GQ_EDIT, GS_PATH_EDIT, sent_mp, ctype)):
+            before = len(rig.up.requests)
+            status, _h, answer = gq_post(rig.client, path, payload, ct)
+            problems += [] if status == 200 else gq_expect(label, status, answer, 200)
+            if status == 200 and answer != GQ_OK:
+                problems.append("%s: the client's answer differs from the upstream's" % label)
+            if len(rig.up.requests) != before + 1:
+                problems.append("%s: the peer saw %d request(s), expected 1" % (label, len(rig.up.requests) - before))
+                continue
+            req = rig.up.requests[-1]
+            seen = gq_hdrs(req)
+            if req["line"] != "POST %s HTTP/1.1" % want_path:
+                problems.append("%s: peer request line %r, expected POST %s" % (label, req["line"], want_path))
+            if req["body"] != payload:
+                problems.append("%s: the body reached the peer altered (%d vs %d bytes)"
+                                % (label, len(req["body"]), len(payload)))
+            want = {"content-type": [ct], "accept": ["application/json"],
+                    "authorization": ["Bearer " + TF_ACCESS_CODEX],
+                    "chatgpt-account-id": [TF_ACCOUNT_CODEX], "originator": [GN_ORIGINATOR],
+                    "version": [GN_VERSION], "user-agent": [GN_UA]}
+            for name, values in want.items():
+                if seen.get(name) != values:
+                    problems.append("%s: peer %s %s, expected %s" % (
+                        label, name, "<hidden>" if name in ("authorization", "chatgpt-account-id")
+                        else seen.get(name), "<hidden>" if name in ("authorization", "chatgpt-account-id")
+                        else values))
+            for name in ("session_id", "x-api-key", "cookie"):
+                if name in seen:
+                    problems.append("%s: the peer got a %s header" % (label, name))
+            shown.append(want_path)
+        before = len(rig.up.requests)
+        problems += gn_answer("chat control", rig.ask(), 200)
+        chat = rig.up.requests[before:]
+        if len(chat) != 1:
+            problems.append("the chat control made %d upstream request(s), expected 1" % len(chat))
+        else:
+            seen = gq_hdrs(chat[0])
+            if chat[0]["line"] != "POST %s HTTP/1.1" % GN_CODEX_PATH:
+                problems.append("chat control: peer request line %r" % chat[0]["line"])
+            if seen.get("accept") != ["text/event-stream"]:
+                problems.append("chat control: Accept %r, expected text/event-stream" % seen.get("accept"))
+            if len(seen.get("session_id", [])) != 1 or GN_SESSION_RE.match(seen["session_id"][0]) is None:
+                problems.append("chat control: session_id missing or malformed")
+        return problems, ["peer        : " + ", ".join(shown) + "; bodies and Content-Types identical",
+                          "headers     : stored OAuth login, account id, originator/version/User-Agent, "
+                          "Accept application/json, no session_id; chat keeps session_id"]
+    return gs_run(fixture_root, "s2", gn_rotating([(TF_ACCESS_CODEX, rot)]), gs_ok_script(ctx["lines"]), body)
+
+
+def gs_s3(fixture_root, ctx):
+    """S3: an upstream 401 -> one forced refresh -> the SAME raw body resent once -> 200; a second 401
+    -> the re-login 401 in the OpenAI envelope, after exactly two upstream requests."""
+    a2, rot1, rot2 = gn_mint_access(), gn_mint_refresh("s3-1"), gn_mint_refresh("s3-2")
+    named = [("A1", TF_ACCESS_CODEX), ("A2", a2)]
+    payload = gs_body("tf s3")
+
+    def stale_first(_index, request):
+        if gn_bearer(request) == "Bearer " + TF_ACCESS_CODEX:
+            return [GN_UP_401]
+        return [("respond_json", 200, GQ_OK)]
+
+    def refreshed(rig):
+        problems = []
+        status, _h, answer = gq_post(rig.client, GQ_GEN, payload)
+        problems += [] if status == 200 else gq_expect("after the refresh", status, answer, 200)
+        if status == 200 and answer != GQ_OK:
+            problems.append("the client's answer differs from the upstream's")
+        problems += gn_post_problems(rig.auth, 2, [TF_REFRESH_CODEX, rot1])
+        bearers = gn_bearers(rig.up)
+        if bearers != ["Bearer " + TF_ACCESS_CODEX, "Bearer " + a2]:
+            problems.append("upstream bearer(s) %s, expected [A1, A2] (the 401, then the retry)"
+                            % gn_names(bearers, named))
+        bodies = [r["body"] for r in rig.up.requests]
+        if bodies != [payload, payload]:
+            problems.append("the upstream bodies were not the sent bytes twice (%s)"
+                            % [len(b) for b in bodies])
+        paths = [r["line"] for r in rig.up.requests]
+        if paths != ["POST %s HTTP/1.1" % GS_PATH_GEN] * 2:
+            problems.append("upstream request lines %r" % paths)
+        return problems, ["upstream    : A1 -> 401, A2 -> the image answer; the raw body sent twice"]
+
+    def relogin(rig):
+        status, _h, answer = gq_post(rig.client, GQ_GEN, payload)
+        problems = gq_expect("second 401", status, answer, 401, needle=GN_HINT % GN_BACKEND)
+        problems += gn_post_problems(rig.auth, 2, [TF_REFRESH_CODEX, None])
+        bearers = gn_bearers(rig.up)
+        if bearers != ["Bearer " + TF_ACCESS_CODEX, "Bearer " + a2]:
+            problems.append("upstream saw %d request(s) with bearer(s) %s, expected exactly two: [A1, A2]"
+                            % (len(bearers), gn_names(bearers, named)))
+        return problems, ["upstream    : every request -> 401; OpenAI-shaped re-login answer"]
+
+    p1, d1 = gs_run(fixture_root, "s3a", gn_rotating([(TF_ACCESS_CODEX, rot1), (a2, rot2)]), stale_first, refreshed)
+    p2, d2 = gs_run(fixture_root, "s3b", gn_rotating([(TF_ACCESS_CODEX, gn_mint_refresh("s3-3")),
+                                                     (a2, gn_mint_refresh("s3-4"))]),
+                    [GN_UP_401], relogin)
+    return p1 + p2, d1 + d2
+
+
+def gs_s4(fixture_root, ctx):
+    """S4: synthetic codex errors through the image mapping: a 429 usage_limit_reached keeps its message
+    and whitelisted type/code; a 403 plan error is the fixed login text (502); a token echoed in a 400 is
+    scrubbed; a 500 is a 502 with no upstream text."""
+    state = {"steps": None}
+    marker = "tf-s4-plan-marker-" + secrets.token_hex(4)
+
+    def body(rig):
+        problems = []
+
+        def ask(label, up_status, up_body, want, needle=None, absent=()):
+            state["steps"] = [("respond_json", up_status, up_body)]
+            try:
+                status, _h, answer = gq_post(rig.client, GQ_GEN, gs_body("tf s4"))
+            finally:
+                state["steps"] = None
+            more = gq_expect(label, status, answer, want, needle=needle, absent=absent + (TF_ACCOUNT_CODEX,))
+            err, _why = gq_err(answer)
+            return err, more
+
+        limit = {"error": {"type": "usage_limit_reached", "plan_type": "plus", "resets_in_seconds": 3600,
+                           "message": "tf s4 The usage limit has been reached"}}
+        err, more = ask("429 usage_limit_reached", 429, limit, 429, needle="tf s4 The usage limit")
+        problems += more
+        if err is not None and err["type"] != "usage_limit_reached":
+            problems.append("429: error.type %r, expected the whitelisted usage_limit_reached" % err["type"])
+        limit2 = {"error": {"type": "usage_limit_reached", "code": "imagegen_premium",
+                            "message": "tf s4 image limit"}}
+        err, more = ask("429 with a limit id", 429, limit2, 429, needle="tf s4 image limit")
+        problems += more
+        if err is not None and err["code"] != "imagegen_premium":
+            problems.append("429: error.code %r, expected the whitelisted imagegen_premium" % err["code"])
+        odd = {"error": {"type": "bad type!", "code": "x" * 70, "message": "tf s4 odd tokens"}}
+        err, more = ask("429 with non-token type/code", 429, odd, 429, needle="tf s4 odd tokens")
+        problems += more
+        if err is not None and (err["type"] == "bad type!" or err["code"] == "x" * 70):
+            problems.append("429: a non-token type or code was relayed")
+        plan = {"error": {"type": "forbidden", "code": "plan_required",
+                          "message": "tf s4 free plan " + marker + " " + TF_ACCOUNT_CODEX}}
+        _err, more = ask("403 plan error", 403, plan, 502, needle="refused this login", absent=(marker,))
+        problems += more
+        echo = {"error": {"type": "invalid_request_error",
+                          "message": "tf s4 bad " + TF_ACCESS_CODEX + " " + TF_REFRESH_CODEX}}
+        _err, more = ask("400 echoing the tokens", 400, echo, 400, needle="tf s4 bad",
+                         absent=(TF_ACCESS_CODEX, TF_REFRESH_CODEX))
+        problems += more
+        _err, more = ask("500", 500, {"error": {"message": "tf s4 boom " + marker}}, 502, absent=(marker,))
+        problems += more
+        return problems, ["mapped      : 429 (message, type, code relayed), 403 (fixed login text, 502), 400 (tokens "
+                          "scrubbed), 500 (502, no upstream text)"]
+
+    def script(_index, _request):
+        return state["steps"] or [("respond_json", 200, GQ_OK)]
+
+    return gs_run(fixture_root, "s4", gn_rotating([(TF_ACCESS_CODEX, gn_mint_refresh("s4"))]), script, body)
+
+
+def gs_s5(fixture_root, ctx):
+    """S5: under --debug --log-file, with a 401 refresh and an upstream error in the run, no access or
+    refresh token, no account id and no prompt reaches the log or stderr (and the peer really got the
+    prompt: the sweep is not vacuous); a chat request on the same backend still works."""
+    a2 = gn_mint_access()
+    box = {}
+
+    def stale_first(_index, request):
+        bearer = gn_bearer(request)
+        if bearer == "Bearer " + TF_ACCESS_CODEX:
+            return [GN_UP_401]
+        if request["line"].split(" ")[1].startswith("/codex/images/") and box.get("fail"):
+            return [("respond_json", 500, {"error": {"message": "tf s5 " + GS_PROMPT}})]
+        if request["line"].split(" ")[1].startswith("/codex/images/"):
+            return [("respond_json", 200, GQ_OK)]
+        return gn_up_ok(ctx["lines"])
+
+    def argv(rig):
+        box["log"] = os.path.join(rig.sandbox, "s5.log")
+        return ("--debug", "--log-file", box["log"])
+
+    def body(rig):
+        problems = []
+        status, _h, answer = gq_post(rig.client, GQ_GEN, gs_body(GS_PROMPT))
+        problems += [] if status == 200 else gq_expect("generations", status, answer, 200)
+        box["fail"] = True
+        status, _h, answer = gq_post(rig.client, GQ_GEN, gs_body(GS_PROMPT))
+        problems += gq_expect("upstream 500", status, answer, 502, absent=(GS_PROMPT, TF_ACCOUNT_CODEX,
+                                                                          TF_ACCESS_CODEX, a2))
+        box["fail"] = False
+        problems += gn_answer("chat control", rig.ask(), 200)
+        if not any(GS_PROMPT.encode() in r["body"] for r in rig.up.requests):
+            problems.append("the peer never received the planted prompt: the sweep would prove nothing")
+        time.sleep(0.3)
+        try:
+            with open(box["log"], "r", encoding="utf-8", errors="replace") as fh:
+                log_text = fh.read()
+        except OSError:
+            log_text = ""
+        if not log_text.strip():
+            problems.append("the --debug --log-file is empty: nothing to sweep")
+        elif "images_generations" not in log_text:
+            problems.append("no images_generations line in the log")
+        text = log_text + rig.proc.stderr_text()
+        for label, value in (("the first access token", TF_ACCESS_CODEX), ("the refreshed access token", a2),
+                             ("the refresh token", TF_REFRESH_CODEX), ("the account id", TF_ACCOUNT_CODEX),
+                             ("the prompt", GS_PROMPT)):
+            if value in text:
+                problems.append("%s reached the log or stderr" % label)
+        return problems, ["swept       : --debug --log-file and stderr over a 401 refresh, an upstream 500 and "
+                          "a chat control; the 502 answer"]
+    return gs_run(fixture_root, "s5", gn_rotating([(TF_ACCESS_CODEX, gn_mint_refresh("s5-1")),
+                                                  (a2, gn_mint_refresh("s5-2"))]),
+                  stale_first, body, argv=argv)
+
+
+def group_s(suite, fixture_root):
+    """S. codex image endpoints (experimental; Plan Phase 3).  S1 runs in-process on the loaded module;
+    S2-S5 each start a router subprocess in front of a TLS auth peer and a TLS codex peer (GnRig) whose
+    config adds one image route on the codex backend.  The fixtures are synthetic: the live endpoint is
+    unmeasured."""
+    results = {}
+    try:
+        fx, _raw = gm_fixtures()
+        try:
+            mod = H.load_module_from_path("ph_llm_router_s", SERVER)
+        except Exception:  # noqa: BLE001 -- S1 then fails with the reason
+            mod = None
+        ctx = {"lines": fx["text"]}
+        for cid, fn in zip(GS_CASES, (lambda r, c: gs_s1(r, mod), gs_s2, gs_s3, gs_s4, gs_s5)):
+            try:
+                results[cid] = fn(fixture_root, ctx)
+            except Exception as exc:  # noqa: BLE001 -- a broken case fails, never aborts the group
+                results[cid] = (["case raised %s: %s" % (type(exc).__name__, gi_redact(str(exc))[:200])], [])
+    except Exception as exc:  # noqa: BLE001 -- a setup failure fails every case not yet run
+        setup = "the group setup raised %s: %s" % (type(exc).__name__, gi_redact(str(exc))[:200])
+    else:
+        setup = "case did not run"
+    for cid, sid in zip(GS_CASES, GS_IDS):
+        problems, detail = results.get(cid, ([setup], []))
+        suite.record(GS, cid, problems, detail=["case        : " + sid] + list(detail))
 
 
 # ---------------------------------------------------------------------------
@@ -22116,11 +22475,22 @@ def group_j(suite, fixture_root, pyc_before, tree_before):
             if cls.MODALITIES != frozenset({"chat"}):
                 problems.append("%s.MODALITIES is %r, expected {'chat'}" % (kind, set(cls.MODALITIES)))
             shown.append(kind)
-        want = {"openai": frozenset({"chat", "image"}), "codex": frozenset({"chat"})}
+        want = {"openai": frozenset({"chat", "image"}), "codex": frozenset({"chat", "image"})}
         for kind, modalities in want.items():
             got = mod.ADAPTERS[kind].MODALITIES
             if got != modalities:
                 problems.append("%s.MODALITIES is %r, expected %r" % (kind, set(got), set(modalities)))
+        # Phase 3: the codex image paths sit beside the profile row's /codex/responses, so a profile
+        # change keeps them consistent; both kinds keep one IMAGE_PATHS entry per endpoint kind.
+        row = getattr(mod, "_RT_RESPONSES_PROFILES", {}).get("codex")
+        paths = dict(mod.ADAPTERS["codex"].IMAGE_PATHS)
+        if row is None:
+            problems.append("no codex profile row")
+        elif paths != {"generations": row.path.rsplit("/", 1)[0] + "/images/generations",
+                       "edits": row.path.rsplit("/", 1)[0] + "/images/edits"}:
+            problems.append("codex IMAGE_PATHS %r do not sit beside the profile path %r" % (paths, row.path))
+        if not mod.ADAPTERS["codex"].IMAGE_EDIT_JSON:
+            problems.append("codex.IMAGE_EDIT_JSON is false: the Codex CLI sends JSON edits")
         with open(SERVER, "r", encoding="utf-8") as fh:
             tree, findings = gj_parse(fh.read())
         problems += findings
@@ -22130,7 +22500,7 @@ def group_j(suite, fixture_root, pyc_before, tree_before):
         elif not any(isinstance(n, ast.Name) and n.id == "_RT_IMAGE_ENDPOINTS" for n in ast.walk(post[0])):
             problems.append("_post never references _RT_IMAGE_ENDPOINTS: the image endpoints are not dispatched there")
         return problems, ["kinds       : %s keep the base image hooks and MODALITIES {'chat'}" % ", ".join(shown),
-                          "modalities  : openai chat+image, codex chat; _post references _RT_IMAGE_ENDPOINTS"]
+                          "modalities  : openai and codex chat+image; _post references _RT_IMAGE_ENDPOINTS"]
 
     def gj_control_hits(rule, planted_tail, needles):
         """Problems unless *rule* is silent on the live source and names each needle once *planted_tail* is appended."""
@@ -22581,7 +22951,7 @@ def group_j_hygiene(suite, fixture_root, pyc_before, tree_before):
 # and repo snapshots taken at the start, so both must run last.
 GROUP_ORDER = ("group_a", "group_b", "group_c", "group_d", "group_e",
                "group_f", "group_g", "group_h", "group_k", "group_l",
-               "group_m", "group_n", "group_o", "group_p", "group_q", "group_i", "group_j")
+               "group_m", "group_n", "group_o", "group_p", "group_q", "group_s", "group_i", "group_j")
 
 
 def run(opts=None):

@@ -441,7 +441,7 @@ limits, `vision` and `modality`; an unknown key or option is refused by name
 | `display_name` | the route key | a string of 1-`Scripts/llm-router.py:_RT_DISPLAY_NAME_LIMIT` (256) characters with no control character; shown by `GET /v1/models` only. Allowed on `default` too, where it is unused |
 | `max_input_tokens`, `max_tokens` | none | integers from `Scripts/llm-router.py:_RT_TOKEN_LIMIT_MIN` to `Scripts/llm-router.py:_RT_TOKEN_LIMIT_MAX`; advertised by `GET /v1/models` (with `context_window`), never enforced |
 | `vision` | `true` | a JSON boolean (`0`, `1`, `"false"`, `null` are refused by path); `false` makes the router answer 400 to any request holding an image block, never strip it — see *Images* under Backends `Scripts/llm-router.py:RouteSpec`. Allowed on `default` too |
-| `modality` | `chat` | `chat` or `image` `Scripts/llm-router.py:_RT_MODALITIES`. An `image` route is served by the two image endpoints only and needs a kind that lists `image` in its adapter's `MODALITIES` (only `openai`), a backend that is not the `openai-oauth` profile ("image generation is not available with Sign in with ChatGPT tokens; use an api_key backend"), and a `model` equal to the route key, because the body is forwarded byte for byte and the upstream reads the client's `model`. The key is refused on `default`, checked on the config path and not on the route's name, so a typo can never send a prompt to an image model `Scripts/llm-router.py:_rt_cfg_route` |
+| `modality` | `chat` | `chat` or `image` `Scripts/llm-router.py:_RT_MODALITIES`. An `image` route is served by the two image endpoints only and needs a kind that lists `image` in its adapter's `MODALITIES` (`openai`, and the experimental `codex`), a backend that is not the `openai-oauth` profile ("image generation is not available with Sign in with ChatGPT tokens; use an api_key backend"), and a `model` equal to the route key, because the body is forwarded byte for byte and the upstream reads the client's `model`. The key is refused on `default`, checked on the config path and not on the route's name, so a typo can never send a prompt to an image model `Scripts/llm-router.py:_rt_cfg_route` |
 
 | Kind | Option | Rule |
 |---|---|---|
@@ -742,10 +742,10 @@ Two OpenAI-shaped endpoints serve clients other than Claude Code: `POST
 `multipart/form-data` body, or the JSON form whose images are `image_url`
 objects). The router reads only `model` and a few guard fields, forwards the
 client's bytes untouched, and relays a 2xx JSON answer untouched
-`Scripts/llm-router.py:OpenaiAdapter`. Only kind `openai` with an `api_key`
-serves them, through the route key `modality` (route table above); every other
-kind inherits the chat-only defaults of the image hooks
-`Scripts/llm-router.py:Adapter`. Why the design is a route marker, a raw relay and
+`Scripts/llm-router.py:ResponsesImageAdapter`. Only kind `openai` with an
+`api_key` serves them (and, experimentally, kind `codex`, below), through the
+route key `modality` (route table above); every other kind inherits the
+chat-only defaults of the image hooks `Scripts/llm-router.py:Adapter`. Why the design is a route marker, a raw relay and
 a canonical-only sniffer, and what lost, is the image-endpoints addendum of
 [[0028-route-by-model-translate-at-the-edge]].
 
@@ -832,7 +832,7 @@ still is, and nothing changes on the other paths
 
 **Forwarding and relay.** The upstream path is a fixed `IMAGE_PATHS` entry per
 endpoint, never built from client input, and the body is `InboundRequest.raw`,
-the client's bytes `Scripts/llm-router.py:OpenaiAdapter`. The request goes out
+the client's bytes `Scripts/llm-router.py:ResponsesImageAdapter`. The request goes out
 through the same single `_rt_send` call as every chat request, with the image
 head in place of the chat one `Scripts/llm-router.py:_post`. The answer is read
 whole under `Scripts/llm-router.py:_UPSTREAM_BODY_LIMIT` and sent as the bytes
@@ -865,6 +865,33 @@ before any upstream contact; the slot is released in the handler's `finally`
 `Scripts/llm-router.py:_RouterHttpServer` `Scripts/llm-router.py:_post`. Image
 waits and answers up to 64 MiB therefore cannot take every connection slot from
 chat.
+
+**Experimental: image routes on a `codex` backend.** A `codex` backend (ChatGPT
+login) accepts `modality: image` routes too, relayed to the ChatGPT backend's
+private image endpoints, `POST <base>/codex/images/generations` and `/edits`
+(`https://chatgpt.com/backend-api/codex/images/...` by default, beside the
+profile row's `/codex/responses`)
+`Scripts/llm-router.py:CodexAdapter`. Everything above holds unchanged — raw
+relay, the sniffer, the OpenAI envelope, the cap, `model` equal to the route key
+(the body is relayed untouched, so the client shapes it, e.g. the Codex CLI's
+`{prompt, background, model: "gpt-image-2", quality, size}`). What differs is
+the request head and the auth outcomes: the credential is the stored login's
+Bearer token, with the profile row's fixed pairs (`chatgpt-account-id`,
+`OpenAI-Beta`, `originator`, `version`, `User-Agent`) factored out of the chat
+head `Scripts/llm-router.py:_rt_rs_profile_pairs`, `Accept: application/json`
+and no `session_id` (that one is derived from a chat body's cache key, which an
+image request does not have); one 401 forces one token refresh and resends the
+same raw body once, a second 401 is the re-login answer in the OpenAI envelope,
+a 403 the fixed "refused this login" text (status 502), and a 429's message and
+whitelisted `type`/`code` (for example `usage_limit_reached`) are relayed as
+above `Scripts/llm-router.py:ResponsesImageAdapter`. The `openai` kind's
+`openai-oauth` profile is still refused for image routes. **Declared status:**
+the endpoint is private and unstable, not available on Free plans and limited by
+the plan's quota; the JSON and the multipart edit forms are both accepted and
+neither is proven there; the paths and headers are taken from the open-source
+Codex CLI and are **not yet measured live** (live smoke: pending), and the test
+group S uses synthetic fixtures. An account id an upstream error text echoes is
+not scrubbed (only the tokens are).
 
 ## OAuth: the token store and the write-back
 
@@ -1109,7 +1136,19 @@ static cases join group J: J42, the chat kinds inherit the image hooks
 `tests/test_llm_router.py:GJ_IMG_HOOKS`; J43, no log or format call receives
 the request, its raw bytes or its fields, and `rec` gets neither key
 `tests/test_llm_router.py:rule_j43`; J44, an upstream image path is only an
-`IMAGE_PATHS[...]` subscript `tests/test_llm_router.py:rule_j44`.
+`IMAGE_PATHS[...]` subscript `tests/test_llm_router.py:rule_j44`. J42 also pins
+the codex image paths beside the profile row's path.
+
+**Codex image routes (experimental).** Group S `tests/test_llm_router.py:group_s`
+`tests/test_llm_router.py:GS_IDS` drives a codex OAuth backend through the N
+group's rig (a TLS auth peer and a TLS codex peer) with synthetic fixtures: the
+route config, the openai-oauth refusal kept (S1); the `/codex/images/...` paths,
+byte-identical bodies of a generation, a JSON edit and a multipart edit, the
+login's Bearer and account id, `Accept: application/json`, no `session_id`, and
+a chat request on the same backend unchanged (S2); a 401, one refresh and the
+same raw body resent, then the OpenAI-shaped re-login answer (S3); the
+usage-limit and plan error mapping and the token scrub (S4); and no token,
+account id or prompt in the log or stderr (S5).
 
 **Deadlines in milliseconds.** A case whose observable is one of the router's
 own deadlines — the ping interval, the relay tick, the pre-auth, header and

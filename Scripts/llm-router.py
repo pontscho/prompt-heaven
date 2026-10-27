@@ -30,7 +30,7 @@ also carries the OpenAI model fields (object, created, owned_by) and the route's
 Every answer the client sees is Anthropic-shaped: a JSON body, an SSE stream
 that always closes its envelope, or the {"type":"error","error":{...}}
 envelope -- except on the image endpoints. A route with `"modality": "image"` (an openai
-backend with an api_key) is served by POST /v1/images/generations and /v1/images/edits (a
+backend with an api_key, or, experimentally, a codex backend) is served by POST /v1/images/generations and /v1/images/edits (a
 JSON body, or a multipart/form-data one for edits): the router reads `model` and a few
 guard fields, forwards the client's bytes untouched, relays a 2xx JSON answer untouched, and
 answers its own errors in the OpenAI envelope {"error":{message,type,param,code}} (no stream).
@@ -1359,8 +1359,8 @@ def _rt_cfg_route(name: str, entry: Any, backends: Mapping[str, BackendSpec],
     a JSON boolean (default true; false makes the router refuse a request that
     holds any image block with a 400, see _rt_vision_refusal); modality, when present, is
     "chat" (default) or "image" -- an image route serves /v1/images/generations and /edits
-    only, needs a kind whose adapter lists it in MODALITIES (openai), not the openai-oauth
-    profile, and a route key equal to its model; the key is refused on the default route;
+    only, needs a kind whose adapter lists it in MODALITIES (openai, and the experimental codex), not
+    the openai-oauth profile, and a route key equal to its model; the key is refused on the default route;
     options are checked by the backend kind's validators and an unknown option is refused by name.
     """
     if where is None:
@@ -1415,7 +1415,7 @@ def _rt_cfg_route(name: str, entry: Any, backends: Mapping[str, BackendSpec],
     if modality not in adapter_cls.MODALITIES:
         raise ConfigError(f"{where}.modality: kind {kind} does not serve {modality} routes")
     if modality == "image":
-        if spec.profile == "openai-oauth":
+        if kind == "openai" and spec.profile == "openai-oauth":
             raise ConfigError(f"{where}.modality: image generation is not available with Sign in with "
                               f"ChatGPT tokens; use an api_key backend")
         if adapter_cls.IMAGE_MODEL_IS_KEY and model != name:
@@ -2663,7 +2663,8 @@ class Adapter:
     every kind's behaviour as it was: no Accept override, no extra headers,
     the _SSE_LINE_LIMIT line cap and a required text/event-stream answer. The image hooks
     (image_request, image_head, image_response) and the MODALITIES / IMAGE_* attributes are
-    for a kind that serves `modality: image` routes (openai); a chat kind inherits them unchanged.
+    for a kind that serves `modality: image` routes (openai, codex: ResponsesImageAdapter); a chat kind
+    inherits them unchanged.
     """
 
     kind: str = ""
@@ -4452,6 +4453,35 @@ def _rt_rs_identity(backend: BackendSpec) -> Tuple[Tuple[str, str], ...]:
     return tuple((key, overrides.get(key, default)) for key, default in _RT_CODEX_IDENTITY)
 
 
+def _rt_rs_profile_pairs(row: ResponsesProfile, backend: BackendSpec,
+                         cred: Optional[Credential]) -> List[Tuple[str, str]]:
+    """The profile row's fixed upstream header pairs, shared by a chat and an image request.
+
+    In order: chatgpt-account-id and x-openai-internal-codex-residency (row.account_header,
+    from *cred*), OpenAI-Beta (row.beta), then the effective identity (_RT_CODEX_IDENTITY merged
+    with backend.identity, in the table's order) when row.identity. Every value passes
+    _rt_header_value_ok first (S5): a failing account id or identity value is an UpstreamError
+    502, a failing residency is dropped (the claim rule's "ignored"). No session_id: that is
+    the chat request's (it derives from the body's prompt_cache_key)."""
+    pairs: List[Tuple[str, str]] = []
+    refused = UpstreamError(502, "api_error", "backend %s: an upstream header value failed validation"
+                            % backend.name)
+    if row.account_header and cred is not None and cred.account_id is not None:
+        if not _rt_header_value_ok(cred.account_id, "claim"):
+            raise refused
+        pairs.append(("chatgpt-account-id", cred.account_id))
+        if cred.residency is not None and _rt_header_value_ok(cred.residency, "claim"):
+            pairs.append(("x-openai-internal-codex-residency", cred.residency))
+    if row.beta:
+        pairs.append(("OpenAI-Beta", row.beta))
+    if row.identity:
+        for key, value in _rt_rs_identity(backend):
+            if not _rt_header_value_ok(value, "identity"):
+                raise refused
+            pairs.append((key, value))
+    return pairs
+
+
 def _rt_rs_unsupported(block_type: str, where: str) -> ApiError:
     """A 400 naming the block type a Responses backend cannot take (bounded and escaped)."""
     return _rt_bad(where, "block type %s is not supported by a responses backend" % _log_value(block_type))
@@ -5190,25 +5220,12 @@ class ResponsesAdapter(Adapter):
         dropped (the claim rule's "ignored")."""
         row = self._profile(inbound)
         backend = inbound.backend
-        pairs: List[Tuple[str, str]] = []
-        refused = UpstreamError(502, "api_error", "backend %s: an upstream header value failed validation"
-                                % backend.name)
-        if row.account_header and cred is not None and cred.account_id is not None:
-            if not _rt_header_value_ok(cred.account_id, "claim"):
-                raise refused
-            pairs.append(("chatgpt-account-id", cred.account_id))
-            if cred.residency is not None and _rt_header_value_ok(cred.residency, "claim"):
-                pairs.append(("x-openai-internal-codex-residency", cred.residency))
-        if row.beta:
-            pairs.append(("OpenAI-Beta", row.beta))
+        pairs = _rt_rs_profile_pairs(row, backend, cred)
         if row.identity:
-            for key, value in _rt_rs_identity(backend):
-                if not _rt_header_value_ok(value, "identity"):
-                    raise refused
-                pairs.append((key, value))
             session = _rt_rs_cache_key(inbound.body, backend.name)
             if not _rt_header_value_ok(session, "claim"):
-                raise refused
+                raise UpstreamError(502, "api_error", "backend %s: an upstream header value failed validation"
+                                    % backend.name)
             pairs.append(("session_id", session))
         return "text/event-stream", tuple(pairs)
 
@@ -5292,8 +5309,67 @@ class ResponsesAdapter(Adapter):
         return ResponsesStreamTranslator(inbound, self._profile(inbound), estimate, dropped)
 
 
-class CodexAdapter(ResponsesAdapter):
-    """kind codex: the ChatGPT-subscription Responses endpoint (profile codex)."""
+class ResponsesImageAdapter(ResponsesAdapter):
+    """The image endpoints of a Responses kind that serves `modality: image` routes (openai with an
+    api_key, and the experimental codex): the client's generations and edits bytes go to
+    IMAGE_PATHS[...] untouched and the 2xx JSON comes back untouched (raw relay, NFR-3).
+
+    A subclass sets MODALITIES, IMAGE_PATHS and IMAGE_EDIT_JSON. The profile row's fixed header pairs
+    (empty for openai-apikey; account id, OpenAI-Beta and identity for codex) ride along WITHOUT
+    session_id: that one derives from a chat body's prompt_cache_key, and an image inbound has none.
+    Registered through its CodexAdapter and OpenaiAdapter subclasses (KIND_CLASSES, ADAPTERS)."""
+
+    def image_request(self, inbound: InboundRequest) -> Tuple[str, bytes]:
+        """The fixed upstream path of the endpoint (never built from client input) and the client's bytes."""
+        return self.IMAGE_PATHS[_RT_IMAGE_KINDS[inbound.endpoint]], inbound.raw
+
+    def image_head(self, inbound: InboundRequest,
+                   cred: Optional[Credential]) -> Tuple[Optional[str], Tuple[Tuple[str, str], ...]]:
+        """(None, the rebuilt Content-Type (D9) as a content-type pair, then the profile row's fixed
+        pairs): no Accept override (application/json), no session_id; _rt_upstream_headers re-checks
+        the content type and lifts the user-agent pair."""
+        pairs = _rt_rs_profile_pairs(self._profile(inbound), inbound.backend, cred)
+        return None, (("content-type", inbound.content_type),) + tuple(pairs)
+
+    def image_response(self, inbound: InboundRequest, status: int, body: bytes,
+                       content_type: str) -> Tuple[int, bytes]:
+        """A 2xx whose Content-Type is application/json and whose body starts with `{` is relayed as
+        it came (a different media type or lead byte is a 502); a non-2xx is an OpenAI error envelope:
+        the status through _UPSTREAM_STATUS, a fixed text for 401/403 (an OAuth profile: the re-login
+        hint on a 401 that survived the refresh, a fixed login text on a 403; otherwise the
+        credential text, type and code from the mapped status), otherwise _rt_image_error (an
+        upstream type, code and param ride along only with a relayed message)."""
+        name = inbound.backend.name
+        if 200 <= status < 300:
+            media = content_type.split(";", 1)[0].strip().lower()
+            lead = _RT_JSON_LEAD_RE.match(body).end()
+            if media != "application/json" or body[lead:lead + 1] != b"{":
+                return 502, _rt_dumps(_rt_openai_error_body(
+                    502, "backend %s answered with a body that is not a JSON object" % name))
+            return status, body
+        mapped = _UPSTREAM_STATUS.get(status, 502)
+        if status in (401, 403):
+            if self._profile(inbound).oauth_provider:
+                if status == 401:
+                    log.warning("upstream login rejected: backend %s", _log_value(name))
+                    return 401, _rt_dumps(_rt_openai_error_body(
+                        401, "backend %s: the login was rejected after a refresh; run llm-router.py "
+                             "login --backend %s" % (name, name), err_type="authentication_error"))
+                return mapped, _rt_dumps(_rt_openai_error_body(
+                    mapped, "backend %s refused this login (upstream 403)" % name))
+            log.warning("upstream credential rejected: backend %s", _log_value(name))
+            return mapped, _rt_dumps(_rt_openai_error_body(
+                mapped, "backend %s rejected the router's credential" % name))
+        text, up_type, up_code, up_param = _rt_image_error(inbound, status, body)
+        return mapped, _rt_dumps(_rt_openai_error_body(mapped, text, param=up_param, code=up_code,
+                                                       err_type=up_type))
+
+
+class CodexAdapter(ResponsesImageAdapter):
+    """kind codex: the ChatGPT-subscription Responses endpoint (profile codex) and, EXPERIMENTAL, the
+    private ChatGPT backend image endpoints beside it (POST <codex base>/codex/images/generations and
+    /edits, authenticated like /responses; the Codex CLI's JSON bodies are relayed raw). Unmeasured live,
+    unstable, not on Free plans; both the JSON and the multipart edit forms are accepted, neither proven."""
 
     kind = "codex"
     ROUTE_OPTIONS: Mapping[str, _RtOptionValidator] = {
@@ -5301,6 +5377,10 @@ class CodexAdapter(ResponsesAdapter):
         "reasoning_effort": _rt_opt_enum(_RT_RS_EFFORTS),
         "verbosity": _rt_opt_enum(("low", "medium", "high")),
     }
+    MODALITIES = frozenset({"chat", "image"})
+    # Beside the profile row's /codex/responses (J42 pins it), under the row's base (.../backend-api).
+    IMAGE_PATHS = {"generations": "/codex/images/generations", "edits": "/codex/images/edits"}
+    IMAGE_EDIT_JSON = True
 
 
 # An image answer's upstream error text is relayed only for the statuses whose message is about the
@@ -5373,7 +5453,7 @@ def _rt_image_error(inbound: InboundRequest, status: int,
             _rt_image_token(inbound, err.get("param")))
 
 
-class OpenaiAdapter(ResponsesAdapter):
+class OpenaiAdapter(ResponsesImageAdapter):
     """kind openai: the platform Responses endpoint (profiles openai-oauth / openai-apikey), and, with
     an api_key backend, the image endpoints: the client's generations and edits (multipart or JSON)
     bytes go to /v1/images/... untouched and the 2xx JSON comes back untouched (raw relay, NFR-3)."""
@@ -5390,34 +5470,6 @@ class OpenaiAdapter(ResponsesAdapter):
     MODALITIES = frozenset({"chat", "image"})
     IMAGE_PATHS = {"generations": "/v1/images/generations", "edits": "/v1/images/edits"}
     IMAGE_EDIT_JSON = True
-
-    def image_request(self, inbound: InboundRequest) -> Tuple[str, bytes]:
-        """The fixed upstream path of the endpoint (never built from client input) and the client's bytes."""
-        return self.IMAGE_PATHS[_RT_IMAGE_KINDS[inbound.endpoint]], inbound.raw
-
-    def image_response(self, inbound: InboundRequest, status: int, body: bytes,
-                       content_type: str) -> Tuple[int, bytes]:
-        """A 2xx whose Content-Type is application/json and whose body starts with `{` is relayed as
-        it came (a different media type or lead byte is a 502); a non-2xx is an OpenAI error envelope:
-        the status through _UPSTREAM_STATUS, the fixed credential text for 401/403 (type and code from
-        the mapped status), otherwise _rt_image_error (an upstream type, code and param ride along
-        only with a relayed message)."""
-        name = inbound.backend.name
-        if 200 <= status < 300:
-            media = content_type.split(";", 1)[0].strip().lower()
-            lead = _RT_JSON_LEAD_RE.match(body).end()
-            if media != "application/json" or body[lead:lead + 1] != b"{":
-                return 502, _rt_dumps(_rt_openai_error_body(
-                    502, "backend %s answered with a body that is not a JSON object" % name))
-            return status, body
-        mapped = _UPSTREAM_STATUS.get(status, 502)
-        if status in (401, 403):
-            log.warning("upstream credential rejected: backend %s", _log_value(name))
-            return mapped, _rt_dumps(_rt_openai_error_body(
-                mapped, "backend %s rejected the router's credential" % name))
-        text, up_type, up_code, up_param = _rt_image_error(inbound, status, body)
-        return mapped, _rt_dumps(_rt_openai_error_body(mapped, text, param=up_param, code=up_code,
-                                                       err_type=up_type))
 
 
 class _RtKindRow(NamedTuple):
@@ -9030,7 +9082,10 @@ example config (chmod 600; token: python3 -c 'import secrets;print(secrets.token
   streaming yet; errors there are the OpenAI envelope) and refused 400 on /v1/messages, and a chat
   route is refused 400 on the image paths. It needs an openai backend with an api_key (not the OAuth
   login), a route key equal to its model, and is not allowed on "default" (an image path never falls
-  back to it). The router reads only model and a few guard fields and forwards the body as it came;
+  back to it). EXPERIMENTAL: a codex backend (ChatGPT login) also takes image routes, relayed to
+  the private <base>/codex/images/... endpoints with the client's body as sent (the Codex CLI
+  shape); unstable, not on Free plans, quota-limited, not measured live. The router reads only
+  model and a few guard fields and forwards the body as it came;
   raise --body-limit for large edit uploads. GET /v1/models lists every route with its modality
   (?modality=chat|image|all filters it); --max-image-requests caps image requests in flight.
   A mistral route's option tool_result_images (boolean, default true): an image inside a
