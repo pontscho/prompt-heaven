@@ -61,6 +61,9 @@ Groups:
   S  codex images        -- EXPERIMENTAL: the same endpoints on a codex backend (private /codex/images/...
                              upstream, unmeasured live): route config, path and headers, one refresh per
                              401 with the raw body replayed, error mapping, leaks
+  T  image streaming     -- stream true on an openai image route: the Images API's SSE relayed byte-exact
+                             (partial images, completed), line and event limits, end detection, `: ping`
+                             comments, the in-flight slot, idle stall, leaks, non-2xx as OpenAI JSON
   I  secret leak         -- no sentinel in stderr, the log, a body or a wrong peer
   J  static and hygiene   -- AST over the router source, writes, bytecode, tree
 """
@@ -17509,7 +17512,7 @@ GQ_CASES = (
     "JSON edit form byte-exact",         # Q4
     "per-endpoint 415, boundary 400",    # Q5
     "wrong-endpoint modality refusals",  # Q6
-    "stream true refused (400)",         # Q7
+    "stream: only true or false",        # Q7
     "OpenAI error envelope",             # Q8
     "upstream error hygiene",            # Q8b
     "/v1/models: object, modality",      # Q9
@@ -17948,14 +17951,17 @@ def group_q(suite, fixture_root):
             def q7():
                 problems = []
                 before = len(peer.requests)
-                status, _h, body = gq_post(client, GQ_GEN, gq_json_body(GQ_IMG, stream=True))
-                problems += gq_expect("JSON stream true", status, body, 400, needle="streaming is not supported yet")
-                ctype, mp = gq_multipart("tfq7b", [("model", GQ_IMG), ("prompt", "x"), ("stream", "true")],
-                                         [("image", "a.png", "image/png", b"\x89PNG")])
-                status, _h, body = gq_post(client, GQ_EDIT, mp, ctype)
-                problems += gq_expect("multipart stream=true", status, body, 400,
-                                      needle="streaming is not supported yet")
-                problems += untouched(before, "stream true")
+                # Phase 4: stream true is relayed on an openai route (group T); here only the spellings the
+                # sniffer refuses (one canonical spelling, ADR 0015) and the stream false controls.
+                for label, value in (("JSON 1", 1), ("JSON string true", "true"), ("JSON yes", "yes")):
+                    status, _h, body = gq_post(client, GQ_GEN, gq_json_body(GQ_IMG, stream=value))
+                    problems += gq_expect("stream " + label, status, body, 400, needle="stream")
+                for label, value in (("True", "True"), ("1", "1"), (" true", " true")):
+                    ctype, mp = gq_multipart("tfq7b", [("model", GQ_IMG), ("prompt", "x"), ("stream", value)],
+                                             [("image", "a.png", "image/png", b"\x89PNG")])
+                    status, _h, body = gq_post(client, GQ_EDIT, mp, ctype)
+                    problems += gq_expect("multipart stream=%s" % label, status, body, 400, needle="stream")
+                problems += untouched(before, "a non-canonical stream value")
                 status, _h, body = gq_post(client, GQ_GEN, gq_json_body(GQ_IMG, stream=False))
                 problems += [] if status == 200 else gq_expect("JSON stream false", status, body, 200)
                 ctype, mp = gq_multipart("tfq7b", [("model", GQ_IMG), ("prompt", "x"), ("stream", "false")],
@@ -17965,8 +17971,8 @@ def group_q(suite, fixture_root):
                 if len(peer.requests) != before + 2:
                     problems.append("the peer saw %d request(s) for the two stream:false controls, expected 2"
                                     % (len(peer.requests) - before))
-                return problems, ["refused     : stream true as a JSON boolean and as a multipart text field, "
-                                  "peer untouched; stream false passes (both forms)"]
+                return problems, ["refused     : non-canonical stream spellings (JSON 1 / \"true\" / \"yes\", multipart "
+                                  "True / 1 / \" true\"), peer untouched; stream false passes (both forms)"]
 
             def q8():
                 problems = []
@@ -19864,6 +19870,808 @@ def group_s(suite, fixture_root):
     for cid, sid in zip(GS_CASES, GS_IDS):
         problems, detail = results.get(cid, ([setup], []))
         suite.record(GS, cid, problems, detail=["case        : " + sid] + list(detail))
+
+
+# ---------------------------------------------------------------------------
+# Group T: streamed image responses (openai kind; Plan Phase 4, Step 17)
+# ---------------------------------------------------------------------------
+
+# `stream: true` on an image route of the openai kind is relayed as the Images API's server-sent events:
+# image_generation.partial_image and image_generation.completed for generations, image_edit.partial_image
+# and image_edit.completed for edits, each event's data a JSON object (type, b64_json, created_at, size,
+# quality, background, output_format, partial_image_index; usage on completed).  The names, the fields
+# and the sizes come from the OpenAI documentation: nothing here is measured against the live service.
+# The codex and sdcpp kinds keep the 400.  Every peer is a ScriptedPeer.
+GT = "T. image streaming"
+GT_CASES = (
+    "stream true: openai routes only",   # T1
+    "SSE events relayed byte-exact",     # T2
+    "line limit, 20 MiB data line",      # T3
+    "end on .completed, early EOF",      # T4
+    "idle ping is an SSE comment",       # T5
+    "client gone or done frees slot",    # T6
+    "idle stall: in-band error",         # T7
+    "no sentinel in a log or error",     # T8
+    "non-2xx JSON, non-SSE 2xx",         # T9
+    "ImageEventRelay sans-IO unit",      # T10
+)
+GT_IDS = ("T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9", "T10")
+GT_NAMES = {"generations": ("image_generation.partial_image", "image_generation.completed"),
+            "edits": ("image_edit.partial_image", "image_edit.completed")}
+GT_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB"
+GT_ANTHROPIC_SSE = (
+    "event: message_start",
+    'data: {"type":"message_start","message":{"id":"msg_tft","type":"message","role":"assistant","content":[],'
+    '"model":"tf-q-chat-up","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":0}}}',
+    "",
+    "event: message_stop",
+    'data: {"type":"message_stop"}',
+    "",
+)
+GT_REQ_RE = re.compile(r"req endpoint='([a-z_]+)'.*? end='?([a-z_]+)'?")
+
+
+def gt_data(kind, b64, index=None):
+    """One event's data JSON (bytes): the documented fields; partial_image_index on a partial image,
+    usage on a completed one."""
+    obj = {"type": kind, "b64_json": b64, "created_at": 1700000000, "size": "1024x1024", "quality": "high",
+           "background": "opaque", "output_format": "png"}
+    if index is not None:
+        obj["partial_image_index"] = index
+    else:
+        obj["usage"] = {"total_tokens": 3, "input_tokens": 1, "output_tokens": 2}
+    return json.dumps(obj, separators=(",", ":")).encode("ascii")
+
+
+def gt_event(kind, b64, index=None):
+    """The three lines (bytes, no terminator) of one image event: event name, data, the blank line."""
+    return [b"event: " + kind.encode("ascii"), b"data: " + gt_data(kind, b64, index), b""]
+
+
+def gt_stream_lines(partials, edit=False, b64=GT_B64):
+    """*partials* partial images and the completed event of an image stream, as peer lines."""
+    part, done = GT_NAMES["edits" if edit else "generations"]
+    lines = []
+    for index in range(partials):
+        lines += gt_event(part, b64, index)
+    return lines + gt_event(done, b64)
+
+
+def gt_wire(lines):
+    """The bytes a peer's respond_sse puts on the wire for *lines* (each plus one newline)."""
+    return b"".join(line + b"\n" for line in lines)
+
+
+def gt_split(raw):
+    """[(name, whole event bytes)] of a relayed stream cut at its blank lines: name is the `event:`
+    value, ':' for a comment block, None for a block without one."""
+    out = []
+    for block in raw.split(b"\n\n"):
+        if not block:
+            continue
+        name = None
+        if block.startswith(b":"):
+            name = ":"
+        else:
+            for line in block.split(b"\n"):
+                if line.startswith(b"event:"):
+                    name = line[len(b"event:"):].strip().decode("ascii", "replace")
+                    break
+        out.append((name, block + b"\n\n"))
+    return out
+
+
+def gt_error_event(event):
+    """(error object, problem): *event* must be `event: error` and one data line holding an OpenAI envelope."""
+    lines = event.rstrip(b"\n").split(b"\n")
+    if len(lines) != 2 or lines[0] != b"event: error" or not lines[1].startswith(b"data: "):
+        return None, "not an `event: error` + data pair: %r" % gi_redact(gb_text(event))[:100]
+    return gq_err(lines[1][len(b"data: "):])
+
+
+def gt_tail_error(label, raw, head_wire, needle=None, absent=()):
+    """Problems unless *raw* is *head_wire* byte-exact followed by exactly one in-band OpenAI error event
+    whose message holds *needle* and none of *absent* (the whole answer is swept for those)."""
+    if not raw.startswith(head_wire):
+        return ["%s: the events before the failure were not relayed byte-exact (%d byte(s) back, %d expected first)"
+                % (label, len(raw), len(head_wire))]
+    events = gt_split(raw[len(head_wire):])
+    if len(events) != 1:
+        return ["%s: %d event(s) after the relayed ones, expected exactly one error event" % (label, len(events))]
+    err, why = gt_error_event(events[0][1])
+    if why:
+        return ["%s: %s" % (label, why)]
+    problems = []
+    if needle and needle not in err["message"]:
+        problems.append("%s: error message %r does not hold %r" % (label, gi_redact(err["message"])[:120], needle))
+    for text in absent:
+        if text and text.encode("utf-8") in raw:
+            problems.append("%s: the answer carries %r" % (label, text[:40]))
+    return problems
+
+
+def gt_open(client, path, body, content_type="application/json", timeout=30.0):
+    """(connection, response): one POST sent and the response head read, not recorded for I2; the caller
+    reads the events and closes BOTH (a Connection: close answer leaves the socket to the response)."""
+    conn = client.connect(timeout)
+    try:
+        conn.putrequest("POST", path, skip_host=True, skip_accept_encoding=True)
+        for key, value in client.headers({"Content-Type": content_type}).items():
+            conn.putheader(key, value)
+        conn.putheader("Content-Length", str(len(body)))
+        conn.endheaders(body)
+        return conn, conn.getresponse()
+    except BaseException:
+        conn.close()
+        raise
+
+
+def gt_read_event(resp):
+    """The bytes of the next event of an open stream, through its blank line (fewer at EOF)."""
+    out = b""
+    while True:
+        line = resp.readline()
+        if not line:
+            return out
+        out += line
+        if line in (b"\n", b"\r\n"):
+            return out
+
+
+def gt_script_default(_index, request):
+    """The peer's default answer: an Anthropic stream for /v1/messages, an image event stream when the
+    router asked for text/event-stream (edit event names on /edits), else GQ_OK."""
+    path = request["line"].split(" ")[1]
+    if path.startswith("/v1/messages"):
+        return [("respond_sse", list(GT_ANTHROPIC_SSE))]
+    if "text/event-stream" in gq_hdrs(request).get("accept", []):
+        return [("respond_sse", gt_stream_lines(2, edit=path.endswith("/edits")))]
+    return [("respond_json", 200, GQ_OK)]
+
+
+def gt_req_lines(log_text):
+    """[(endpoint, end)] of the `req` summary lines of a router log, in order."""
+    return [m.groups() for m in (GT_REQ_RE.search(ln) for ln in log_text.splitlines()) if m is not None]
+
+
+def gt_t1(ctx):
+    """T1: stream true on an openai image route is accepted (JSON and a multipart `stream` field) and
+    reaches the peer as sent with Accept: text/event-stream, answered as an event stream; stream false
+    stays a JSON answer; a codex or sdcpp image route and a non-canonical spelling are still a 400."""
+    mod, peer, client, state = ctx["mod"], ctx["peer"], ctx["client"], ctx["state"]
+    problems = []
+    if mod is None or not hasattr(mod, "_rt_parse_image_inbound"):
+        return ["cannot import the router (_rt_parse_image_inbound)"], []
+    box = new_sandbox(ctx["fixture_root"], "t1")
+    routes = {"tf-t1-oa": "oa", "tf-t1-cx": "cx", "tf-t1-sd": "sd"}
+    path = write_config(box, {
+        "auth_token": TF_ROUTER_TOKEN,
+        "backends": {"oa": {"kind": "openai", "api_key": TF_KEY_OPENAI},
+                     "cx": {"kind": "codex", "oauth": {}},
+                     "sd": {"kind": "sdcpp", "base_url": "http://127.0.0.1:1234", "auth_header": "none",
+                            "allow_private": True, "allow_loopback": True}},
+        "routes": {name: {"backend": backend, "model": name, "modality": "image"}
+                   for name, backend in routes.items()}})
+    cfg, more = ga_accepted(mod, path, "T1 config (openai, codex, sdcpp image routes)")
+    problems += more
+    if cfg is not None:
+        for route, want in (("tf-t1-oa", True), ("tf-t1-cx", False), ("tf-t1-sd", False)):
+            for label, endpoint, ctype, raw in (
+                    ("JSON generations", "images_generations", "application/json",
+                     gq_json_body(route, "tf t1", stream=True)),
+                    ("multipart edit", "images_edits") + gq_multipart(
+                        "tft1b", [("model", route), ("prompt", "tf t1"), ("stream", "true")], [])):
+                try:
+                    inbound = mod._rt_parse_image_inbound(endpoint, ctype, raw, {}, cfg)
+                except Exception as exc:  # noqa: BLE001 -- the refusal type and text are the finding
+                    refused = (getattr(exc, "status", None), str(getattr(exc, "message", exc)))
+                    if want:
+                        problems.append("%s stream true on %s: refused (%s)" % (label, route, refused[1][:80]))
+                    elif refused[0] != 400 or "streaming is not supported yet" not in refused[1]:
+                        problems.append("%s stream true on %s: expected the 400 'streaming is not supported yet', "
+                                        "got %r" % (label, route, refused))
+                    continue
+                if not want:
+                    problems.append("%s stream true on %s was accepted" % (label, route))
+                elif inbound.stream is not True or inbound.fields.get("stream") != "true":
+                    problems.append("%s stream true on %s: inbound.stream is %r" % (label, route, inbound.stream))
+            ctype, mp = gq_multipart("tft1b", [("model", route), ("prompt", "tf t1"), ("stream", "false")], [])
+            for label, endpoint, c, raw in (("JSON", "images_generations", "application/json",
+                                             gq_json_body(route, "tf t1", stream=False)),
+                                            ("multipart", "images_edits", ctype, mp)):
+                try:
+                    inbound = mod._rt_parse_image_inbound(endpoint, c, raw, {}, cfg)
+                except Exception as exc:  # noqa: BLE001
+                    problems.append("%s stream false on %s was refused: %s" % (label, route, str(exc)[:80]))
+                    continue
+                if inbound.stream is not False:
+                    problems.append("%s stream false on %s: inbound.stream is %r" % (label, route, inbound.stream))
+    if client is None:
+        return problems + [ctx["router_why"]], []
+    before = len(peer.requests)
+    body = gq_json_body(GQ_IMG, "tf t1", stream=True, partial_images=2)
+    status, hdrs, raw = gq_post_raw(client, GQ_GEN, body)
+    if status != 200 or not (hdrs.get("content-type") or "").startswith("text/event-stream"):
+        problems.append("JSON stream true: status %r, Content-Type %r, expected 200 text/event-stream"
+                        % (status, hdrs.get("content-type")))
+    elif raw != gt_wire(gt_stream_lines(2)):
+        problems.append("JSON stream true: the events differ from the peer's (%d vs %d bytes)"
+                        % (len(raw), len(gt_wire(gt_stream_lines(2)))))
+    ctype, mp = gq_multipart("tft1c", [("model", GQ_IMG), ("prompt", "tf t1"), ("stream", "true"),
+                                       ("partial_images", "3")], [("image", "a.png", "image/png", b"\x89PNG")])
+    status, hdrs, raw = gq_post_raw(client, GQ_EDIT, mp, ctype)
+    if status != 200 or not (hdrs.get("content-type") or "").startswith("text/event-stream"):
+        problems.append("multipart stream=true: status %r, Content-Type %r" % (status, hdrs.get("content-type")))
+    elif raw != gt_wire(gt_stream_lines(2, edit=True)):
+        problems.append("multipart stream=true: the edit events differ from the peer's")
+    sent = peer.requests[before:]
+    if len(sent) != 2:
+        problems.append("the peer saw %d request(s) for the two stream:true requests, expected 2" % len(sent))
+    else:
+        for req, want_body, want_path, want_ct in ((sent[0], body, "/v1/images/generations", "application/json"),
+                                                   (sent[1], mp, "/v1/images/edits", ctype)):
+            seen = gq_hdrs(req)
+            if req["line"] != "POST %s HTTP/1.1" % want_path or req["body"] != want_body:
+                problems.append("peer got %r with %d body byte(s), expected the client's bytes at %s"
+                                % (req["line"], len(req["body"]), want_path))
+            if seen.get("accept") != ["text/event-stream"] or seen.get("content-type") != [want_ct]:
+                problems.append("peer Accept %r / Content-Type %r for %s" % (seen.get("accept"),
+                                                                           seen.get("content-type"), want_path))
+    status, hdrs, raw = gq_post_raw(client, GQ_GEN, gq_json_body(GQ_IMG, "tf t1", stream=False))
+    if status != 200 or raw != GQ_OK or "event-stream" in (hdrs.get("content-type") or ""):
+        problems.append("stream false: status %r, expected the JSON answer unchanged" % status)
+    elif gq_hdrs(peer.requests[-1]).get("accept") != ["application/json"]:
+        problems.append("stream false: the peer's Accept is %r" % gq_hdrs(peer.requests[-1]).get("accept"))
+    mark = len(peer.requests)
+    for label, value in (("JSON 1", 1), ("JSON \"true\"", "true"), ("JSON null", None)):
+        status, _h, answer = gq_post(client, GQ_GEN, gq_json_body(GQ_IMG, stream=value))
+        problems += gq_expect("stream " + label, status, answer, 400, needle="stream")
+    ctype, mp = gq_multipart("tft1d", [("model", GQ_IMG), ("prompt", "x"), ("stream", "True")], [])
+    status, _h, answer = gq_post(client, GQ_EDIT, mp, ctype)
+    problems += gq_expect("multipart stream=True", status, answer, 400, needle="stream")
+    if len(peer.requests) != mark:
+        problems.append("the peer saw %d request(s) for the non-canonical stream spellings, expected none"
+                        % (len(peer.requests) - mark))
+    return problems, ["in-process  : openai route accepts stream true (JSON, multipart); codex and sdcpp routes keep "
+                      "the 400; stream false -> inbound.stream False",
+                      "peer        : both stream:true bodies byte-identical, Accept text/event-stream; stream false "
+                      "Accept application/json",
+                      "refused     : stream 1 / \"true\" / null / multipart True (peer untouched)"]
+
+
+def gt_t2(ctx):
+    """T2: N partial images and the completed event reach the client as the peer sent them, byte for
+    byte, for generations and for edits (their own event names); an event over the 2 MiB default passes;
+    an event over the image event limit is an in-band error after the events before it."""
+    mod, peer, client, state = ctx["mod"], ctx["peer"], ctx["client"], ctx["state"]
+    problems = []
+    part, done = GT_NAMES["generations"]
+    big = "A" * (3 << 20)
+    lines = gt_event(part, GT_B64, 0) + gt_event(part, big, 1) + gt_event(part, GT_B64, 2) + gt_event(done, GT_B64)
+    body = gq_json_body(GQ_IMG, "tf t2", stream=True, partial_images=3)
+    try:
+        state["script"] = lambda _i, _r: [("respond_sse", lines)]
+        status, hdrs, raw = gq_post_raw(client, GQ_GEN, body, timeout=60.0)
+        want = gt_wire(lines)
+        if status != 200:
+            problems.append("generations: status %r, expected 200" % status)
+        elif raw != want:
+            problems.append("generations: %d byte(s) back, the peer sent %d: not relayed byte-exact"
+                            % (len(raw), len(want)))
+        names = [n for n, _e in gt_split(raw)]
+        if names != [part] * 3 + [done]:
+            problems.append("generations: event names %r" % names)
+        epart, edone = GT_NAMES["edits"]
+        elines = gt_event(epart, GT_B64, 0) + gt_event(epart, big, 1) + gt_event(edone, GT_B64)
+        state["script"] = lambda _i, _r: [("respond_sse", elines)]
+        ctype, mp = gq_multipart("tft2b", [("model", GQ_IMG), ("prompt", "tf t2"), ("stream", "true")],
+                                 [("image", "a.png", "image/png", b"\x89PNG")])
+        status, _h, raw = gq_post_raw(client, GQ_EDIT, mp, ctype, timeout=60.0)
+        if status != 200 or raw != gt_wire(elines):
+            problems.append("edits: status %r, %d byte(s) back, expected the peer's %d byte-exact"
+                            % (status, len(raw), len(gt_wire(elines))))
+        # An event over the event limit: two data lines, each under the line limit, together over it.
+        event_limit = getattr(mod, "_RT_IMAGE_SSE_EVENT_LIMIT", 64 << 20) if mod is not None else 64 << 20
+        line_limit = getattr(mod, "_RT_IMAGE_SSE_LINE_LIMIT", 48 << 20) if mod is not None else 48 << 20
+        half = b"A" * (event_limit // 2 + (1 << 20))
+        if len(half) + 64 >= line_limit:
+            problems.append("the test line (%d bytes) is not under the line limit %d" % (len(half), line_limit))
+        first = gt_event(part, GT_B64, 0)
+        over = [b"event: " + part.encode(), b"data: " + half, b"data: " + half, b""]
+        state["script"] = lambda _i, _r: [("respond_sse", first + over + gt_event(done, GT_B64))]
+        status, _h, raw = gq_post_raw(client, GQ_GEN, body, timeout=60.0)
+        if status != 200:
+            problems.append("oversized event: status %r (the head is sent before the first event)" % status)
+        else:
+            problems += gt_tail_error("oversized event", raw, gt_wire(first), needle="oversized")
+            if len(raw) > 1 << 20:
+                problems.append("oversized event: %d byte(s) relayed, the big event must be dropped whole" % len(raw))
+    finally:
+        state["script"] = None
+    return problems, ["relayed     : 3 partial images (one 3 MiB, over the 2 MiB default) + completed, and the "
+                      "edit stream (image_edit.* names): byte-identical",
+                      "over limit  : two %d MiB data lines in one event (> %d MiB): the events before it, then one "
+                      "in-band error" % (len(half) >> 20, event_limit >> 20)]
+
+
+def gt_t3(ctx):
+    """T3: one 20 MiB `data:` line passes (the line limit is far above the 1 MiB default); a line over the
+    image line limit ends the stream with an in-band error after the events before it."""
+    mod, client, state = ctx["mod"], ctx["client"], ctx["state"]
+    problems = []
+    part, done = GT_NAMES["generations"]
+    line_limit = getattr(mod, "_RT_IMAGE_SSE_LINE_LIMIT", 48 << 20) if mod is not None else 48 << 20
+    body = gq_json_body(GQ_IMG, "tf t3", stream=True)
+    twenty = gt_event(part, "A" * (20 << 20), 0) + gt_event(done, GT_B64)
+    first = gt_event(part, GT_B64, 0)
+    try:
+        state["script"] = lambda _i, _r: [("respond_sse", twenty)]
+        status, _h, raw = gq_post_raw(client, GQ_GEN, body, timeout=60.0)
+        if status != 200 or raw != gt_wire(twenty):
+            problems.append("20 MiB line: status %r, %d byte(s) back, expected the peer's %d byte-exact"
+                            % (status, len(raw), len(gt_wire(twenty))))
+        huge = first + gt_event(part, "A" * line_limit, 1) + gt_event(done, GT_B64)
+        state["script"] = lambda _i, _r: [("respond_sse", huge)]
+        status, _h, raw = gq_post_raw(client, GQ_GEN, body, timeout=60.0)
+        if status != 200:
+            problems.append("over-long line: status %r (the head is sent before the first event)" % status)
+        else:
+            problems += gt_tail_error("over-long line", raw, gt_wire(first), needle="SSE line over")
+            if len(raw) > 1 << 20:
+                problems.append("over-long line: %d byte(s) relayed" % len(raw))
+    finally:
+        state["script"] = None
+    return problems, ["passes      : one data line of 20 MiB (+ JSON), then the completed event, byte-identical",
+                      "over limit  : a data line over %d MiB: the first event, then one in-band error" % (line_limit >> 20)]
+
+
+def gt_t4(ctx):
+    """T4: an image stream ends on the completed event (a stray event after it is never relayed) and the
+    summary line says message_stop; an upstream that closes before it gets an in-band error, `end=error`
+    and a WARNING; an Anthropic stream still ends on its message_stop."""
+    mod, peer, state = ctx["mod"], ctx["peer"], ctx["state"]
+    problems = []
+    part, done = GT_NAMES["generations"]
+    box = new_sandbox(ctx["fixture_root"], "t4")
+    log_path = os.path.join(box, "t4.log")
+    lp = RouterProc(box, write_config(box, gq_config(peer.url())), ("--debug", "--log-file", log_path), label="t4")
+    try:
+        if lp.wait_ready() is None:
+            return [gb_not_ready(lp)], []
+        lc = lp.client()
+        body = gq_json_body(GQ_IMG, "tf t4", stream=True)
+        full = gt_stream_lines(1)
+        try:
+            state["script"] = lambda _i, _r: [("respond_sse", full + gt_event(part, GT_B64, 9))]
+            status, _h, raw = gq_post_raw(lc, GQ_GEN, body)
+            if status != 200 or raw != gt_wire(full):
+                problems.append("completed: status %r, %d byte(s) back, expected the events up to and including "
+                                "the completed one (%d)" % (status, len(raw), len(gt_wire(full))))
+            early = gt_event(part, GT_B64, 0)
+            state["script"] = lambda _i, _r: [("respond_sse", early)]
+            status, _h, raw = gq_post_raw(lc, GQ_GEN, body)
+            problems += gt_tail_error("early EOF", raw, gt_wire(early), needle="ended the stream early") \
+                if status == 200 else ["early EOF: status %r, expected the 200 head" % status]
+            state["script"] = None
+            status, _h, raw = gq_post_raw(lc, MESSAGES_PATH, json.dumps(gd_body(GQ_CHAT, stream=True)).encode())
+            if status != 200 or not raw.endswith(b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"):
+                problems.append("Anthropic stream: status %r, it must still end on its message_stop (%r)"
+                                % (status, raw[-60:]))
+        finally:
+            state["script"] = None
+        time.sleep(0.3)
+        try:
+            with open(log_path, "r", encoding="utf-8", errors="replace") as fh:
+                log_text = fh.read()
+        except OSError:
+            log_text = ""
+        got = gt_req_lines(log_text)
+        want = [("images_generations", "message_stop"), ("images_generations", "error"), ("messages", "message_stop")]
+        if got != want:
+            problems.append("the req summary lines are %r, expected %r" % (got, want))
+        failed = [ln for ln in log_text.splitlines() if "upstream failed" in ln and "images_generations" in ln]
+        if len(failed) != 1 or "stream_ended_early" not in failed[0]:
+            problems.append("expected one `upstream failed ... stream_ended_early` WARNING for the early EOF, got %r"
+                            % [gi_redact(ln)[-120:] for ln in failed])
+    finally:
+        lp.close()
+    if mod is not None:
+        if getattr(getattr(mod, "ImageEventRelay", None), "end_marker", None) != b".completed":
+            problems.append("ImageEventRelay.end_marker is not b'.completed'")
+        if hasattr(getattr(mod, "EventRelay", None), "end_marker"):
+            problems.append("EventRelay defines end_marker: the Anthropic streams must keep the default marker")
+    with open(SERVER, "r", encoding="utf-8") as fh:
+        source = fh.read()
+    if 'getattr(translator, "end_marker", b"event: message_stop")' not in source:
+        problems.append("_relay_loop does not ask the translator for its end_marker (default b'event: message_stop')")
+    return problems, ["image       : ends on image_generation.completed (a stray event after it is dropped): "
+                      "end=message_stop; early EOF -> in-band error, end=error, WARNING stream_ended_early",
+                      "anthropic   : the passthrough stream still ends on event: message_stop"]
+
+
+def gt_t5(ctx):
+    """T5: while an image stream is idle (before the first event and between two), the router writes SSE
+    comments `: ping`, never the Anthropic `event: ping`; stripping them leaves the peer's bytes exactly.
+    In-process at millisecond deadlines (ping 0.4 s, tick 0.05 s), as group H."""
+    mod = ctx["mod"]
+    problems = []
+    part, done = GT_NAMES["generations"]
+    lines = gt_event(part, GT_B64, 0) + gt_event(done, GT_B64)
+    box = new_sandbox(ctx["fixture_root"], "t5")
+    shown = []
+    for label, gaps, where in (("between two events", [0, 0, 0, 1.7, 0, 0], 1),
+                               ("before the first event", [1.7, 0, 0, 0, 0, 0], 0)):
+        peer5 = ScriptedPeer(script=lambda _i, _r, g=gaps: [("respond_sse", lines, g)])
+        with peer5:
+            cfgpath = write_config(box, gq_config(peer5.url()), filename="t5.json")
+            with FastRouter(mod, ctx["mod_why"], box, cfgpath, FAST_RELAY, label="t5") as fr:
+                if fr.client is None:
+                    return [fr.why], []
+                status, hdrs, raw = gq_post_raw(fr.client, GQ_GEN, gq_json_body(GQ_IMG_SLOW, "tf t5", stream=True),
+                                                timeout=30.0)
+        if status != 200:
+            problems.append("%s: status %r" % (label, status))
+            continue
+        events = gt_split(raw)
+        pings = [e for n, e in events if n == ":"]
+        if len(pings) < 2:
+            problems.append("%s: %d ping comment(s) in a 1.7 s silence at a 0.4 s interval, expected 2 or more"
+                            % (label, len(pings)))
+        if any(e != b": ping\n\n" for e in pings):
+            problems.append("%s: a keep-alive is not exactly `: ping` + blank line: %r" % (label, pings[:2]))
+        if b"event: ping" in raw or b'"type":"ping"' in raw:
+            problems.append("%s: the Anthropic `event: ping` reached an image stream" % label)
+        if b"".join(e for n, e in events if n != ":") != gt_wire(lines):
+            problems.append("%s: without the comments the stream differs from the peer's" % label)
+        names = [n for n, _e in events]
+        if names[0:1] != [":" if where == 0 else part] or names[-1:] != [done]:
+            problems.append("%s: event order %r" % (label, names))
+        elif where == 1 and names[1] != ":":
+            problems.append("%s: no ping between the two events (%r)" % (label, names))
+        shown.append("%s: %d" % (label, len(pings)))
+    return problems, ["pings       : SSE comments `: ping` (%s); the stream otherwise byte-identical" % ", ".join(shown)]
+
+
+def gt_t6(ctx):
+    """T6: with --max-image-requests 1 the slot is held for the whole stream and freed on every exit: a
+    client that hangs up mid-stream (the upstream is closed too), a completed stream and an upstream stall."""
+    problems = []
+    part, done = GT_NAMES["generations"]
+    plan = []
+
+    def script(_index, request):
+        if "text/event-stream" not in gq_hdrs(request).get("accept", []):
+            return [("respond_json", 200, GQ_OK)]
+        mode = plan.pop(0) if plan else "ok"
+        lines = gt_event(part, GT_B64, 0) + gt_event(done, GT_B64)
+        if mode == "hold":
+            return [("respond_sse", lines, [0, 0, 0, 30, 0, 0])]
+        if mode == "stall":
+            return [("respond_sse", lines, [0, 0, 0, 6, 0, 0])]
+        return [("respond_sse", lines)]
+
+    box = new_sandbox(ctx["fixture_root"], "t6")
+    peer6 = ScriptedPeer(script=script)
+    capped = RouterProc(box, write_config(box, gq_config(peer6.url())), ("--max-image-requests", 1), label="t6")
+    try:
+        if capped.wait_ready() is None:
+            return [gb_not_ready(capped)], []
+        cc = capped.client()
+
+        def json_request():
+            return gq_post_raw(cc, GQ_GEN, gq_json_body(GQ_IMG_SLOW, "tf t6"))
+
+        def freed_within(seconds):
+            end = time.monotonic() + seconds
+            while time.monotonic() < end:
+                if json_request()[0] == 200:
+                    return True
+                time.sleep(0.2)
+            return False
+
+        plan[:] = ["hold"]
+        conn, resp = gt_open(cc, GQ_GEN, gq_json_body(GQ_IMG_SLOW, "tf t6", stream=True))
+        try:
+            if resp.status != 200:
+                problems.append("the held stream: status %r" % resp.status)
+            elif gt_read_event(resp) != gt_wire(gt_event(part, GT_B64, 0)):
+                problems.append("the held stream: the first event was not relayed")
+            t0 = time.monotonic()
+            status, _h, answer = json_request()
+            problems += gq_expect("a second image request during a stream", status, answer, 429)
+            status, hdrs, answer = gq_post_raw(cc, GQ_GEN, gq_json_body(GQ_IMG_SLOW, "tf t6", stream=True))
+            problems += gq_expect("a second STREAM request during a stream", status, answer, 429)
+            if "event-stream" in (hdrs.get("content-type") or ""):
+                problems.append("the 429 to a stream request was sent as an event stream")
+            if time.monotonic() - t0 > 2.5:
+                problems.append("the 429 answers took %.1f s: they must be immediate" % (time.monotonic() - t0))
+        finally:
+            resp.close()        # a Connection: close answer leaves the socket to the response, not the connection
+            conn.close()
+        gone = time.monotonic()
+        if not freed_within(6.0):
+            problems.append("the slot was not freed within 6 s of the client hanging up mid-stream")
+        else:
+            took = time.monotonic() - gone
+            if not peer6.closed_event.wait(max(0.1, 6.0 - took)):
+                problems.append("the upstream connection was not closed after the client hung up")
+        plan[:] = ["ok"]
+        status, hdrs, raw = gq_post_raw(cc, GQ_GEN, gq_json_body(GQ_IMG_SLOW, "tf t6", stream=True))
+        if status != 200 or raw != gt_wire(gt_event(part, GT_B64, 0) + gt_event(done, GT_B64)):
+            problems.append("the completed stream: status %r, %d byte(s)" % (status, len(raw)))
+        status, _h, answer = json_request()
+        problems += [] if status == 200 else gq_expect("after a completed stream", status, answer, 200)
+        plan[:] = ["stall"]
+        status, _h, raw = gq_post_raw(cc, GQ_GEN, gq_json_body(GQ_IMG_FAST, "tf t6", stream=True))
+        problems += gt_tail_error("stall", raw, gt_wire(gt_event(part, GT_B64, 0)), needle="stalled") \
+            if status == 200 else ["stall: status %r" % status]
+        status, _h, answer = json_request()
+        problems += [] if status == 200 else gq_expect("after a stalled stream", status, answer, 200)
+    finally:
+        capped.close()
+        peer6.close()
+    return problems, ["held        : --max-image-requests 1: a second image request (JSON or stream) is an "
+                      "immediate 429 while a stream runs",
+                      "released    : after a client hang-up mid-stream (upstream closed), a completed stream and "
+                      "an upstream stall"]
+
+
+def gt_t7(ctx):
+    """T7: an upstream that goes silent after the first event ends the stream with an in-band error
+    after about idle_timeout (1 s here); the connection is then closed."""
+    client, state = ctx["client"], ctx["state"]
+    part, done = GT_NAMES["generations"]
+    first = gt_event(part, GT_B64, 0)
+    try:
+        state["script"] = lambda _i, _r: [("respond_sse", first + gt_event(done, GT_B64), [0, 0, 0, 4, 0, 0])]
+        t0 = time.monotonic()
+        status, _h, raw = gq_post_raw(client, GQ_GEN, gq_json_body(GQ_IMG_FAST, "tf t7", stream=True), timeout=20.0)
+        took = time.monotonic() - t0
+    finally:
+        state["script"] = None
+    if status != 200:
+        return ["status %r, expected the 200 head" % status], []
+    problems = gt_tail_error("idle stall", raw, gt_wire(first), needle="stalled")
+    if took > 3.5:
+        problems.append("the stream ended after %.1f s, expected about idle_timeout 1 s (peer silent 4 s)" % took)
+    if done.encode() in raw:
+        problems.append("the completed event of the late peer reached the client")
+    return problems, ["upstream    : the first event, then 4 s of silence; idle_timeout 1",
+                      "client      : the event, then one in-band error after %.1f s, then EOF" % took]
+
+
+def gt_t8(ctx):
+    """T8: under --debug --log-file, a prompt sentinel and a b64 sentinel in partial images appear in no log
+    line and no stderr; the in-band error of an early EOF carries no upstream text; an upstream
+    `event: error` is relayed with its message scrubbed (router token, backend key, sk- fragment)."""
+    peer, state = ctx["peer"], ctx["state"]
+    problems = []
+    part, done = GT_NAMES["generations"]
+    prompt_s, b64_s, file_s = (v for _l, v in GQ_SENTINELS)
+    box = new_sandbox(ctx["fixture_root"], "t8")
+    log_path = os.path.join(box, "t8.log")
+    lp = RouterProc(box, write_config(box, gq_config(peer.url())), ("--debug", "--log-file", log_path), label="t8")
+    try:
+        if lp.wait_ready() is None:
+            return [gb_not_ready(lp)], []
+        lc = lp.client()
+        body = gq_json_body(GQ_IMG, prompt_s, stream=True)
+        mark = len(peer.requests)
+        try:
+            ok = gt_event(part, b64_s, 0) + gt_event(done, b64_s)
+            state["script"] = lambda _i, _r: [("respond_sse", ok)]
+            status, _h, raw = gq_post_raw(lc, GQ_GEN, body)
+            if status != 200 or raw != gt_wire(ok):
+                problems.append("the sentinel stream was not relayed byte-exact (status %r)" % status)
+            early = gt_event(part, b64_s, 0)
+            state["script"] = lambda _i, _r: [("respond_sse", early)]
+            status, _h, raw = gq_post_raw(lc, GQ_GEN, body)
+            problems += gt_tail_error("early EOF", raw, gt_wire(early), needle="ended the stream early") \
+                if status == 200 else ["early EOF: status %r" % status]
+            tail = raw[len(gt_wire(early)):]
+            if prompt_s.encode() in tail or b64_s.encode() in tail:
+                problems.append("the in-band error carries the prompt or the image data")
+            note = "tf t8 " + TF_KEY_OPENAI + " sk-proj-****abcd " + TF_ROUTER_TOKEN
+            err_event = [b"event: error", b"data: " + json.dumps({"error": {
+                "message": note, "type": "server_error", "param": None, "code": "upstream_boom"}}).encode(), b""]
+            state["script"] = lambda _i, _r: [("respond_sse", early + err_event)]
+            status, _h, raw = gq_post_raw(lc, GQ_GEN, body)
+            problems += gt_tail_error("upstream error event", raw, gt_wire(early), needle="tf t8",
+                                      absent=(TF_KEY_OPENAI, TF_ROUTER_TOKEN, "sk-proj", "abcd")) \
+                if status == 200 else ["upstream error event: status %r" % status]
+        finally:
+            state["script"] = None
+        if not any(prompt_s.encode() in r["body"] for r in peer.requests[mark:]):
+            problems.append("the peer never received the planted prompt: the sweep would prove nothing")
+        time.sleep(0.3)
+        try:
+            with open(log_path, "r", encoding="utf-8", errors="replace") as fh:
+                log_text = fh.read()
+        except OSError:
+            log_text = ""
+        if not log_text.strip():
+            problems.append("the --debug --log-file is empty: nothing to sweep")
+        elif len(gt_req_lines(log_text)) < 3:
+            problems.append("fewer than three `req` summary lines in the log")
+        stderr = lp.stderr_text()
+        for label, value in (("the prompt", prompt_s), ("the image data", b64_s), ("the file sentinel", file_s),
+                             ("the backend key", TF_KEY_OPENAI), ("the router token", TF_ROUTER_TOKEN)):
+            if value in log_text or value in stderr:
+                problems.append("%s reached the log or stderr" % label)
+    finally:
+        lp.close()
+    return problems, ["planted     : a prompt and b64 sentinels in a stream, an early EOF, an upstream error event "
+                      "carrying the backend key, the router token and an sk- fragment",
+                      "swept       : the --debug --log-file and stderr; the in-band errors"]
+
+
+def gt_t9(ctx):
+    """T9: a non-2xx upstream answer to a streaming image request is the usual OpenAI JSON envelope with
+    its status (never an SSE head); a 2xx that is not an event stream is a 502 envelope."""
+    client, state = ctx["client"], ctx["state"]
+    problems = []
+    try:
+        for label, up_status, up_body, up_headers, want, needle in (
+                ("400", 400, {"error": {"message": "tf t9 bad size", "type": "invalid_request_error",
+                                        "param": "size", "code": "invalid_size"}}, (), 400, "tf t9 bad size"),
+                ("429", 429, {"error": {"message": "tf t9 slow down", "type": "requests", "param": None,
+                                        "code": "rate_limit_exceeded"}}, (("Retry-After", "7"),), 429, "tf t9 slow"),
+                ("401", 401, {"error": {"message": "Incorrect API key provided: sk-proj-****abcd"}}, (), 502,
+                 "rejected the router's credential"),
+                ("500", 500, {"error": {"message": "tf t9 boom"}}, (), 502, "answered 500"),
+                ("200 JSON", 200, GQ_OK, (), 502, "event stream")):
+            state["script"] = lambda _i, _r, a=up_status, b=up_body, c=up_headers: [("respond_json", a, b, c)]
+            status, hdrs, answer = gq_post_raw(client, GQ_GEN, gq_json_body(GQ_IMG, "tf t9", stream=True))
+            problems += gq_expect(label, status, answer, want, needle=needle, absent=("sk-proj", "abcd"))
+            ctype = hdrs.get("content-type") or ""
+            if "event-stream" in ctype or b"event:" in answer:
+                problems.append("%s: an event stream head or event for a non-event-stream answer (%r)" % (label, ctype))
+            if label == "429" and hdrs.get("retry-after") != "7":
+                problems.append("429: Retry-After %r, expected 7" % hdrs.get("retry-after"))
+            err, _why = gq_err(answer)
+            if err is not None and label == "400" and (err["type"], err["code"], err["param"]) != (
+                    "invalid_request_error", "invalid_size", "size"):
+                problems.append("400: error type/code/param %r" % ((err["type"], err["code"], err["param"]),))
+    finally:
+        state["script"] = None
+    return problems, ["answered    : 400 (type/code/param relayed), 429 (Retry-After 7), 401 and 500 (fixed text, "
+                      "502), 200 application/json (502) -- all OpenAI JSON envelopes, no SSE head"]
+
+
+def gt_t10(ctx):
+    """T10: ImageEventRelay as a sans-IO unit: whole events byte-exact (LF and CRLF, one chunk or line by
+    line), comments dropped, closed after the completed event, `: ping`, an OpenAI-shaped error event from
+    fail / finish / an oversized event / an upstream error event, and the adapter's policy and flags."""
+    mod = ctx["mod"]
+    if mod is None:
+        return ["cannot import the router"], []
+    problems = missing_names(mod, ("ImageEventRelay", "EventRelay", "StreamPolicy"))
+    problems += ["the module defines no ADAPTERS or KIND_CLASSES"] \
+        if not (isinstance(getattr(mod, "ADAPTERS", None), dict) and isinstance(getattr(mod, "KIND_CLASSES", None), dict)) \
+        else []
+    if problems:
+        return problems, []
+    fake = types.SimpleNamespace(scrub=lambda t: t.replace(TF_ROUTER_TOKEN, "[redacted]").replace(TF_KEY_OPENAI, "[redacted]"),
+                                 backend=types.SimpleNamespace(name="tfq"))
+    part, done = GT_NAMES["generations"]
+    ev1, ev2 = gt_event(part, GT_B64, 0), gt_event(done, GT_B64)
+    relay = mod.ImageEventRelay(fake)
+    if relay.begin() != b"" or getattr(relay, "started", False) is not True:
+        problems.append("begin() is not b'' or started is not True (a ping must be possible before the first event)")
+    if relay.feed(b": a comment\n") != b"":
+        problems.append("a comment line was relayed")
+    out = [relay.feed(line + b"\n") for line in ev1]
+    if out[:-1] != [b""] * 2 or out[-1] != gt_wire(ev1):
+        problems.append("a three-line event was not returned whole, exactly at its blank line")
+    if relay.closed or relay.ping() != b": ping\n\n":
+        problems.append("ping() is %r (closed=%r), expected b': ping\\n\\n'" % (relay.ping(), relay.closed))
+    crlf = b"".join(line + b"\r\n" for line in ev2)
+    if relay.feed(crlf) != crlf or not relay.closed:
+        problems.append("a CRLF event fed as one chunk was not returned byte-exact, or the relay is not closed "
+                        "after the completed event")
+    if (relay.feed(b"event: x\n"), relay.feed(b"\n"), relay.ping(), relay.fail("api_error", "m"), relay.finish()) \
+            != (b"",) * 5:
+        problems.append("a closed relay still produced bytes")
+    relay = mod.ImageEventRelay(fake)
+    out = relay.fail("overloaded_error", "tf t10 down")
+    err, why = gt_error_event(out)
+    if why:
+        problems.append("fail(): " + why)
+    elif (err["message"], err["type"], err["param"], err["code"]) != ("tf t10 down", "server_error", None, None):
+        problems.append("fail(): error object %r" % (err,))
+    if not relay.closed or relay.fail("api_error", "again") != b"":
+        problems.append("fail() did not close the relay")
+    relay = mod.ImageEventRelay(fake)
+    relay.feed(b"event: " + part.encode() + b"\n")
+    err, why = gt_error_event(relay.finish())
+    if why or "ended the stream early" not in err["message"]:
+        problems.append("finish() before the completed event: %s" % (why or err["message"]))
+    saved = getattr(mod, "_RT_IMAGE_SSE_EVENT_LIMIT", None)
+    if not isinstance(saved, int):
+        problems.append("the module defines no _RT_IMAGE_SSE_EVENT_LIMIT")
+    else:
+        mod._RT_IMAGE_SSE_EVENT_LIMIT = 100
+        try:
+            relay = mod.ImageEventRelay(fake)
+            first = relay.feed(b"data: " + b"A" * 60 + b"\n")
+            second = relay.feed(b"data: " + b"A" * 60 + b"\n")
+        finally:
+            mod._RT_IMAGE_SSE_EVENT_LIMIT = saved
+        err, why = gt_error_event(second)
+        if first != b"" or why or "oversized" not in err["message"] or not relay.closed:
+            problems.append("an event over the limit: first=%r, %s" % (first, why or err["message"]))
+    relay = mod.ImageEventRelay(fake)
+    note = "tf t10 " + TF_KEY_OPENAI + " sk-proj-****abcd " + TF_ROUTER_TOKEN
+    body = json.dumps({"error": {"message": note, "type": "server_error", "code": "boom"}}).encode()
+    out = b"".join(relay.feed(line) for line in (b"event: error\n", b"data: " + body + b"\n", b"\n"))
+    err, why = gt_error_event(out)
+    if why:
+        problems.append("an upstream error event: " + why)
+    elif any(s in err["message"] for s in (TF_KEY_OPENAI, TF_ROUTER_TOKEN, "sk-proj", "abcd")) \
+            or not err["message"].startswith("tf t10") or not relay.closed:
+        problems.append("an upstream error event: message %r (closed=%r)" % (err["message"][:80], relay.closed))
+    adapter = mod.ADAPTERS["openai"]
+    policy = adapter.image_stream_policy(fake) if hasattr(adapter, "image_stream_policy") else None
+    line_limit, event_limit = getattr(mod, "_RT_IMAGE_SSE_LINE_LIMIT", 0), getattr(mod, "_RT_IMAGE_SSE_EVENT_LIMIT", 0)
+    if not isinstance(policy, mod.StreamPolicy) or policy.require_event_stream is not True \
+            or policy.line_limit != line_limit or not (20 << 20) < line_limit < event_limit:
+        problems.append("openai image_stream_policy is %r (line limit %r, event limit %r)" % (policy, line_limit, event_limit))
+    if not isinstance(adapter.image_stream_translator(fake), mod.ImageEventRelay):
+        problems.append("openai image_stream_translator is not an ImageEventRelay")
+    flags = {kind: bool(getattr(cls, "IMAGE_STREAMING", False)) for kind, cls in mod.KIND_CLASSES.items()}
+    if flags.get("openai") is not True or any(v for k, v in flags.items() if k != "openai"):
+        problems.append("IMAGE_STREAMING flags %r, expected true for openai only" % (flags,))
+    return problems, ["relay       : whole events byte-exact (LF, CRLF, chunked), comments dropped, closed after "
+                      ".completed, `: ping`, OpenAI-shaped error events (fail, finish, oversize, upstream error)",
+                      "adapter     : openai policy (line %d MiB < event %d MiB, event stream required), "
+                      "IMAGE_STREAMING true for openai only" % (line_limit >> 20, event_limit >> 20)]
+
+
+def group_t(suite, fixture_root):
+    """T. streamed image responses (Plan phase 4).  One openai api_key router in front of one scripted peer
+    serves T1-T3, T7 and T9; T4, T6 and T8 start their own (a debug log, an image cap); T5 runs in-process
+    at millisecond deadlines; T10 and the parser half of T1 run on the loaded module."""
+    results = {}
+    setup = "case did not run"
+    try:
+        mod = H.load_module_from_path("ph_llm_router_t", SERVER)
+        mod_why = None
+    except Exception as exc:  # noqa: BLE001 -- the in-process cases then fail with the reason
+        mod, mod_why = None, "the router did not import: %s" % type(exc).__name__
+    state = {"script": None}
+    peer = ScriptedPeer(script=lambda i, r: (state["script"] or gt_script_default)(i, r))
+    proc = None
+    try:
+        sandbox = new_sandbox(fixture_root, "imgstream")
+        proc = RouterProc(sandbox, write_config(sandbox, gq_config(peer.url())), label="imgstream")
+        port = proc.wait_ready()
+        router_why = None
+        if port is None:
+            router_why = "the router did not start: %s" % gi_redact(
+                proc.stderr_text().strip().splitlines()[-1] if proc.stderr_text().strip() else "(no stderr)")[:200]
+        with peer:
+            ctx = {"mod": mod, "mod_why": mod_why, "peer": peer, "state": state, "fixture_root": fixture_root,
+                   "client": proc.client() if port is not None else None, "router_why": router_why}
+            got = {}
+            in_process = (gt_t5, gt_t10)
+            for cid, fn in zip(GT_CASES, (gt_t1, gt_t2, gt_t3, gt_t4, gt_t5, gt_t6, gt_t7, gt_t8, gt_t9, gt_t10)):
+                if router_why is not None and fn not in in_process and fn is not gt_t1:
+                    got[cid] = ([router_why], [])
+                    continue
+                try:
+                    got[cid] = fn(ctx)
+                except Exception as exc:  # noqa: BLE001 -- a broken case fails, never aborts the group
+                    got[cid] = (["case raised %s: %s" % (type(exc).__name__, gi_redact(str(exc))[:200])], [])
+            results = got
+    except Exception as exc:  # noqa: BLE001 -- a setup failure fails every case not yet run
+        setup = "the group setup raised %s: %s" % (type(exc).__name__, gi_redact(str(exc))[:200])
+    finally:
+        if proc is not None:
+            proc.close()
+        peer.close()
+    for cid, tid in zip(GT_CASES, GT_IDS):
+        problems, detail = results.get(cid, ([setup], []))
+        suite.record(GT, cid, problems, detail=["case        : " + tid] + list(detail))
 
 
 # ---------------------------------------------------------------------------
@@ -22103,6 +22911,7 @@ def gj_control(checker, clean, planted, needles):
 # formats an InboundRequest (its raw bytes and sniffed fields hold prompts and images), and the
 # rule that an upstream image path is only ever an IMAGE_PATHS[...] subscript.
 GJ_IMG_HOOKS = ("image_request", "image_head", "image_response")
+GJ_IMG_STREAM_HOOKS = ("image_stream_policy", "image_stream_translator")     # Phase 4: openai only
 GJ_LOG_CALLS = frozenset({"debug", "info", "warning", "error", "exception", "critical", "log"})
 # Calls whose arguments become text: a logging call, str.format, and the helpers that build a message.
 GJ_FORMAT_CALLS = GJ_LOG_CALLS | frozenset({"format", "_log_value", "_rt_bad", "ApiError", "UpstreamError",
@@ -23117,7 +23926,7 @@ def group_j(suite, fixture_root, pyc_before, tree_before):
         if problems:
             return problems, []
         base = mod.Adapter
-        for hook in GJ_IMG_HOOKS + ("MODALITIES", "IMAGE_PATHS"):
+        for hook in GJ_IMG_HOOKS + GJ_IMG_STREAM_HOOKS + ("MODALITIES", "IMAGE_PATHS", "IMAGE_STREAMING"):
             if not hasattr(base, hook):
                 problems.append("Adapter defines no %s" % hook)
         if problems:
@@ -23149,6 +23958,18 @@ def group_j(suite, fixture_root, pyc_before, tree_before):
             problems.append("codex IMAGE_PATHS %r do not sit beside the profile path %r" % (paths, row.path))
         if not mod.ADAPTERS["codex"].IMAGE_EDIT_JSON:
             problems.append("codex.IMAGE_EDIT_JSON is false: the Codex CLI sends JSON edits")
+        # Phase 4: only the openai kind streams image answers (the codex stream is unmeasured, sd-server has
+        # none): it alone sets IMAGE_STREAMING and overrides the two stream hooks; every other kind (the
+        # chat kinds, codex, sdcpp) keeps the base's False and the base hooks.
+        if base.IMAGE_STREAMING is not False:
+            problems.append("Adapter.IMAGE_STREAMING is %r, expected False" % (base.IMAGE_STREAMING,))
+        for kind, cls in sorted((k, type(a)) for k, a in mod.ADAPTERS.items()):
+            streams = kind == "openai"
+            if bool(getattr(cls, "IMAGE_STREAMING", False)) is not streams:
+                problems.append("%s.IMAGE_STREAMING is %r, expected %r" % (kind, cls.IMAGE_STREAMING, streams))
+            for hook in GJ_IMG_STREAM_HOOKS:
+                if (getattr(cls, hook, None) is not getattr(base, hook, None)) is not streams:
+                    problems.append("%s %s the base %s hook" % (kind, "keeps" if streams else "overrides", hook))
         # Phase 2: sdcpp serves image routes only, takes multipart edits only (sd-server refuses a JSON
         # edit), needs no key == model (the server ignores `model`), sniffs the prompt, and overrides all
         # three image hooks; its chat hooks stay the base ones (NotImplementedError, never called).
@@ -23630,7 +24451,8 @@ def group_j_hygiene(suite, fixture_root, pyc_before, tree_before):
 # and repo snapshots taken at the start, so both must run last.
 GROUP_ORDER = ("group_a", "group_b", "group_c", "group_d", "group_e",
                "group_f", "group_g", "group_h", "group_k", "group_l",
-               "group_m", "group_n", "group_o", "group_p", "group_q", "group_r", "group_s", "group_i",
+               "group_m", "group_n", "group_o", "group_p", "group_q", "group_r", "group_s", "group_t",
+               "group_i",
                "group_j")
 
 

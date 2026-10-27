@@ -779,8 +779,11 @@ keys only, never the `default` route: an unknown model is a 404 `model_not_found
 "route X is a chat model; use /v1/messages", and an image route on `/v1/messages`
 or count_tokens a 400 naming the two image paths
 `Scripts/llm-router.py:_rt_parse_image_inbound`
-`Scripts/llm-router.py:_rt_parse_inbound`. `stream: true` is a 400 "streaming is
-not supported yet", before any upstream contact. The forwardable-header rule is
+`Scripts/llm-router.py:_rt_parse_inbound`. `stream: true` is accepted on a route
+whose adapter sets `IMAGE_STREAMING` (kind `openai` only, see "Streamed image
+answers" below) and is otherwise a 400 "streaming is not supported yet", before
+any upstream contact: that is what a `codex` or `sdcpp` image route answers
+`Scripts/llm-router.py:Adapter`. The forwardable-header rule is
 the chat path's, one shared helper `Scripts/llm-router.py:_rt_forwarded_headers`;
 the `openai` kind forwards no client header.
 
@@ -889,6 +892,60 @@ before any upstream contact; the slot is released in the handler's `finally`
 `Scripts/llm-router.py:_RouterHttpServer` `Scripts/llm-router.py:_post`. Image
 waits and answers up to 64 MiB therefore cannot take every connection slot from
 chat.
+
+**Streamed image answers (kind `openai`).** With `"stream": true` (a JSON boolean,
+or the multipart text field `true`; `partial_images` 0-3 is the client's and goes
+through in the raw body) the router sends the same bytes upstream with `Accept:
+text/event-stream` and relays the Images API's server-sent events: for
+generations `image_generation.partial_image` and `image_generation.completed`,
+for edits `image_edit.partial_image` and `image_edit.completed`, each `data:` a
+JSON object (`type`, `b64_json`, `created_at`, `size`, `quality`, `background`,
+`output_format`, `partial_image_index`, and `usage` on the completed one). The
+names and fields are the documented ones; nothing has been measured against the
+live service. A new translator, `Scripts/llm-router.py:ImageEventRelay`, relays
+whole events byte for byte (it never re-serializes a base64 image), drops
+upstream comment lines, and closes after an event whose name ends in
+`.completed`; `_relay_loop` reads that clean end from the translator's
+`end_marker` (`b".completed"`; the Anthropic translators keep
+`b"event: message_stop"`) and the summary line still says `end=message_stop`
+`Scripts/llm-router.py:_relay_loop`. The head is the usual `200 text/event-stream`,
+with nothing Anthropic-specific in it or after it `Scripts/llm-router.py:_relay_stream`.
+
+- *Before the head.* A non-2xx upstream answer to a streaming request arrives as
+  JSON and is the usual OpenAI error envelope with its mapped status (the
+  non-stream mapping above), sent as a normal answer before any SSE head
+  `Scripts/llm-router.py:_relay_image`; a 2xx that is not `text/event-stream`
+  is a 502 (`require_event_stream`).
+- *After the head.* Every failure is one in-band OpenAI-shaped event, `event:
+  error` with `data: {"error": {message, type, param, code}}`, and a close:
+  the upstream silent past `idle_timeout` ("stalled"), a line over the line
+  limit, an event over the event limit, an upstream that closes before the
+  completed event ("ended the stream early"), a cut connection. An upstream
+  `event: error` is re-emitted the same way with its message through the scrubber
+  and the `sk-` / Bearer / id pattern strip, and its type, code and param only as
+  short tokens. The message is never an upstream text beyond that.
+- *Keep-alive.* While nothing is written for `_PING_INTERVAL_S` (15 s) the relay
+  writes the SSE comment `: ping` and a blank line, never Anthropic's `event:
+  ping`; it can do so before the first partial image, which can be a minute away.
+  The pings do not reset `idle_timeout`, so a backend serving image streams needs
+  one longer than the time to the first partial image.
+- *The slot.* The `--max-image-requests` slot is held for the whole stream and
+  released on every exit: the completed event, a stall or error, and a client
+  hang-up (the stream loop polls for it each `_RT_TICK_S`, which also closes the
+  upstream).
+- *Limits.* The policy is `Scripts/llm-router.py:_RT_IMAGE_SSE_LINE_LIMIT` (48
+  MiB, one `data:` line, enforced by the pump) and
+  `Scripts/llm-router.py:_RT_IMAGE_SSE_EVENT_LIMIT` (64 MiB per event, enforced by
+  the translator), against 1 MiB and 2 MiB for chat. The pump queue's 16 MiB
+  budget (`Scripts/llm-router.py:_RT_QUEUE_BYTES`) admits one line larger than
+  itself into an empty queue, so a 20 MiB line passes. One stream can hold roughly
+  three times its largest line at once (the line, the event's accumulated lines
+  and the joined event), and streams multiply: the worst case is the existing
+  authenticated-memory figure under Declared limits, with `--max-image-requests`
+  streams each holding up to that.
+
+The `codex` and `sdcpp` kinds keep the 400: the codex image stream is unmeasured and
+sd-server has none.
 
 **Experimental: image routes on a `codex` backend.** A `codex` backend (ChatGPT
 login) accepts `modality: image` routes too, relayed to the ChatGPT backend's
@@ -1218,7 +1275,8 @@ answer a re-serializing router would change (Q2); a multipart edit with an
 awkward quoted boundary and boundary-like bytes in its file part, and the JSON
 edit form, each forwarded byte for byte (Q3, Q4); the per-endpoint 415, the
 boundary 400 and the `/v1/messages` multipart 400 pinned as stdlib-dependent (Q5);
-the wrong-endpoint 400s and the no-default 404 (Q6); `stream` refused (Q7); the
+the wrong-endpoint 400s and the no-default 404 (Q6); only the canonical
+`stream` spellings accepted (Q7; stream true itself is group T's); the
 OpenAI envelope, keep-alive switching included (Q8), and the upstream error
 hygiene with a masked key echo (Q8b); the `/v1/models` additions and the
 `modality` filter (Q9); the sniffer's refusals in-process (Q10); the body limit
@@ -1232,7 +1290,30 @@ static cases join group J: J42, the chat kinds inherit the image hooks
 the request, its raw bytes or its fields, and `rec` gets neither key
 `tests/test_llm_router.py:rule_j43`; J44, an upstream image path is only an
 `IMAGE_PATHS[...]` subscript `tests/test_llm_router.py:rule_j44`. J42 also pins
-the codex image paths beside the profile row's path.
+the codex image paths beside the profile row's path, and that `IMAGE_STREAMING`
+and the two stream hooks (`tests/test_llm_router.py:GJ_IMG_STREAM_HOOKS`) belong
+to the `openai` kind alone.
+
+**Streamed image answers.** Group T `tests/test_llm_router.py:group_t`
+`tests/test_llm_router.py:GT_IDS` runs an `openai` api_key backend on a scripted
+peer with the documented event names (synthetic payloads, not measured live):
+`stream: true` accepted on an `openai` route as JSON and as a multipart field
+while the parser still refuses it on `codex` and `sdcpp` routes and any
+non-canonical spelling, and the peer sees the client's bytes with `Accept:
+text/event-stream` (T1); partial images and the completed event byte for byte,
+for generations and edits, a 3 MiB event included, and an event over the event
+limit an in-band error after the events before it (T2); a 20 MiB `data:` line
+passing and a line over the line limit an in-band error (T3); the end on the
+completed event with a stray event after it dropped, an upstream closing early an
+in-band error with `end=error` and the `stream_ended_early` WARNING, and a
+passthrough stream still ending on `message_stop` (T4); the idle `: ping`
+comment, never `event: ping`, in-process at millisecond deadlines (T5); the
+in-flight slot freed after a client hang-up (the upstream closed too), a
+completed stream and a stall (T6); the idle stall as an in-band error after about
+`idle_timeout` (T7); no prompt or image sentinel in a log and an upstream error
+event scrubbed (T8); non-2xx upstream answers as OpenAI JSON with no SSE head and
+a non-event-stream 2xx as a 502 (T9); and `ImageEventRelay` as a sans-IO unit with
+the adapter's policy (T10).
 
 **Codex image routes (experimental).** Group S `tests/test_llm_router.py:group_s`
 `tests/test_llm_router.py:GS_IDS` drives a codex OAuth backend through the N
@@ -1385,7 +1466,15 @@ read before relying on one of them. In brief:
   a total deadline, and nothing notices a departed client on the synchronous
   image path (the client-gone poll runs in the stream loop only), so the upstream
   call runs to its end and keeps its connection and its `--max-image-requests`
-  slot.
+  slot. A streamed image answer is the exception: it runs in the stream loop, so
+  a hang-up is noticed within a tick and the upstream is closed.
+- **Streamed image answers are unmeasured live and memory-heavy.** The event
+  names, the payload fields and the sizes come from the OpenAI documentation; a
+  real partial image may exceed the 48 MiB line or 64 MiB event limits, which then
+  end the stream with an in-band error. One stream can hold roughly three times its
+  largest line, and `--max-image-requests` streams run at once, on top of the
+  figure above. `idle_timeout` must exceed the wait for the first partial image
+  (pings do not reset it). The codex image stream is not relayed at all.
 - **The image relay trusts the upstream's 2xx.** It checks the media type and the
   first byte and the size bound, and neither parses nor scrubs the body.
 - **A JSON edit's `image_url` values are fetched by OpenAI,** outside this

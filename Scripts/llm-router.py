@@ -35,7 +35,9 @@ envelope -- except on the image endpoints. A route with `"modality": "image"` (a
 backend with an api_key, a sdcpp backend, or, experimentally, a codex backend) is served by POST /v1/images/generations and /v1/images/edits (a
 JSON body, or a multipart/form-data one for edits): the router reads `model` and a few
 guard fields, forwards the client's bytes untouched, relays a 2xx JSON answer untouched, and
-answers its own errors in the OpenAI envelope {"error":{message,type,param,code}} (no stream).
+answers its own errors in the OpenAI envelope {"error":{message,type,param,code}}. `stream: true` is
+relayed on an openai route only (the Images API's SSE, whole events byte-exact); codex and sdcpp
+routes answer it with a 400.
 Requires only Python 3.9+ stdlib modules.
 
 Layout: one file, eight units, in file order (each has one reason to change)
@@ -170,7 +172,13 @@ addendum the limits of the codex/openai kinds, OAuth and Mistral reasoning)
     which image and chat requests still share (a value not below --max-connections can refuse
     nothing: one startup WARNING says so). idle_timeout is per read, not a total deadline, and
     nothing notices a departed client on this synchronous path: the upstream call runs to its end
-    and holds its slot. The upstream error text is relayed (scrubbed, cut) for 400/404/413/422/429
+    and holds its slot. A streamed image answer (openai kind, stream true) holds its slot for the
+    whole stream and frees it on a client hang-up (polled each tick), a stall or the completed
+    event; it allows one SSE line up to 48 MiB and one event up to 64 MiB (a partial image is one
+    base64 line), so one stream can hold roughly 3x its largest line in memory and --max-image-requests
+    streams add up (the ~6 GiB documented worst case for chat is extended, not restated); idle_timeout
+    must exceed the time to the first partial image (the `: ping` comments do not reset it).
+    The upstream error text is relayed (scrubbed, cut) for 400/404/413/422/429
     only. The image_url values of a JSON edit are fetched by OpenAI, outside this router's address
     policy. A header-defect 400 and an unknown-path 404 keep the Anthropic envelope.
 """
@@ -319,6 +327,12 @@ _TIMEOUT_CEILING_S = 3600.0       # upper bound accepted for any configured time
 _SSE_LINE_LIMIT = 1024 * 1024     # one upstream SSE line (G-M45 default)
 _SSE_EVENT_LIMIT = 2 * 1024 * 1024  # one upstream SSE event (G-M45 default)
 _RT_QUEUE_BYTES = 16 * 1024 * 1024  # pump queue bound, counted in bytes (NFR-2b)
+# A streamed image answer (openai kind, stream:true): a partial image is ONE base64 `data:` line, so the
+# line cap sits far above the chat default; the event cap above it (a few lines per event) is read only by
+# ImageEventRelay. Each stream can hold up to roughly 3x its largest line at once (the line, the event's
+# accumulated lines and the joined event), and --max-image-requests streams may run together.
+_RT_IMAGE_SSE_LINE_LIMIT = 48 * 1024 * 1024
+_RT_IMAGE_SSE_EVENT_LIMIT = 64 * 1024 * 1024
 _RT_BUFFERED_TOOL_LIMIT = 8 * 1024 * 1024  # Mistral tool ids, names and arguments buffered per stream (V33)
 _RT_BUFFERED_TOOL_COUNT = 128     # Mistral tool calls buffered per stream (V33)
 _RT_TICK_S = 1.0                  # relay loop wake-up: ping, idle and closing checks
@@ -2237,7 +2251,8 @@ def _rt_parse_image_inbound(endpoint: str, content_type: str, raw: bytes, header
 
     The model is sniffed (_rt_image_fields) and looked up by exact name only -- an unknown model is a 404,
     never the default route; a chat route is a 400; a JSON edit to a kind that takes multipart only is a
-    400; stream true is a 400 (not supported yet). The body is not parsed further: InboundRequest.raw
+    400; stream true is a 400 (not supported yet) unless the adapter sets IMAGE_STREAMING (the openai
+    kind), then InboundRequest.stream is True. The body is not parsed further: InboundRequest.raw
     is the client's bytes and .content_type the rebuilt canonical value (D9). Headers follow the chat
     rule (_rt_forwarded_headers)."""
     media, boundary = _rt_image_ctype(content_type)
@@ -2253,10 +2268,11 @@ def _rt_parse_image_inbound(endpoint: str, content_type: str, raw: bytes, header
     extra = adapter_cls.IMAGE_FIELDS - _RT_IMAGE_GUARD_FIELDS
     if extra:
         fields = _rt_image_fields(content_type, raw, extra)
-    if fields.get("stream") == "true":
+    stream = fields.get("stream") == "true"
+    if stream and not getattr(adapter_cls, "IMAGE_STREAMING", False):
         raise _rt_bad("stream", "streaming is not supported yet")
     client_headers = _rt_forwarded_headers(headers, backend.forward_headers)
-    return InboundRequest(endpoint=endpoint, requested_model=model, body={"model": model}, stream=False,
+    return InboundRequest(endpoint=endpoint, requested_model=model, body={"model": model}, stream=stream,
                           route=route, backend=backend, client_headers=client_headers, scrub=cfg.scrub,
                           raw=raw, content_type=_rt_image_canonical_ctype(media, boundary), fields=fields)
 
@@ -2684,6 +2700,10 @@ class Adapter:
     IMAGE_FIELDS: FrozenSet[str] = frozenset()
     IMAGE_EDIT_JSON: bool = False
     IMAGE_MODEL_IS_KEY: bool = True
+    # Whether `stream: true` is accepted on this kind's image routes (the openai kind only: the Images API's
+    # SSE is documented; the codex stream is unmeasured and sd-server has none). A kind that sets it also
+    # overrides image_stream_policy and image_stream_translator.
+    IMAGE_STREAMING: bool = False
 
     @classmethod
     def validate_options(cls, options: dict, where: str) -> dict:
@@ -2731,6 +2751,14 @@ class Adapter:
                        content_type: str) -> Tuple[int, bytes]:
         """Map a whole upstream image answer to (status, body bytes). *content_type* is the upstream
         Content-Type header value (the hook cannot see the response head)."""
+        raise NotImplementedError
+
+    def image_stream_policy(self, inbound: InboundRequest) -> StreamPolicy:
+        """The front's stream limits for a streamed image answer (IMAGE_STREAMING kinds only)."""
+        raise NotImplementedError
+
+    def image_stream_translator(self, inbound: InboundRequest) -> Any:
+        """A sans-IO translator for a streamed image answer (IMAGE_STREAMING kinds only)."""
         raise NotImplementedError
 
     def stream_policy(self, inbound: InboundRequest) -> StreamPolicy:
@@ -2863,6 +2891,113 @@ class EventRelay:
         except (ValueError, KeyError, TypeError, AttributeError, RecursionError):
             pass
         return self.fail(err_type, message)
+
+
+class ImageEventRelay:
+    """The translator of a streamed image answer (openai kind, stream:true): whole upstream SSE events,
+    byte-exact, in the Images API's own vocabulary -- nothing Anthropic.
+
+    Sans-IO, the same five methods as EventRelay. An image event is a few lines of which one `data:` line
+    is a whole base64 image, so an event may reach _RT_IMAGE_SSE_EVENT_LIMIT (an event over it is dropped
+    whole and the relay fails). feed(line) accumulates lines to the blank line and returns that event's
+    bytes unchanged; a `:` comment is dropped (the keep-alive below is the router's only one). The relay
+    is closed after an event whose `event:` name ends in `.completed` (image_generation.completed,
+    image_edit.completed; documented names, not measured live): `end_marker` tells _relay_loop to read
+    that as a clean end. ping() is an SSE comment `: ping`, available from the start (the first partial
+    image can be a minute away). fail() and finish() emit one OpenAI-shaped `event: error` with
+    data {"error": {message, type, param, code}} and close; an upstream `event: error` is re-emitted the
+    same way, its message through the KD-9 scrubber and the _RT_IMAGE_SECRET_RES strip, its type, code and
+    param only as short tokens (_rt_image_error). Every method returns b"" once closed. A line over 64 KiB
+    (an image) is not scanned for a bare CR: the bytes relayed are the upstream's either way."""
+
+    end_marker = b".completed"
+
+    def __init__(self, inbound: InboundRequest) -> None:
+        self.inbound = inbound
+        self.backend_name = inbound.backend.name
+        self.lines: List[bytes] = []
+        self.size = 0
+        self.started = True             # a ping is due while the first partial image is still being made
+        self.closed = False
+        self.fresh = True               # no line fed yet: a leading BOM is dropped (V30)
+
+    @staticmethod
+    def error_event(status: int, message: str, param: Optional[str] = None, code: Optional[str] = None,
+                    err_type: Optional[str] = None) -> bytes:
+        """One `event: error` whose data is the OpenAI error envelope of *status* (type server_error from 500 up)."""
+        return b"event: error\ndata: " + _rt_dumps(_rt_openai_error_body(
+            status, message, param=param, code=code, err_type=err_type)) + b"\n\n"
+
+    def begin(self) -> bytes:
+        """Nothing: the upstream's own first event is the first one."""
+        return b""
+
+    def ping(self) -> bytes:
+        """An SSE comment line and a blank line."""
+        return b"" if self.closed else b": ping\n\n"
+
+    def fail(self, err_type: str, message: str) -> bytes:
+        """One event: error, at once; the half event is discarded. Closes the relay. *err_type* is the
+        Anthropic-style name the relay loop passes (overloaded_error, api_error); the client sees the
+        OpenAI type of the matching status."""
+        if self.closed:
+            return b""
+        self.closed = True
+        self.lines, self.size = [], 0
+        return self.error_event(529 if err_type == "overloaded_error" else 502, message)
+
+    def finish(self) -> bytes:
+        """Upstream EOF: without a relayed completed event the stream ended early."""
+        if self.closed:
+            return b""
+        return self.fail("api_error", "backend %s ended the stream early" % self.backend_name)
+
+    def feed(self, line: bytes) -> bytes:
+        """One upstream read line -> b"" or whole events' bytes (split at every CRLF, LF and bare CR
+        unless the line is an image; a stream-leading BOM is dropped)."""
+        if self.fresh:
+            self.fresh = False
+            if line.startswith(_SSE_BOM):
+                line = line[len(_SSE_BOM):]
+        if len(line) > 65536:
+            return self._feed_line(line)
+        return b"".join(self._feed_line(part) for part in _rt_sse_split(line))
+
+    def _feed_line(self, line: bytes) -> bytes:
+        """One SSE line -> b"" or one whole event's bytes."""
+        if self.closed or line.startswith(b":"):
+            return b""
+        if len(line) > 2 or line.strip(b"\r\n"):
+            self.lines.append(line)
+            self.size += len(line)
+            if self.size > _RT_IMAGE_SSE_EVENT_LIMIT:
+                return self.fail("api_error", "backend %s sent an oversized event" % self.backend_name)
+            return b""
+        if not self.lines:
+            return b""
+        lines, self.lines, self.size = self.lines, [], 0
+        name = ""
+        for held in lines:
+            if held.startswith(b"event:"):
+                name = held[len(b"event:"):].strip().decode("utf-8", "replace")
+                break
+        if name == "error":
+            return self._upstream_error(lines)
+        event = b"".join(lines) + line
+        if name.endswith(".completed"):
+            self.closed = True
+        return event
+
+    def _upstream_error(self, lines: List[bytes]) -> bytes:
+        """An upstream `event: error`: its message scrubbed, its type, code and param only as tokens; closes."""
+        data = b"\n".join(held[len(b"data:"):].strip() for held in lines
+                          if held.startswith(b"data:") and len(held) <= 65536)
+        text, up_type, up_code, up_param = _rt_image_error(self.inbound, 400, data)
+        if text == "backend %s answered 400" % self.backend_name:
+            text = "backend %s sent an error" % self.backend_name
+        self.closed = True
+        self.lines, self.size = [], 0
+        return self.error_event(502, text, param=up_param, code=up_code, err_type=up_type)
 
 
 class PassthroughAdapter(Adapter):
@@ -5473,6 +5608,16 @@ class OpenaiAdapter(ResponsesImageAdapter):
     MODALITIES = frozenset({"chat", "image"})
     IMAGE_PATHS = {"generations": "/v1/images/generations", "edits": "/v1/images/edits"}
     IMAGE_EDIT_JSON = True
+    # The Images API's documented SSE (partial_image and completed events); the client's own `stream` and
+    # `partial_images` fields travel in the raw body, the Accept header is text/event-stream.
+    IMAGE_STREAMING = True
+
+    def image_stream_policy(self, inbound: InboundRequest) -> StreamPolicy:
+        """The image line cap (a partial image is one base64 `data:` line) and a required event stream."""
+        return StreamPolicy(_RT_IMAGE_SSE_LINE_LIMIT, True)
+
+    def image_stream_translator(self, inbound: InboundRequest) -> "ImageEventRelay":
+        return ImageEventRelay(inbound)
 
 
 _RT_SD_MAX_N = 4                        # the default `max_n` route option: images per request
@@ -8754,7 +8899,14 @@ class _RouterHandler(BaseHTTPRequestHandler):
         mapped by adapter.image_response (given the upstream Content-Type, which the hook can not
         see) and sent as the bytes it returns (_send_raw_json) -- no re-serialising of a 2xx. A
         non-2xx or a refused 2xx logs the structure-only WARNING line; a 429's Retry-After is
-        relayed when it is all digits. The handler owns conn and resp: closed in finally."""
+        relayed when it is all digits. The handler owns conn and resp: closed in finally.
+
+        A streaming request (inbound.stream, the openai kind) whose upstream answered 2xx goes to
+        _relay_stream with the adapter's image translator instead; its non-2xx answers arrive as JSON and
+        are mapped here, before any SSE head is written."""
+        if inbound.stream and 200 <= resp.status < 300:
+            self._relay_stream(conn, resp, adapter.image_stream_translator(inbound), inbound)
+            return
         content_type = resp.getheader("Content-Type") or ""
         up_status, retry_after, up_body = self._rt_read_upstream(conn, resp, inbound)
         status, body = adapter.image_response(inbound, up_status, up_body, content_type)
@@ -8820,10 +8972,15 @@ class _RouterHandler(BaseHTTPRequestHandler):
         srv = self.server
         rec = self._rt_rec
         rec["up_status"] = resp.status
+        image = inbound.endpoint in _RT_IMAGE_ENDPOINTS
         if not 200 <= resp.status < 300:
-            self._relay_error_json(conn, resp, ADAPTERS[backend.kind], inbound)
+            if image:
+                self._relay_image(conn, resp, ADAPTERS[backend.kind], inbound)     # the OpenAI envelope
+            else:
+                self._relay_error_json(conn, resp, ADAPTERS[backend.kind], inbound)
             return
-        policy = ADAPTERS[backend.kind].stream_policy(inbound)
+        policy = (ADAPTERS[backend.kind].image_stream_policy if image
+                  else ADAPTERS[backend.kind].stream_policy)(inbound)
         ctype = (resp.getheader("Content-Type") or "").split(";", 1)[0].strip().lower()
         if ctype != "text/event-stream" and (policy.require_event_stream or ctype != ""):
             log.debug("upstream not an event stream: content_type=%s", _log_value(ctype))
@@ -8882,7 +9039,8 @@ class _RouterHandler(BaseHTTPRequestHandler):
                     try:
                         chunk = translator.fail("api_error", "internal error")
                     except Exception:  # noqa: BLE001 -- a broken translator still closes the envelope
-                        chunk = AnthropicSseEncoder("", "").error("api_error", "internal error")
+                        chunk = ImageEventRelay.error_event(500, "internal error") if image \
+                            else AnthropicSseEncoder("", "").error("api_error", "internal error")
                     write(chunk)
                 except OSError:
                     end = "disconnected"
@@ -8975,7 +9133,10 @@ class _RouterHandler(BaseHTTPRequestHandler):
                 write(chunk)
                 if translator.closed or not isinstance(item, bytes):
                     rec["up_t1"] = time.monotonic()
-                    return "message_stop" if b"event: message_stop" in chunk else "error"
+                    # The translator names its clean end: Anthropic's message_stop by default, an image
+                    # stream's completed event; the value stays "message_stop" for the summary line.
+                    end = getattr(translator, "end_marker", b"event: message_stop")
+                    return "message_stop" if end in chunk else "error"
             now = time.monotonic()
             if getattr(translator, "started", False) and now - last_write() >= _PING_INTERVAL_S:
                 write(translator.ping())
@@ -9219,6 +9380,9 @@ example config (chmod 600; token: python3 -c 'import secrets;print(secrets.token
   arguments, which would bypass those limits), and drops generation_info from the answer.
   sd-server has no auth: keep it reachable only through the router. GET /v1/models lists every route with its modality
   (?modality=chat|image|all filters it); --max-image-requests caps image requests in flight.
+  An openai image route also takes "stream": true (partial_images 0-3 passes through): the Images
+  API's SSE events are relayed whole, byte for byte, with a `: ping` comment while idle; codex and
+  sdcpp image routes answer stream true with a 400.
   A mistral route's option tool_result_images (boolean, default true): an image inside a
   tool_result goes upstream as image_url parts in the tool message; false sends "[image omitted]".
   Route options temperature (0-2) / top_p (0-1) override the client's; one a backend cannot take
