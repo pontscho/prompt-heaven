@@ -333,6 +333,10 @@ _RT_QUEUE_BYTES = 16 * 1024 * 1024  # pump queue bound, counted in bytes (NFR-2b
 # accumulated lines and the joined event), and --max-image-requests streams may run together.
 _RT_IMAGE_SSE_LINE_LIMIT = 48 * 1024 * 1024
 _RT_IMAGE_SSE_EVENT_LIMIT = 64 * 1024 * 1024
+# A data-only image event (no `event:` line) completes the stream when its data JSON's "type" ends in
+# ".completed" within the first _RT_IMAGE_TYPE_WINDOW bytes of the data line.
+_RT_IMAGE_TYPE_WINDOW = 512
+_RT_IMAGE_TYPE_RE = re.compile(rb'"type"\s*:\s*"[A-Za-z_.]+\.completed"')
 _RT_BUFFERED_TOOL_LIMIT = 8 * 1024 * 1024  # Mistral tool ids, names and arguments buffered per stream (V33)
 _RT_BUFFERED_TOOL_COUNT = 128     # Mistral tool calls buffered per stream (V33)
 _RT_TICK_S = 1.0                  # relay loop wake-up: ping, idle and closing checks
@@ -1247,6 +1251,12 @@ def _rt_cfg_backend(name: str, entry: Any, token: str) -> BackendSpec:
         raise ConfigError(f"{where}.kind: must be one of {known}")
     if kind in RESERVED_KINDS:
         raise ConfigError(f'{where}.kind: "{kind}" is reserved and not implemented')
+    if kind == "sdcpp":
+        # sd-server has no authentication: a key would only be sent in the clear to a server that ignores it.
+        if "api_key" in entry:
+            raise ConfigError(f"{where}.api_key: not allowed for kind sdcpp (sd-server has no authentication)")
+        if entry.get("auth_header", "none") != "none":
+            raise ConfigError(f"{where}.auth_header: kind sdcpp has no authentication; omit it or use none")
     adapter_cls = KIND_CLASSES[kind]               # unit 5, module global read at call time
     forwardable, default_forward = adapter_cls.FORWARDABLE, adapter_cls.DEFAULT_FORWARD
     profile = _rt_cfg_profile(kind, entry.get("api_key") is not None, entry.get("oauth") is not None, where)
@@ -2003,7 +2013,8 @@ _RT_IMAGE_DISPOSITION_RE = re.compile(
     r'form-data; name="([\x20\x21\x23\x24\x26-\x5b\x5d-\x7e]{1,256})"'
     r'(?:; filename="([\x20\x21\x23-\x5b\x5d-\x7e\x80-\xff]{0,1024})")?')
 _RT_IMAGE_N_RE = re.compile(r"0|[1-9][0-9]?")
-_RT_IMAGE_SIZE_RE = re.compile(r"auto|[0-9]{1,5}x[0-9]{1,5}")
+_RT_IMAGE_SIZE_RE = re.compile(r"auto|[1-9][0-9]{0,4}x[1-9][0-9]{0,4}")     # one spelling: no zero side, no leading zero
+_RT_IMAGE_COMPRESSION_RE = re.compile(r"[0-9]{1,3}")
 _RT_IMAGE_WORDS = {"stream": ("true", "false"), "output_format": ("png", "jpeg", "webp"),
                    "response_format": ("b64_json", "url")}
 
@@ -2114,7 +2125,8 @@ def _rt_image_multipart_fields(raw: bytes, boundary: str, names: FrozenSet[str])
     is the ambiguity refused, never resolved (ADR 0015) -- as is a part whose empty body lets the
     header block's own CRLF double as the delimiter's. The closing delimiter is required and may be
     followed by one CRLF only. A part whose name is not in *names* is skipped without being copied; a
-    part whose name is in *names* must be a text part -- a filename on it is a 400, as is a repeat.
+    part whose name is in *names* must be a text part -- a filename on it is a 400, as is a repeat -- and
+    a name that case-folds to one of *names* without being spelled exactly so ("Model") is a 400 too.
     Counts and sizes are capped. Scans with bytes.find and bytes.count."""
     delim = b"--" + boundary.encode("ascii")
     sep = b"\r\n" + delim
@@ -2154,6 +2166,9 @@ def _rt_image_multipart_fields(raw: bytes, boundary: str, names: FrozenSet[str])
             if raw.startswith(delim, data_start):       # the terminator's 2nd CRLF would double as the delimiter's
                 raise _rt_bad("body", "a part with an empty body shares its CRLF with the next delimiter")
         name, filename = _rt_image_part_head(block)
+        low = name.casefold()
+        if low in names and name != low:        # as the JSON path: a case-insensitive reader would take it for *low*
+            raise _rt_bad(low, "must be spelled exactly in lower case")
         nxt = raw.find(sep, data_start)
         if nxt < 0:
             raise _rt_bad("body", "the closing boundary is missing")
@@ -2170,8 +2185,8 @@ def _rt_image_multipart_fields(raw: bytes, boundary: str, names: FrozenSet[str])
 
 
 def _rt_image_json_fields(raw: bytes, names: FrozenSet[str]) -> Dict[str, str]:
-    """The fields of *names* in a JSON image body, as text: stream a JSON boolean ("true" | "false"), n a
-    JSON integer, the rest strings; _rt_loads refuses a repeated key and a non-finite number, and a key
+    """The fields of *names* in a JSON image body, as text: stream a JSON boolean ("true" | "false"), n and
+    output_compression a JSON integer, the rest strings; _rt_loads refuses a repeated key and a non-finite number, and a key
     that case-folds to one of *names* without being spelled exactly so ("Model") is a 400."""
     try:
         obj = _rt_loads(raw.decode("utf-8"))
@@ -2196,7 +2211,7 @@ def _rt_image_json_fields(raw: bytes, names: FrozenSet[str]) -> Dict[str, str]:
             if not isinstance(value, bool):
                 raise _rt_bad(name, "must be a boolean")
             text = "true" if value else "false"
-        elif name == "n":
+        elif name in ("n", "output_compression"):
             if isinstance(value, bool) or not isinstance(value, int):
                 raise _rt_bad(name, "must be an integer")
             text = str(value)
@@ -2226,6 +2241,10 @@ def _rt_image_check_vocab(fields: Mapping[str, str]) -> None:
         raise _rt_bad("n", "must be an integer from 0 to 99 with no sign, space or leading zero")
     if "size" in fields and _RT_IMAGE_SIZE_RE.fullmatch(fields["size"]) is None:
         raise _rt_bad("size", "must be auto or WIDTHxHEIGHT")
+    # Only a kind that asks for it (sdcpp) has output_compression among the fields; sd-server reads it as an int.
+    if "output_compression" in fields and (_RT_IMAGE_COMPRESSION_RE.fullmatch(fields["output_compression"]) is None
+                                           or int(fields["output_compression"]) > 100):
+        raise _rt_bad("output_compression", "must be an integer from 0 to 100")
 
 
 def _rt_image_fields(content_type: str, raw: bytes, wanted: FrozenSet[str] = frozenset()) -> Dict[str, str]:
@@ -2902,8 +2921,9 @@ class ImageEventRelay:
     whole and the relay fails). feed(line) accumulates lines to the blank line and returns that event's
     bytes unchanged; a `:` comment is dropped (the keep-alive below is the router's only one). The relay
     is closed after an event whose `event:` name ends in `.completed` (image_generation.completed,
-    image_edit.completed; documented names, not measured live): `end_marker` tells _relay_loop to read
-    that as a clean end. ping() is an SSE comment `: ping`, available from the start (the first partial
+    image_edit.completed; documented names, not measured live) or, when the event has no `event:` line,
+    whose `data:` JSON `type` ends in `.completed` within the line's first 512 bytes (a regex, never a
+    parse): `end_marker` tells _relay_loop to read that as a clean end. ping() is an SSE comment `: ping`, available from the start (the first partial
     image can be a minute away). fail() and finish() emit one OpenAI-shaped `event: error` with
     data {"error": {message, type, param, code}} and close; an upstream `event: error` is re-emitted the
     same way, its message through the KD-9 scrubber and the _RT_IMAGE_SECRET_RES strip, its type, code and
@@ -2984,9 +3004,17 @@ class ImageEventRelay:
         if name == "error":
             return self._upstream_error(lines)
         event = b"".join(lines) + line
-        if name.endswith(".completed"):
+        if name.endswith(".completed") or (not name and self._data_completed(lines)):
             self.closed = True
         return event
+
+    @staticmethod
+    def _data_completed(lines: List[bytes]) -> bool:
+        """True when an event with no `event:` name carries a `data:` line whose JSON `type` ends in
+        `.completed` within the line's first _RT_IMAGE_TYPE_WINDOW bytes (a regex over that slice: a
+        multi-MiB line is never parsed, and a `type` further in is not read)."""
+        return any(held.startswith(b"data:") and _RT_IMAGE_TYPE_RE.search(held[:_RT_IMAGE_TYPE_WINDOW]) is not None
+                   for held in lines)
 
     def _upstream_error(self, lines: List[bytes]) -> bytes:
         """An upstream `event: error`: its message scrubbed, its type, code and param only as tokens; closes."""
@@ -5624,7 +5652,7 @@ _RT_SD_MAX_N = 4                        # the default `max_n` route option: imag
 _RT_SD_MAX_PIXELS = 2048 * 2048         # the default `max_pixels` route option: width x height
 _RT_SD_MARKER = "sd_cpp_extra_args"     # the tag name of sd-server's in-prompt native-arguments block (D5b)
 _RT_SD_REFUSAL = "the prompt carries sd.cpp native arguments; not allowed on this route"
-_RT_SD_SIZE_RE = re.compile(r"([0-9]{1,5})x([0-9]{1,5})")
+_RT_SD_SIZE_RE = re.compile(r"([1-9][0-9]{0,4})x([1-9][0-9]{0,4})")
 _RT_SD_OUTPUT_FORMATS = ("png", "jpeg", "webp")
 # sd-server's 503 codes the client may act on (the model is not there yet), each with a fixed text.
 _RT_SD_UNAVAILABLE = {"model_not_loaded": "the image backend has no model loaded",
@@ -5638,21 +5666,24 @@ class SdcppAdapter(Adapter):
     bytes go to /v1/images/generations or /edits untouched, so the router's guards are the whole policy:
     JSON edits (sd-server takes multipart only), stream, n outside 1..max_n, response_format url,
     output_format webp (sd-server's build refuses it, on edits it would be silently PNG), a size over
-    max_pixels, and a prompt that carries the `sd_cpp_extra_args` tag name (D5b: the block overrides every
-    guard above and takes a raw server-side LoRA path on the OpenAI routes; a case-insensitive substring
-    test, wider than the server's own case-sensitive tag regex, and no brace rule -- the server parses
-    the tag pair only). The 2xx answer is rebuilt as {created, output_format, data:[{b64_json}]}: the
-    generation_info, any usage and every other key are dropped. The chat hooks are the base ones and are
+    max_pixels, an edit without an explicit WxH size (sd-server would take the uploaded image's own
+    size, past max_pixels), an output_compression outside 0..100, and a prompt that carries the
+    `sd_cpp_extra_args` tag name (D5b: the block overrides every guard above and takes a raw server-side
+    LoRA path on the OpenAI routes; a case-insensitive substring test, wider than the server's own
+    case-sensitive tag regex, and no brace rule -- the server parses the tag pair only). The 2xx answer is
+    rebuilt as {created, output_format, data:[{b64_json}]}: the generation_info, any usage and every other
+    key are dropped, a data list that is empty or longer than the requested n is a 502, and the answer is a
+    200 whatever 2xx the upstream used. The chat hooks are the base ones and are
     never called (an image route is refused on /v1/messages before the adapter is reached)."""
 
     kind = "sdcpp"
     ROUTE_OPTIONS: Mapping[str, _RtOptionValidator] = {
-        "max_n": _rt_opt_int(1, 16),
-        "max_pixels": _rt_opt_int(65536, 67108864),
+        "max_n": _rt_opt_int(1, 8),
+        "max_pixels": _rt_opt_int(65536, 4096 * 4096),
     }
     MODALITIES = frozenset({"image"})
     IMAGE_PATHS = {"generations": "/v1/images/generations", "edits": "/v1/images/edits"}
-    IMAGE_FIELDS = frozenset({"prompt"})
+    IMAGE_FIELDS = frozenset({"prompt", "output_compression"})
     IMAGE_EDIT_JSON = False
     IMAGE_MODEL_IS_KEY = False          # sd-server ignores `model`: the route key may differ from the upstream name
 
@@ -5673,26 +5704,30 @@ class SdcppAdapter(Adapter):
             raise _rt_bad("response_format", "url is not supported on this route; b64_json only")
         match = _RT_SD_SIZE_RE.fullmatch(fields.get("size", ""))
         if match is not None:
-            width, height = int(match.group(1)), int(match.group(2))
-            if width < 1 or height < 1 or width * height > max_pixels:
-                raise _rt_bad("size", "must be positive and at most %d pixels on this route" % max_pixels)
+            if int(match.group(1)) * int(match.group(2)) > max_pixels:
+                raise _rt_bad("size", "must be at most %d pixels on this route" % max_pixels)
+        elif inbound.endpoint == "images_edits":
+            # sd-server takes an edit's size from the uploaded image when it is absent or auto, which
+            # would sidestep max_pixels; a generation without one gets the server's operator-set default.
+            raise _rt_bad("size", "an explicit WxH is required on this route")
         return self.IMAGE_PATHS[_RT_IMAGE_KINDS[inbound.endpoint]], inbound.raw
 
     def image_response(self, inbound: InboundRequest, status: int, body: bytes,
                        content_type: str) -> Tuple[int, bytes]:
-        """2xx: the whole body parsed and rebuilt (_rt_sd_answer); a body that is not an object with a
-        `data` list of objects with a string b64_json is a 502. Non-2xx: the status through
+        """2xx: the whole body parsed and rebuilt (_rt_sd_answer) and answered 200; a body that is not an
+        object with a `data` list of 1 to n objects with a string b64_json is a 502. Non-2xx: the status through
         _UPSTREAM_STATUS, a 503 model_not_loaded / model_loading with its fixed text and code, else
         _rt_image_error (text only for 400/404/413/422/429, scrubbed, stripped and cut; 401 and 403 get
         the fixed per-status text, sd-server holds no credential); an empty or non-JSON error body is the
         fixed text."""
         name = inbound.backend.name
         if 200 <= status < 300:
-            rebuilt = _rt_sd_answer(body)
+            # The request's n was vetted (1..max_n) by image_request; an absent n is one image.
+            rebuilt = _rt_sd_answer(body, int(inbound.fields.get("n", "1")))
             if rebuilt is None:
                 return 502, _rt_dumps(_rt_openai_error_body(
                     502, "backend %s answered with a body that is not an image result" % name))
-            return status, rebuilt
+            return 200, rebuilt
         parsed = _rt_sd_error_object(body)
         code = parsed.get("code") if isinstance(parsed, dict) else None
         if status == 503 and isinstance(code, str) and code in _RT_SD_UNAVAILABLE:
@@ -5715,16 +5750,16 @@ def _rt_sd_error_object(body: bytes) -> Any:
         return None
 
 
-def _rt_sd_answer(body: bytes) -> Optional[bytes]:
+def _rt_sd_answer(body: bytes, n: int = 1) -> Optional[bytes]:
     """An sd-server 2xx body rebuilt as {created, output_format, data:[{b64_json}]} (created and
-    output_format only when well typed), or None when it is not an object with a `data` list of objects
-    that each hold a string b64_json. generation_info, usage and every other key are dropped."""
+    output_format only when well typed), or None when it is not an object with a `data` list of 1 to *n*
+    objects that each hold a string b64_json. generation_info, usage and every other key are dropped."""
     try:
         obj = _rt_loads(body.decode("utf-8"))
     except (UnicodeDecodeError, ValueError, RecursionError):
         return None
     data = obj.get("data") if isinstance(obj, dict) else None
-    if not isinstance(data, list) or not all(isinstance(e, dict) and isinstance(e.get("b64_json"), str)
+    if not isinstance(data, list) or not 1 <= len(data) <= n or not all(isinstance(e, dict) and isinstance(e.get("b64_json"), str)
                                              for e in data):
         return None
     out: Dict[str, Any] = {}
@@ -9373,12 +9408,15 @@ example config (chmod 600; token: python3 -c 'import secrets;print(secrets.token
   model and a few guard fields and forwards the body as it came;
   raise --body-limit for large edit uploads. A sdcpp backend (a stable-diffusion.cpp sd-server;
   loopback needs allow_private AND allow_loopback, a LAN host allow_private) takes image routes
-  only, any route key (sd-server ignores `model`), options max_n (1-16, default 4) and
-  max_pixels (65536-67108864, default 2048*2048); the router refuses stream, JSON-form edits
+  only, any route key (sd-server ignores `model`), options max_n (1-8, default 4) and
+  max_pixels (65536-16777216, default 2048*2048); the router refuses stream, JSON-form edits
   (multipart only), n outside 1..max_n, response_format url, output_format webp, a size over
-  max_pixels and any prompt holding "sd_cpp_extra_args" (sd-server's in-prompt native
-  arguments, which would bypass those limits), and drops generation_info from the answer.
-  sd-server has no auth: keep it reachable only through the router. GET /v1/models lists every route with its modality
+  max_pixels, an edit without an explicit WxH size (sd-server would size it from the uploaded
+  image; generations without one get the server's default), an output_compression outside 0-100
+  and any prompt holding "sd_cpp_extra_args" (sd-server's in-prompt native arguments, which would
+  bypass those limits), and drops generation_info from the answer (a data list empty or longer
+  than n is a 502). sd-server has no auth: an sdcpp backend takes no api_key and no auth_header
+  other than none (a config error); keep the server reachable only through the router. GET /v1/models lists every route with its modality
   (?modality=chat|image|all filters it); --max-image-requests caps image requests in flight.
   An openai image route also takes "stream": true (partial_images 0-3 passes through): the Images
   API's SSE events are relayed whole, byte for byte, with a `: ping` comment while idle; codex and

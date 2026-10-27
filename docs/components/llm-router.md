@@ -394,8 +394,9 @@ worked examples of both kinds, each loaded through `load_config`
 `Scripts/llm-router.py:_RT_LOGIN_HELP_EPILOG`.
 
 The `sdcpp` kind, a stable-diffusion.cpp `sd-server` that serves only the image
-endpoints (no chat, no credential, so no `api_key` is needed and `auth_header`
-stays `none`):
+endpoints (no chat, no credential: an `api_key`, or an `auth_header` other than
+`none`, is a config error naming the path, and the backend's `auth_header` is
+forced to `none`):
 
 ```json
 "backends": {
@@ -409,9 +410,10 @@ stays `none`):
 
 The address policy is the `llamacpp` one, with no exemption for the kind: a LAN
 host needs `allow_private` (the `http://` URL requires it), a loopback sd-server
-needs `allow_private` **and** `allow_loopback`. An `api_key` beside
-`"auth_header": "none"` is accepted and never sent; without `auth_header`, an
-`api_key` selects `x-api-key`, so leave it out.
+needs `allow_private` **and** `allow_loopback`. The loader refuses `api_key` (any
+value) and `auth_header` `authorization` or `x-api-key` on this kind, because
+sd-server has no authentication and a key would only travel in the clear to a
+server that ignores it `Scripts/llm-router.py:_rt_cfg_backend`.
 
 **Top level** — exactly `auth_token`, `backends`, `routes`, `default`; any
 other key is refused by name `Scripts/llm-router.py:_RT_TOP_KEYS`.
@@ -479,8 +481,8 @@ limits, `vision` and `modality`; an unknown key or option is refused by name
 | codex, `openai` | `reasoning_effort` | one of `Scripts/llm-router.py:_RT_RS_EFFORTS` (`none` to `xhigh`); wins over the client's `output_config.effort` and over the effort its thinking budget maps to |
 | codex, `openai` | `verbosity` | `low`, `medium` or `high`; sent as `text.verbosity` |
 | `openai` with an `api_key` | `temperature`, `top_p`, `max_tokens_cap` | as for mistral; refused at load on the two OAuth profiles, which take no sampling |
-| `sdcpp` | `max_n` | integer 1-16, default 4; the most images one request may ask for (`n`) `Scripts/llm-router.py:SdcppAdapter` |
-| `sdcpp` | `max_pixels` | integer 65536-67108864, default 4194304 (2048 x 2048); the most `width x height` a `size` may ask for. A `allow_prompt_args` option is reserved and refused as unknown |
+| `sdcpp` | `max_n` | integer 1-8, default 4; the most images one request may ask for (`n`) `Scripts/llm-router.py:SdcppAdapter` |
+| `sdcpp` | `max_pixels` | integer 65536-16777216 (4096 x 4096), default 4194304 (2048 x 2048); the most `width x height` a `size` may ask for. An edit must carry an explicit `WxH` `size` (absent or `auto` is a 400 `size: an explicit WxH is required on this route`): sd-server sizes an edit from the uploaded image when `size` is absent or `auto`, which would sidestep this limit, while a generation without `size` gets the server's own operator-set default. A `allow_prompt_args` option is reserved and refused as unknown |
 
 `Scripts/llm-router.py:PassthroughAdapter` `Scripts/llm-router.py:LlamacppAdapter`
 `Scripts/llm-router.py:MistralAdapter` `Scripts/llm-router.py:CodexAdapter`
@@ -833,14 +835,20 @@ is hand-written, since the stdlib's multipart parser left with `cgi` after 3.9
   and nothing else `Scripts/llm-router.py:_rt_image_part_head`.
 - *Fields.* A wanted name must be a text part — a `filename` on it is a 400 — and
   appear once; its value is UTF-8 without control characters (the `prompt` may
-  hold tab, CR and LF) `Scripts/llm-router.py:_rt_image_text_ok`. In the JSON form
-  `stream` must be a JSON boolean, `n` an integer and the rest strings, a repeated
+  hold tab, CR and LF) `Scripts/llm-router.py:_rt_image_text_ok`. A part name that
+  case-folds to a wanted name without being spelled exactly so (`Model`, `Stream`)
+  is a 400 naming the lower-case field, as in the JSON form; a name that is not
+  wanted is skipped whatever its case. In the JSON form
+  `stream` must be a JSON boolean, `n` (and `output_compression`, where a kind asks
+  for it) an integer and the rest strings, a repeated
   key is refused by the JSON loader, and a key that case-folds to a wanted name
   without being spelled so (`Model`, `STREAM`) is a 400
   `Scripts/llm-router.py:_rt_image_json_fields`.
 - *Vocabularies.* `stream` exactly `true` or `false`; `n` 0-99 with no sign,
   space or leading zero; `output_format` one of `png`, `jpeg`, `webp`;
-  `response_format` `b64_json` or `url`; `size` `auto` or `WIDTHxHEIGHT`
+  `response_format` `b64_json` or `url`; `size` `auto` or `WIDTHxHEIGHT` with
+  each side 1-99999 and no leading zero (`0x512` and `01024x1024` are refused);
+  `output_compression`, which only kind `sdcpp` asks for, an integer 0-100
   `Scripts/llm-router.py:_rt_image_check_vocab`
   `Scripts/llm-router.py:_RT_IMAGE_WORDS`. `model` is required, 1-256 characters.
 - *Caps.* At most `Scripts/llm-router.py:_RT_IMAGE_PART_CAP` (64) parts, a part
@@ -904,8 +912,11 @@ JSON object (`type`, `b64_json`, `created_at`, `size`, `quality`, `background`,
 names and fields are the documented ones; nothing has been measured against the
 live service. A new translator, `Scripts/llm-router.py:ImageEventRelay`, relays
 whole events byte for byte (it never re-serializes a base64 image), drops
-upstream comment lines, and closes after an event whose name ends in
-`.completed`; `_relay_loop` reads that clean end from the translator's
+upstream comment lines, and closes after an event whose `event:` name ends in
+`.completed` or, for an event with no `event:` line, whose `data:` JSON `type` ends
+in `.completed` within the data line's first 512 bytes (a regex over that slice,
+never a parse of a multi-MiB line; a `type` further in is not read, and the stream
+then ends as an early EOF); `_relay_loop` reads that clean end from the translator's
 `end_marker` (`b".completed"`; the Anthropic translators keep
 `b"event: message_stop"`) and the summary line still says `end=message_stop`
 `Scripts/llm-router.py:_relay_loop`. The head is the usual `200 text/event-stream`,
@@ -979,25 +990,33 @@ image routes only (`MODALITIES` is `{image}`; its chat hooks are the base ones a
 are never reached, because an image route is refused on `/v1/messages` first), over
 the same two endpoints, the same single `_rt_send`, the fixed
 `IMAGE_PATHS` and the OpenAI envelope. No credential leaves the router: the
-backend's `auth_header` is `none`, the client's `Authorization`, `x-api-key` and
-cookies are never forwarded, and an `api_key` set beside `"auth_header": "none"`
-is accepted and not sent `Scripts/llm-router.py:SdcppAdapter`. The body is the
+backend's `auth_header` is `none` (the loader refuses an `api_key` or any other
+`auth_header` on this kind), and the client's `Authorization`, `x-api-key` and
+cookies are never forwarded `Scripts/llm-router.py:SdcppAdapter`. The body is the
 client's bytes and the `model` is not rewritten (sd-server ignores it, so the route
 key need not equal the upstream name). sd-server's whole policy is therefore the
-router's, in five request guards and one prompt rule, each a 400 naming a rule and
+router's, in the request guards below and one prompt rule, each a 400 naming a rule and
 never a value, with the peer untouched `Scripts/llm-router.py:SdcppAdapter`:
 
 - `stream` true is refused (sd-server accepts it and ignores it silently), and a
   JSON-form edit is refused ("this route accepts multipart edits only"; sd-server
   answers a JSON edit 400 itself), both in the parser through the adapter's
   `IMAGE_EDIT_JSON` flag `Scripts/llm-router.py:_rt_parse_image_inbound`.
-- `n` outside 1 to the route's `max_n` (default 4; the server itself clamps to 1-8),
-  `response_format` `url` (the answer is always base64), `output_format` `webp` on
-  generations and edits (this build answers 400 `output_formats = [png, jpeg]`, and
-  an older one returned a PNG labelled otherwise), and a `size` of `WxH` that is
-  zero-sided or over the route's `max_pixels` (default 2048 x 2048). `size` is
-  `auto` or `WxH` by the shared vocabulary: sd-server accepts `abcxdef` and runs a
-  full 1024 x 1024 generation, which the router refuses instead.
+- `n` outside 1 to the route's `max_n` (default 4, at most 8; the server itself
+  clamps to 1-8), `response_format` `url` (the answer is always base64),
+  `output_format` `webp` on generations and edits (this build answers 400
+  `output_formats = [png, jpeg]`, and an older one returned a PNG labelled
+  otherwise), a `size` of `WxH` over the route's `max_pixels` (default 2048 x 2048),
+  and an `output_compression` that is not an integer 0-100. `size` is `auto` or a
+  canonical `WxH` by the shared vocabulary (no zero side, no leading zero):
+  sd-server accepts `abcxdef` and runs a full 1024 x 1024 generation, which the
+  router refuses instead.
+- **An edit needs an explicit `WxH` `size`.** Absent or `auto` is a 400 "size: an
+  explicit WxH is required on this route", because sd-server derives an edit's size
+  from the uploaded image when `size` is absent or `auto` (measured in the sd.cpp
+  source, `set_width_and_height_if_unset`; clamped to 4096 per side), which would
+  sidestep `max_pixels`. A generation keeps `auto` and absent: the server's
+  operator-set default applies.
 - **The prompt rule.** A prompt that holds `sd_cpp_extra_args` in any letter case
   (the decoded JSON string or the multipart `prompt` field, so a `_` escape does
   not hide it) is refused with "the prompt carries sd.cpp native arguments; not
@@ -1008,13 +1027,15 @@ never a value, with the peer untouched `Scripts/llm-router.py:SdcppAdapter`:
   Measured at sd.cpp `be486498`: only the tag pair is recognised, so there is no
   brace rule, and a prompt with braces, quotes or JSON-looking text passes
   byte-exact. The substring is deliberately wider than the server's case-sensitive
-  regex. The prompt field is sniffed with a 32 KiB cap (one byte more is a 400
+  regex: `casefold()` also maps U+017F (long s) to `s`, so `ſd_cpp_extra_args` is
+  refused although the server would not match it (it fails closed; R10 pins it). The prompt field is sniffed with a 32 KiB cap (one byte more is a 400
   naming `prompt`). `allow_prompt_args` is reserved and refused as an unknown
   option; there is no opt-in.
 
 The answer is not relayed raw. A 2xx is parsed (under `_UPSTREAM_BODY_LIMIT`) and
-must be an object with a `data` list of objects that each hold a string `b64_json`;
-it is rebuilt as `{created, output_format, data: [{b64_json}]}` with `created` and
+must be an object with a `data` list of 1 to *n* objects (the request's `n`, one when
+absent) that each hold a string `b64_json`; it is then answered 200 whatever 2xx the
+upstream used, rebuilt as `{created, output_format, data: [{b64_json}]}` with `created` and
 `output_format` kept only when well typed, and `generation_info` (whose `seed` is a
 JSON string), any `usage` and every other key dropped; no `usage` is synthesized
 (there are no tokens). Anything else is a 502 "answered with a body that is not an

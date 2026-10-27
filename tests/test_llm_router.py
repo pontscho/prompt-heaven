@@ -18435,8 +18435,49 @@ def group_q(suite, fixture_root):
                     refused.append(("n=%r" % value, CT, body(model, part("n", value)), frozenset()))
                 for field, value in (("output_format", "PNG"), ("output_format", "gif"),
                                      ("response_format", "URL"), ("response_format", "json"),
-                                     ("size", "1024"), ("size", "1024X1024"), ("size", "123456x1")):
+                                     ("size", "1024"), ("size", "1024X1024"), ("size", "123456x1"),
+                                     # V4: one canonical spelling of WxH (no zero side, no leading zero).
+                                     ("size", "0x1024"), ("size", "1024x0"), ("size", "01024x1024"),
+                                     ("size", "1024x01024"), ("size", "00x00"), ("size", "-1x5")):
                     refused.append(("%s=%r" % (field, value), CT, body(model, part(field, value)), frozenset()))
+                accepted.append(("size=99999x99999", CT, body(model, part("size", "99999x99999")), frozenset(),
+                                 {"model": GQ_IMG, "size": "99999x99999"}))
+                accepted.append(("size=1x1", CT, body(model, part("size", "1x1")), frozenset(),
+                                 {"model": GQ_IMG, "size": "1x1"}))
+                # V1: a part name that only a case-insensitive reader would take for a wanted field is refused
+                # as the JSON path refuses it, naming the rule; a name that is not wanted is skipped as before.
+                for name in ("MODEL", "Stream", "N", "Size", "Output_Format", "Response_Format"):
+                    refused.append(("multipart part %s" % name, CT, body(model, part(name, "x")), frozenset(),
+                                    "lower case"))
+                refused.append(("multipart part Model beside model", CT, body(model, part("Model", "x")), frozenset(),
+                                "lower case"))
+                refused.append(("multipart part Prompt when asked for", CT, body(model, part("Prompt", "x")), prompt,
+                                "lower case"))
+                accepted.append(("a Prompt part when the prompt is not asked for", CT,
+                                 body(model, part("Prompt", "x")), frozenset(), {"model": GQ_IMG}))
+                # V2: output_compression, when asked for, is an integer 0..100 (JSON int, not bool; multipart digits).
+                comp = frozenset({"output_compression"})
+                for value in ("0", "50", "100"):
+                    accepted.append(("output_compression=%s" % value, CT, body(model, part("output_compression", value)),
+                                     comp, {"model": GQ_IMG, "output_compression": value}))
+                accepted.append(("JSON output_compression 80", "application/json",
+                                 b'{"model":"m","output_compression":80}', comp,
+                                 {"model": "m", "output_compression": "80"}))
+                accepted.append(("output_compression not asked for is skipped", CT,
+                                 body(model, part("output_compression", "abc")), frozenset(), {"model": GQ_IMG}))
+                for value in ("101", "999", "1000", "-1", "+5", "1.5", "abc", " 5"):
+                    refused.append(("output_compression=%r" % value, CT, body(model, part("output_compression", value)),
+                                    comp, "output_compression"))
+                for label, raw in (("true", b'{"model":"m","output_compression":true}'),
+                                   ("a float", b'{"model":"m","output_compression":50.5}'),
+                                   ("a string", b'{"model":"m","output_compression":"50"}'),
+                                   ("101", b'{"model":"m","output_compression":101}'),
+                                   ("negative", b'{"model":"m","output_compression":-3}'),
+                                   ("huge", b'{"model":"m","output_compression":1000000000000}')):
+                    refused.append(("JSON output_compression %s" % label, "application/json", raw, comp,
+                                    "output_compression"))
+                refused.append(("JSON Output_Compression when asked for", "application/json",
+                                b'{"model":"m","Output_Compression":5}', comp, "lower case"))
                 for label, ctype, raw, wanted, want in accepted:
                     kind, got = run(ctype, raw, wanted)
                     if kind != "ok" or got != want:
@@ -18886,7 +18927,6 @@ GR_IDS = ("R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8", "R9", "R10", "R11", "R
 GR_KEY = "tf-sd"                    # an image route on the sdcpp backend (the upstream model differs: sd ignores it)
 GR_MODEL = "sd-cpp-local"
 GR_SMALL = "tf-sd-small"            # max_n 2, max_pixels 262144 (512 x 512)
-GR_KEYED = "tf-sd-key"              # a backend that carries an api_key with auth_header none
 GR_EVIL = "tf-sd-evil"              # an upstream model spelled like a traversal
 GR_MARKER = "sd_cpp_extra_args"
 GR_REFUSAL = "the prompt carries sd.cpp native arguments; not allowed on this route"
@@ -18920,14 +18960,12 @@ def gr_config(peer_url):
         "auth_token": TF_ROUTER_TOKEN,
         "backends": {
             "tfr": sd(),
-            "tfr-key": sd(api_key=TF_KEY_PASS),
             "tfr-off": sd(allow_loopback=False),
             "tfr-ll-off": {"kind": "llamacpp", "base_url": peer_url, "allow_loopback": False},
         },
         "routes": {
             GR_KEY: route("tfr"),
             GR_SMALL: route("tfr", options={"max_n": 2, "max_pixels": 262144}),
-            GR_KEYED: route("tfr-key"),
             GR_EVIL: route("tfr", model="../sdcpp/v1/models/load"),
             "tf-sd-off": route("tfr-off"),
             "tf-ll-off": {"backend": "tfr-ll-off", "model": "tf-ll-up"},
@@ -19009,22 +19047,18 @@ def group_r(suite, fixture_root):
                                "sd": {"kind": "sdcpp", "base_url": "http://127.0.0.1:1234", "auth_header": "none",
                                       "allow_private": True, "allow_loopback": True},
                                "lan": {"kind": "sdcpp", "base_url": "http://192.168.2.245:8082",
-                                       "allow_private": True},
-                               "keyed": {"kind": "sdcpp", "base_url": "http://192.168.2.245:8082",
-                                         "allow_private": True, "auth_header": "none", "api_key": TF_KEY_PASS,
-                                         "allow_cleartext_api_key": True}},
+                                       "allow_private": True}},
                            "routes": {
                                GR_KEY: {"backend": "sd", "model": GR_MODEL, "modality": "image"},
                                "tf-sd-lan": {"backend": "lan", "model": GR_MODEL, "modality": "image",
-                                             "options": {"max_n": 16, "max_pixels": 67108864}},
-                               "tf-sd-keyed": {"backend": "keyed", "model": GR_MODEL, "modality": "image"}}}
+                                             "options": {"max_n": 8, "max_pixels": 16777216}}}}
                     if mutate is not None:
                         mutate(cfg)
                     counter[0] += 1
                     return write_config(box, cfg, filename="r1-%d.json" % counter[0])
 
                 where = "routes.%s" % GR_KEY
-                cfg, problems = ga_accepted(mod, write(), "sdcpp: loopback http, a LAN http, an api_key with auth_header none")
+                cfg, problems = ga_accepted(mod, write(), "sdcpp: loopback http, a LAN http, auth_header none")
                 if cfg is not None:
                     route, lan = cfg.routes.get(GR_KEY), cfg.routes.get("tf-sd-lan")
                     if getattr(route, "modality", None) != "image" or dict(getattr(route, "options", {"x": 1})) != {}:
@@ -19032,14 +19066,26 @@ def group_r(suite, fixture_root):
                     if getattr(route, "model", None) != GR_MODEL:
                         problems.append("the route model %r differs from its configured upstream name: sdcpp "
                                         "routes need no key == model" % getattr(route, "model", None))
-                    if lan is None or dict(lan.options) != {"max_n": 16, "max_pixels": 67108864}:
+                    if lan is None or dict(lan.options) != {"max_n": 8, "max_pixels": 16777216}:
                         problems.append("the options at their upper bounds were not kept")
                     backend = cfg.backends.get("sd")
                     if getattr(backend, "kind", None) != "sdcpp" or getattr(backend, "auth_header", None) != "none":
                         problems.append("backend sd is not kind sdcpp with auth_header none")
-                    keyed = cfg.backends.get("keyed")
-                    if getattr(keyed, "auth_header", None) != "none":
-                        problems.append("an api_key with auth_header none changed the auth header")
+                    lan_backend = cfg.backends.get("lan")
+                    if getattr(lan_backend, "auth_header", None) != "none" or getattr(lan_backend, "api_key", 1) is not None:
+                        problems.append("an sdcpp backend without auth_header is not forced to auth_header none, no key")
+                # V9: sd-server has no authentication; a credential for it is a config error naming the path.
+                for label, extra, needle in (
+                        ("an api_key", {"api_key": TF_KEY_PASS}, "backends.lan.api_key"),
+                        ("an api_key with auth_header none", {"api_key": TF_KEY_PASS, "auth_header": "none"},
+                         "backends.lan.api_key"),
+                        ("an api_key with auth_header x-api-key", {"api_key": TF_KEY_PASS, "auth_header": "x-api-key"},
+                         "backends.lan.api_key"),
+                        ("auth_header x-api-key", {"auth_header": "x-api-key"}, "backends.lan.auth_header"),
+                        ("auth_header authorization", {"auth_header": "authorization"}, "backends.lan.auth_header")):
+                    problems += ga_refused(
+                        mod, write(lambda c, e=extra: c["backends"]["lan"].update(e)), [needle, "sdcpp"],
+                        "sdcpp backend with " + label, absent=(TF_KEY_PASS,))
                 for label, mutate in (
                         ("a route with no modality (chat)", lambda c: c["routes"][GR_KEY].pop("modality")),
                         ("modality chat", lambda c: c["routes"][GR_KEY].__setitem__("modality", "chat"))):
@@ -19052,8 +19098,9 @@ def group_r(suite, fixture_root):
                         "kind": "sdcpp", "base_url": "https://127.0.0.1:8443", "auth_header": "none",
                         "allow_private": False, "allow_loopback": True})),
                     ["backends.sd.allow_loopback", "requires allow_private"], "allow_loopback without allow_private")
-                for key, value in (("max_n", 0), ("max_n", 17), ("max_n", True), ("max_n", "2"),
-                                   ("max_pixels", 65535), ("max_pixels", 67108865), ("max_pixels", 1.5)):
+                for key, value in (("max_n", 0), ("max_n", 9), ("max_n", 16), ("max_n", True), ("max_n", "2"),
+                                   ("max_pixels", 65535), ("max_pixels", 16777217), ("max_pixels", 67108864),
+                                   ("max_pixels", 1.5)):
                     problems += ga_refused(
                         mod, write(lambda c, k=key, v=value: c["routes"][GR_KEY].__setitem__("options", {k: v})),
                         [where + ".options." + key], "option %s = %r" % (key, value))
@@ -19066,8 +19113,9 @@ def group_r(suite, fixture_root):
                     ["backends.sd.kind: must be one of passthrough, llamacpp, mistral, codex, openai, sdcpp"],
                     "the unknown-kind refusal lists sdcpp")
                 return problems, ["accepted    : sdcpp on http://127.0.0.1 (both flags), on a LAN http:// (allow_private), "
-                                  "an api_key beside auth_header none; model != key; options at their bounds",
-                                  "refused     : a chat route, http:// without allow_private, allow_loopback alone, "
+                                  "forced to auth_header none; model != key; options at their bounds (8, 4096*4096)",
+                                  "refused     : an api_key or an auth_header other than none (path named, never the "
+                                  "value), a chat route, http:// without allow_private, allow_loopback alone, "
                                   "max_n / max_pixels out of range, an unknown option by name, the kind list"]
 
             def r2():
@@ -19081,8 +19129,19 @@ def group_r(suite, fixture_root):
                     ("response_format url", gq_json_body(GR_KEY, response_format="url"), "response_format"),
                     ("webp on generations", gq_json_body(GR_KEY, output_format="webp"), "output_format"),
                     ("size over max_pixels", gq_json_body(GR_KEY, size="2049x2048"), "size"),
-                    ("size 0 wide", gq_json_body(GR_KEY, size="0x1024"), "size"),
+                    ("size 0 wide", gq_json_body(GR_KEY, size="0x1024"), "size: must be auto or WIDTHxHEIGHT"),
+                    ("size with a leading zero", gq_json_body(GR_KEY, size="01024x1024"),
+                     "size: must be auto or WIDTHxHEIGHT"),
                     ("size garbage", gq_json_body(GR_KEY, size="abcxdef"), "size: must be auto or WIDTHxHEIGHT"),
+                    ("output_compression 101", gq_json_body(GR_KEY, output_compression=101), "output_compression"),
+                    ("output_compression negative", gq_json_body(GR_KEY, output_compression=-1), "output_compression"),
+                    ("output_compression a bool", gq_json_body(GR_KEY, output_compression=True),
+                     "output_compression: must be an integer"),
+                    ("output_compression a string", gq_json_body(GR_KEY, output_compression="50"),
+                     "output_compression: must be an integer"),
+                    ("output_compression a float", gq_json_body(GR_KEY, output_compression=50.5),
+                     "output_compression: must be an integer"),
+                    ("a capitalised Output_Compression", gq_json_body(GR_KEY, Output_Compression=5), "lower case"),
                     ("small route: n 3", gq_json_body(GR_SMALL, n=3), "n must be 1-2 for this route"),
                     ("small route: 513x512", gq_json_body(GR_SMALL, size="513x512"), "size"),
                 ]
@@ -19096,9 +19155,26 @@ def group_r(suite, fixture_root):
                         ("n over max_n", [("n", "5")], "n must be 1-4 for this route"),
                         ("n not an integer", [("n", "abc")], "n: must be an integer"),
                         ("response_format url", [("response_format", "url")], "response_format"),
-                        ("size over max_pixels", [("size", "4096x4096")], "size")):
+                        ("size over max_pixels", [("size", "4096x4096")], "size"),
+                        # V3: sd-server takes an edit's size from the uploaded image when it is absent or auto.
+                        ("size absent", [], "size: an explicit WxH is required on this route"),
+                        ("size auto", [("size", "auto")], "size: an explicit WxH is required on this route"),
+                        ("size absent beside n", [("n", "2")], "size: an explicit WxH is required on this route"),
+                        ("output_compression 101", [("size", "512x512"), ("output_compression", "101")],
+                         "output_compression"),
+                        ("output_compression abc", [("size", "512x512"), ("output_compression", "abc")],
+                         "output_compression"),
+                        ("a capitalised Size part", [("Size", "512x512")], "size: must be spelled exactly in lower case"),
+                        ("a capitalised Stream part", [("size", "512x512"), ("Stream", "true")],
+                         "stream: must be spelled exactly in lower case")):
                     ctype, mp = gq_multipart("tfr2b", shape + extra, files)
                     problems += refuse("edits, " + label, GQ_EDIT, mp, ctype, needle)
+                for label, body, needle in (
+                        ("small route, size absent", gq_multipart("tfr2b", [("model", GR_SMALL), ("prompt", "x")], files),
+                         "size: an explicit WxH is required on this route"),
+                        ("small route, 513x512", gq_multipart("tfr2b", [("model", GR_SMALL), ("prompt", "x"),
+                                                                       ("size", "513x512")], files), "size")):
+                    problems += refuse("edits, " + label, GQ_EDIT, body[1], body[0], needle)
                 problems += refuse("a JSON-form edit", GQ_EDIT, json.dumps({"model": GR_KEY, "prompt": "x"}).encode(),
                                    "application/json", "this route accepts multipart edits only")
                 allowed = [
@@ -19107,14 +19183,24 @@ def group_r(suite, fixture_root):
                     ("jpeg, size auto", GQ_GEN, gq_json_body(GR_KEY, output_format="jpeg", size="auto"), "application/json"),
                     ("small route at its bounds", GQ_GEN, gq_json_body(GR_SMALL, n=2, size="512x512"), "application/json"),
                     ("stream false", GQ_GEN, gq_json_body(GR_KEY, stream=False), "application/json"),
+                    # V3: generations keep the server's operator-set default when size is absent or auto.
+                    ("size absent", GQ_GEN, gq_json_body(GR_KEY), "application/json"),
+                    ("size auto", GQ_GEN, gq_json_body(GR_KEY, size="auto"), "application/json"),
+                    ("output_compression 0", GQ_GEN, gq_json_body(GR_KEY, output_compression=0), "application/json"),
+                    ("output_compression 100", GQ_GEN, gq_json_body(GR_KEY, output_compression=100), "application/json"),
                     ("quality/background/moderation left alone", GQ_GEN, gq_json_body(
                         GR_KEY, quality="high", background="auto", moderation="low"), "application/json")]
                 ctype, mp = gq_multipart("tfr2b", shape + [("n", "2"), ("size", "1024x1024")], files)
                 allowed.append(("multipart edit, n 2", GQ_EDIT, mp, ctype))
+                ctype, mp = gq_multipart("tfr2b", shape + [("size", "2048x2048"), ("output_compression", "100")], files)
+                allowed.append(("multipart edit at max_pixels, output_compression 100", GQ_EDIT, mp, ctype))
+                ctype, mp = gq_multipart("tfr2b", [("model", GR_SMALL), ("prompt", "x"), ("size", "512x512")], files)
+                allowed.append(("multipart edit on the small route at its bound", GQ_EDIT, mp, ctype))
                 for label, path, body, ct in allowed:
                     problems += passes(label, path, body, ct)
-                return problems, ["refused     : %d generations and 7 edits guards (stream, n, webp on both endpoints, "
-                                  "url, size, a JSON edit), each 400 with the peer untouched" % len(gens),
+                return problems, ["refused     : %d generations and 16 edits guards (stream, n, webp on both endpoints, "
+                                  "url, size, an absent or auto edit size, output_compression, a part-name case, a JSON "
+                                  "edit), each 400 with the peer untouched" % len(gens),
                                   "passed      : %d allowed requests reach the peer byte-identical" % len(allowed)]
 
             def r3():
@@ -19123,7 +19209,8 @@ def group_r(suite, fixture_root):
                 obj = gr_ok_obj(*images, usage={"total_tokens": 9}, junk="tf-r3-junk")
                 obj["data"][0]["extra"] = "tf-r3-extra"
                 status, hdrs, answer = ask([("respond_json", 200, obj, (GR_CORS, ("Server", "tf-sd-server"),
-                                                                         ("X-Tf-Upstream", "1")))])
+                                                                         ("X-Tf-Upstream", "1")))],
+                                           body=gq_json_body(GR_KEY, n=3))
                 if status != 200:
                     return gq_expect("success", status, answer, 200), []
                 try:
@@ -19162,9 +19249,41 @@ def group_r(suite, fixture_root):
                 for label, body in malformed:
                     status, _h, answer = ask([("respond_json", 200, body)])
                     problems += gq_expect("2xx with " + label, status, answer, 502, absent=("tf-r3-html",))
+                # V7: 1 <= len(data) <= the requested n (absent n = 1), else the answer is not an image result.
+                count_cases = [
+                    ("an empty data list, n absent", {"data": []}, None, 502),
+                    ("an empty data list, n 2", {"data": []}, 2, 502),
+                    ("two entries, n absent", gr_ok_obj("QUFB", "QkJC"), None, 502),
+                    ("two entries, n 1", gr_ok_obj("QUFB", "QkJC"), 1, 502),
+                    ("five entries, n 4", gr_ok_obj(*["QUFB"] * 5), 4, 502),
+                    ("one entry, n absent", gr_ok_obj("QUFB"), None, 200),
+                    ("exactly n entries, n 2", gr_ok_obj("QUFB", "QkJC"), 2, 200),
+                    ("fewer than n entries, n 4", gr_ok_obj("QUFB"), 4, 200),
+                    ("exactly n entries, n 4", gr_ok_obj(*["QUFB"] * 4), 4, 200)]
+                for label, up_obj, n, want in count_cases:
+                    req = gq_json_body(GR_KEY) if n is None else gq_json_body(GR_KEY, n=n)
+                    status, _h, answer = ask([("respond_json", 200, up_obj)], body=req)
+                    problems += gq_expect("2xx with " + label, status, answer, 502, "not an image result") \
+                        if want == 502 else ([] if status == 200 else gq_expect("2xx with " + label, status, answer, 200))
+                # V7 on edits: n comes from the multipart field.
+                ctype, mp = gq_multipart("tfr3b", [("model", GR_KEY), ("prompt", "x"), ("size", "512x512"), ("n", "2")],
+                                         [("image", "a.png", "image/png", b"\x89PNG")])
+                status, _h, answer = ask([("respond_json", 200, gr_ok_obj("QUFB", "QkJC", "Q0ND"))], GQ_EDIT, mp, ctype)
+                problems += gq_expect("2xx with three entries, edit n 2", status, answer, 502, "not an image result")
+                status, _h, answer = ask([("respond_json", 200, gr_ok_obj("QUFB", "QkJC"))], GQ_EDIT, mp, ctype)
+                problems += [] if status == 200 else gq_expect("2xx with two entries, edit n 2", status, answer, 200)
+                # V10: a rebuilt answer is a 200 whatever 2xx the upstream used.
+                for up_status in (201, 202, 203):
+                    status, _h, answer = ask([("respond_json", up_status, gr_ok_obj())])
+                    if status != 200:
+                        problems.append("an upstream %d was relayed as %r, expected 200" % (up_status, status))
+                    elif json.loads(answer.decode("utf-8")).get("data") != [{"b64_json": GR_B64}]:
+                        problems.append("an upstream %d was not mapped" % up_status)
                 return problems, ["mapped      : {created, output_format, data:[{b64_json}]} in order; generation_info, usage "
-                                  "and every other key dropped; no upstream header relayed",
-                                  "malformed   : %d shapes of a 2xx are a 502 with a fixed text" % len(malformed)]
+                                  "and every other key dropped; no upstream header relayed; an upstream 201/202/203 is a 200",
+                                  "malformed   : %d shapes of a 2xx are a 502 with a fixed text" % len(malformed),
+                                  "count       : %d data-length cases against the requested n (0 or more than n: 502)"
+                                  % (len(count_cases) + 2)]
 
             def r4():
                 problems = []
@@ -19180,8 +19299,9 @@ def group_r(suite, fixture_root):
                     ("503 no model loaded", [("respond_json", 503, {"error": "No model is loaded",
                                                                     "code": "model_not_loaded"})],
                      503, "the image backend has no model loaded", ("No model is loaded",)),
-                    ("503 model loading", [("respond_json", 503, {"error": "Model is loading", "code": "model_loading"})],
-                     503, None, None),
+                    ("503 model loading", [("respond_json", 503, {"error": "Model is loading tf-r4-load",
+                                                                  "code": "model_loading"})],
+                     503, "the image backend is loading its model", ("Model is loading", "tf-r4-load")),
                     ("503 without a code", [("respond_json", 503, {"error": "busy tf-r4-busy"})],
                      529, "backend tfr answered 503", ("tf-r4-busy",)),
                     ("404 empty body, no Content-Type", [("respond_raw", b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n"
@@ -19256,7 +19376,7 @@ def group_r(suite, fixture_root):
                 problems = []
                 hostile = {"x-api-key": TF_CLIENT_XKEY, "Cookie": "tf=1", "Proxy-Authorization": "Basic dGY6dGY=",
                            "Api-Key": TF_CLIENT_XKEY, "OpenAI-Organization": "org-tf"}
-                for route in (GR_KEY, GR_KEYED):
+                for route in (GR_KEY,):
                     before = len(peer.requests)
                     status, _h, answer = gq_post(client, GQ_GEN, gq_json_body(route), headers=hostile)
                     problems += [] if status == 200 else gq_expect(route, status, answer, 200)
@@ -19270,16 +19390,16 @@ def group_r(suite, fixture_root):
                             problems.append("%s: the peer got a %s header" % (route, name))
                     joined = " ".join(v for vals in seen.values() for v in vals)
                     for label, value in (("the router token", TF_ROUTER_TOKEN), ("the client's key", TF_CLIENT_XKEY),
-                                         ("the configured api_key", TF_KEY_PASS)):
+                                         ("a key that is configured nowhere", TF_KEY_PASS)):
                         if value in joined:
                             problems.append("%s: the peer's headers carry %s" % (route, label))
                 return problems, ["peer        : no authorization / x-api-key / cookie, with a client that sent them all; "
-                                  "a configured api_key beside auth_header none is accepted and never sent"]
+                                  "the kind takes no api_key at all (R1 refuses one at load)"]
 
             def r7():
                 problems = []
                 png = b"\x89PNG\r\n\x1a\n\r\n--fragment\r\n" + b'name="model"' + bytes(range(256)) * 4
-                ctype, mp = gq_multipart("tfr7'+_" + "b" * 20, [("model", GR_KEY), ("prompt", "tf r7 edit"), ("n", "1")],
+                ctype, mp = gq_multipart("tfr7'+_" + "b" * 20, [("model", GR_KEY), ("prompt", "tf r7 edit"), ("n", "1"), ("size", "512x512")],
                                          [("image", "tf.png", "image/png", png)])
                 before = len(peer.requests)
                 status, _h, answer = gq_post(client, GQ_EDIT, mp, ctype)
@@ -19316,9 +19436,10 @@ def group_r(suite, fixture_root):
 
             def r8():
                 problems = []
-                count, size = 40, 100 * 1024
+                count, size = 4, 1024 * 1024
                 images = [chr(65 + i % 26) * size for i in range(count)]
-                status, _h, answer = ask([("respond_json", 200, gr_ok_obj(*images))], raw=True)
+                status, _h, answer = ask([("respond_json", 200, gr_ok_obj(*images))], body=gq_json_body(GR_KEY, n=count),
+                                         raw=True)
                 if status != 200:
                     problems += gq_expect("a 4 MiB data list", status, answer, 200)
                 else:
@@ -19334,7 +19455,7 @@ def group_r(suite, fixture_root):
                 problems += gq_expect("a 2xx one byte over the upstream limit", status, answer, 502)
                 if len(answer) > 4096:
                     problems.append("the over-limit answer has %d body byte(s), expected a small envelope" % len(answer))
-                return problems, ["mapped      : 40 images of 100 KiB (4 MiB) in a data list, intact",
+                return problems, ["mapped      : 4 images of 1 MiB (4 MiB, n 4) in a data list, intact",
                                   "bound       : a 2xx of _UPSTREAM_BODY_LIMIT + 1 bytes is a 502, no partial body"]
 
             def sweep_router(label):
@@ -19367,7 +19488,7 @@ def group_r(suite, fixture_root):
                         problems.append("the planted b64 did not come back (status %r)" % status)
                     if info_s.encode() in back:
                         problems.append("generation_info reached the client")
-                    ctype, mp = gq_multipart("tfr9b", [("model", GR_KEY), ("prompt", prompt_s)],
+                    ctype, mp = gq_multipart("tfr9b", [("model", GR_KEY), ("prompt", prompt_s), ("size", "512x512")],
                                              [("image", "a.png", "image/png", b"\x89PNG" + prompt_s.encode())])
                     status, _h, back = ask([("respond_json", 200, ok)], GQ_EDIT, mp, ctype, raw=True, who=lc)
                     status, _h, back = ask([("respond_json", 400, {"error": "tf r9 " + prompt_s + " " + info_s})],
@@ -19396,7 +19517,11 @@ def group_r(suite, fixture_root):
                             ("upper case", "a cat SD_CPP_EXTRA_ARGS"),
                             ("mixed case", "Sd_Cpp_Extra_Args at the start"),
                             ("only the closing tag", "</sd_cpp_extra_args> a cat"),
-                            ("the bare word", "sd_cpp_extra_args")]
+                            ("the bare word", "sd_cpp_extra_args"),
+                            # casefold maps U+017F (long s) to "s": the substring test over-refuses it on purpose
+                            # (fail closed; sd-server's own case-sensitive tag regex would not match it)
+                            ("long s U+017F, casefold over-refuses", "a cat ſd_cpp_extra_args"),
+                            ("long s in an upper-case spelling", "ſD_CPP_EXTRA_ARGS")]
                 for label, prompt in variants:
                     problems += refuse("generations, " + label, GQ_GEN, gq_json_body(GR_KEY, prompt), "application/json",
                                        GR_REFUSAL, absent=(prompt,))
@@ -19417,7 +19542,8 @@ def group_r(suite, fixture_root):
                            ("exactly 32 KiB", "a" * 32768)]
                 for label, prompt in passing:
                     problems += passes("generations, " + label, GQ_GEN, gq_json_body(GR_KEY, prompt))
-                ctype, mp = gq_multipart("tfr11b", [("model", GR_KEY), ("prompt", 'draw {"steps": 999} (x)')],
+                ctype, mp = gq_multipart("tfr11b", [("model", GR_KEY), ("prompt", 'draw {"steps": 999} (x)'),
+                                                    ("size", "512x512")],
                                          [("image", "a.png", "image/png", b"\x89PNG")])
                 problems += passes("edits, braces", GQ_EDIT, mp, ctype)
                 problems += refuse("an unterminated opener", GQ_GEN, gq_json_body(GR_KEY, "a cat <sd_cpp_extra_args>{"),
@@ -19426,7 +19552,7 @@ def group_r(suite, fixture_root):
                                    "application/json", "prompt: is over 32768 bytes")
                 ctype, mp = gq_multipart("tfr11b", [("model", GR_KEY), ("prompt", "a" * 32769)], [])
                 problems += refuse("32 KiB + 1, edits", GQ_EDIT, mp, ctype, "prompt: is over 32768 bytes")
-                ctype, mp = gq_multipart("tfr11b", [("model", GR_KEY), ("prompt", "a" * 32768)],
+                ctype, mp = gq_multipart("tfr11b", [("model", GR_KEY), ("prompt", "a" * 32768), ("size", "512x512")],
                                          [("image", "a.png", "image/png", b"\x89PNG")])
                 problems += passes("edits, exactly 32 KiB", GQ_EDIT, mp, ctype)
                 return problems, ["passed      : braces / JSON-looking text, quotes, parentheses, < and exactly 32768 bytes "
@@ -19481,7 +19607,7 @@ def group_r(suite, fixture_root):
                         problems.append("POST %s: status %r, expected 400 or 404" % (path, status))
                 problems += untouched(before, "the hostile models and paths")
                 evil = gq_json_body(GR_EVIL)
-                ctype, mp = gq_multipart("tfr13b", [("model", GR_EVIL), ("prompt", "x")], [])
+                ctype, mp = gq_multipart("tfr13b", [("model", GR_EVIL), ("prompt", "x"), ("size", "512x512")], [])
                 for path, raw, ct in ((GQ_GEN, evil, "application/json"), (GQ_EDIT, mp, ctype)):
                     status, _h, body = gq_post(client, path, raw, ct)
                     if status != 200:
@@ -19894,8 +20020,9 @@ GT_CASES = (
     "no sentinel in a log or error",     # T8
     "non-2xx JSON, non-SSE 2xx",         # T9
     "ImageEventRelay sans-IO unit",      # T10
+    "data-only completed event ends",    # T11
 )
-GT_IDS = ("T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9", "T10")
+GT_IDS = ("T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9", "T10", "T11")
 GT_NAMES = {"generations": ("image_generation.partial_image", "image_generation.completed"),
             "edits": ("image_edit.partial_image", "image_edit.completed")}
 GT_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB"
@@ -20627,9 +20754,100 @@ def gt_t10(ctx):
                       "IMAGE_STREAMING true for openai only" % (line_limit >> 20, event_limit >> 20)]
 
 
+def gt_data_only(kind, b64, index=None):
+    """The two lines (bytes, no terminator) of an image event that carries no `event:` line: data, blank."""
+    return [b"data: " + gt_data(kind, b64, index), b""]
+
+
+def gt_t11(ctx):
+    """T11: completion is also read from a data-only event: no `event:` line, the data JSON's `type` ending in
+    `.completed` within the first 512 bytes of the data line (a regex, never a parse of a multi-MiB line).
+    In-process on the relay and end to end against the peer: partial images then a completed event bigger
+    than 2 MiB, all without `event:` lines, ends the stream byte-exact and a stray event after it is dropped;
+    an `event:` line still completes by its name when `type` is not within the first 512 bytes; a data-only
+    event whose `type` is past 512 bytes does not complete (the declared bound)."""
+    mod, client, state = ctx["mod"], ctx["client"], ctx["state"]
+    problems = []
+    if mod is None or not hasattr(mod, "ImageEventRelay"):
+        return ["cannot import the router (ImageEventRelay)"], []
+    part, done = GT_NAMES["generations"]
+    fake = types.SimpleNamespace(scrub=lambda t: t, backend=types.SimpleNamespace(name="tfq"))
+    # In-process: data-only partials do not close, the data-only completed event does (LF, CRLF, one chunk).
+    relay = mod.ImageEventRelay(fake)
+    for index in range(2):
+        wire = gt_wire(gt_data_only(part, GT_B64, index))
+        if relay.feed(wire) != wire or relay.closed:
+            problems.append("a data-only partial image was not relayed whole and open")
+    wire = gt_wire(gt_data_only(done, GT_B64))
+    if relay.feed(wire) != wire or not relay.closed:
+        problems.append("a data-only completed event was not relayed whole, or the relay is not closed after it")
+    if relay.feed(b"data: x\n\n") != b"" or relay.finish() != b"":
+        problems.append("a closed relay still produced bytes after a data-only completed event")
+    relay = mod.ImageEventRelay(fake)
+    crlf = b"".join(line + b"\r\n" for line in gt_data_only(done, GT_B64))
+    if b"".join(relay.feed(line) for line in crlf.splitlines(True)) != crlf or not relay.closed:
+        problems.append("a CRLF data-only completed event line by line was not relayed whole and closing")
+    relay = mod.ImageEventRelay(fake)
+    other = b'data: {"type":"image_generation.partial_image","note":"a .completed word","partial_image_index":0}\n\n'
+    if relay.feed(other) != other or relay.closed:
+        problems.append("a data-only partial whose text merely mentions .completed closed the relay")
+    # The 512-byte window: `type` past it on a data-only event is not read; the event: name still completes.
+    late = b'data: {"pad":"' + b"A" * 600 + b'","type":"image_generation.completed"}\n\n'
+    relay = mod.ImageEventRelay(fake)
+    if relay.feed(late) != late or relay.closed:
+        problems.append("a data-only event with `type` past the first 512 bytes closed the relay (the window is the bound)")
+    named = b"event: " + done.encode() + b"\n" + late
+    relay = mod.ImageEventRelay(fake)
+    if relay.feed(named) != named or not relay.closed:
+        problems.append("an `event:` named completed event with `type` past 512 bytes did not close the relay")
+    within = b'data: {"pad":"' + b"A" * 400 + b'","type":"image_edit.completed"}\n\n'
+    relay = mod.ImageEventRelay(fake)
+    if relay.feed(within) != within or not relay.closed:
+        problems.append("a data-only completed event with `type` at ~420 bytes did not close the relay")
+    relay = mod.ImageEventRelay(fake)
+    huge = b"data: " + b'{"type":"image_generation.completed","b64_json":"' + b"A" * (3 << 20) + b'"}\n\n'
+    started = time.monotonic()
+    if relay.feed(huge[:-1]) != b"" or relay.feed(huge[-1:]) != huge or not relay.closed:
+        problems.append("a 3 MiB data-only completed event was not relayed whole and closing")
+    if time.monotonic() - started > 5.0:
+        problems.append("a 3 MiB data-only completed event took %.1f s: the line must not be parsed" % (time.monotonic() - started))
+    # End to end: partial images and a 3 MiB completed event, no event: lines, then a stray event.
+    body = gq_json_body(GQ_IMG, "tf t11", stream=True)
+    stream = gt_data_only(part, GT_B64, 0) + gt_data_only(part, GT_B64, 1) + gt_data_only(done, "A" * (3 << 20)) \
+        + gt_data_only(part, GT_B64, 9)
+    want = gt_wire(stream[:6])
+    try:
+        state["script"] = lambda _i, _r: [("respond_sse", stream)]
+        status, _h, raw = gq_post_raw(client, GQ_GEN, body, timeout=60.0)
+        if status != 200 or raw != want:
+            problems.append("data-only stream: status %r, %d byte(s) back, expected the %d bytes up to and including "
+                            "the completed event" % (status, len(raw), len(want)))
+        # event: lines present, `type` past 512 bytes in the completed event: the name ends the stream.
+        pad = json.dumps({"b64_json": "A" * 2000, "type": done}, separators=(",", ":")).encode("ascii")
+        named_stream = gt_event(part, GT_B64, 0) + [b"event: " + done.encode(), b"data: " + pad, b""] \
+            + gt_event(part, GT_B64, 9)
+        want = gt_wire(named_stream[:6])
+        state["script"] = lambda _i, _r: [("respond_sse", named_stream)]
+        status, _h, raw = gq_post_raw(client, GQ_GEN, body, timeout=60.0)
+        if status != 200 or raw != want:
+            problems.append("named stream, `type` past 512 bytes: status %r, %d byte(s) back, expected the %d bytes up "
+                            "to the completed event" % (status, len(raw), len(want)))
+        # A data-only stream that never completes is still an early EOF.
+        early = gt_data_only(part, GT_B64, 0)
+        state["script"] = lambda _i, _r: [("respond_sse", early)]
+        status, _h, raw = gq_post_raw(client, GQ_GEN, body, timeout=60.0)
+        problems += gt_tail_error("data-only early EOF", raw, gt_wire(early), needle="ended the stream early") \
+            if status == 200 else ["data-only early EOF: status %r, expected the 200 head" % status]
+    finally:
+        state["script"] = None
+    return problems, ["data-only   : a completed event with no `event:` line ends the stream when its `type` ends in "
+                      ".completed within 512 bytes (3 MiB event relayed whole); the event: name path is unchanged",
+                      "bound       : `type` past 512 bytes on a data-only event is not read; an early EOF stays an error"]
+
+
 def group_t(suite, fixture_root):
     """T. streamed image responses (Plan phase 4).  One openai api_key router in front of one scripted peer
-    serves T1-T3, T7 and T9; T4, T6 and T8 start their own (a debug log, an image cap); T5 runs in-process
+    serves T1-T3, T7, T9 and T11; T4, T6 and T8 start their own (a debug log, an image cap); T5 runs in-process
     at millisecond deadlines; T10 and the parser half of T1 run on the loaded module."""
     results = {}
     setup = "case did not run"
@@ -20654,7 +20872,8 @@ def group_t(suite, fixture_root):
                    "client": proc.client() if port is not None else None, "router_why": router_why}
             got = {}
             in_process = (gt_t5, gt_t10)
-            for cid, fn in zip(GT_CASES, (gt_t1, gt_t2, gt_t3, gt_t4, gt_t5, gt_t6, gt_t7, gt_t8, gt_t9, gt_t10)):
+            for cid, fn in zip(GT_CASES, (gt_t1, gt_t2, gt_t3, gt_t4, gt_t5, gt_t6, gt_t7, gt_t8, gt_t9, gt_t10,
+                                 gt_t11)):
                 if router_why is not None and fn not in in_process and fn is not gt_t1:
                     got[cid] = ([router_why], [])
                     continue
