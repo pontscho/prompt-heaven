@@ -18854,6 +18854,663 @@ def group_q(suite, fixture_root):
 
 
 # ---------------------------------------------------------------------------
+# Group R: the sdcpp kind (a stable-diffusion.cpp sd-server behind the image endpoints; Plan Phase 2)
+# ---------------------------------------------------------------------------
+
+# The fixtures follow a live probe of sd-server (FLUX Klein, 2026-10-27): a 200 carries
+# {created, output_format, data:[{b64_json, generation_info}]} and no usage, every answer carries
+# Access-Control-Allow-Origin: *, a validation 400 is {"error": "<string>"}, a 404 has an empty body.
+GR = "R. sdcpp images"
+GR_CASES = (
+    "sdcpp kind config",                 # R1
+    "sdcpp request guards (400)",        # R2
+    "answer mapped, nothing extra",      # R3
+    "sd-server errors mapped",           # R4
+    "loopback/LAN policy as llamacpp",   # R5
+    "no credential reaches the peer",    # R6
+    "request bytes forwarded as-is",     # R7
+    "answer size bound",                 # R8
+    "no b64/info/prompt in a log",       # R9
+    "prompt args marker refused",        # R10
+    "no brace rule, 32 KiB cap",         # R11
+    "refusal text and log hygiene",      # R12
+    "upstream path never client's",      # R13
+)
+GR_IDS = ("R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8", "R9", "R10", "R11", "R12", "R13")
+GR_KEY = "tf-sd"                    # an image route on the sdcpp backend (the upstream model differs: sd ignores it)
+GR_MODEL = "sd-cpp-local"
+GR_SMALL = "tf-sd-small"            # max_n 2, max_pixels 262144 (512 x 512)
+GR_KEYED = "tf-sd-key"              # a backend that carries an api_key with auth_header none
+GR_EVIL = "tf-sd-evil"              # an upstream model spelled like a traversal
+GR_MARKER = "sd_cpp_extra_args"
+GR_REFUSAL = "the prompt carries sd.cpp native arguments; not allowed on this route"
+GR_B64 = "iVBORw0KGgo="
+GR_CORS = ("Access-Control-Allow-Origin", "*")
+GR_PROMPT_SENTINELS = (("TF_SD_PROMPT", "tf-sd-prompt-SENTINEL-" + secrets.token_hex(8)),
+                       ("TF_SD_B64", "tf-sd-b64-SENTINEL-" + secrets.token_hex(8)),
+                       ("TF_SD_INFO", "tf-sd-info-SENTINEL-" + secrets.token_hex(8)))
+
+
+def gr_ok_obj(*b64s, **extra):
+    """An sd-server success body: one entry per image, each with a generation_info (seed as a string)."""
+    obj = {"created": 1700000000, "output_format": "png",
+           "data": [{"b64_json": b, "generation_info": {"seed": "1234", "steps": 20}} for b in (b64s or (GR_B64,))]}
+    obj.update(extra)
+    return obj
+
+
+def gr_config(peer_url):
+    """The R router's config: sdcpp image routes (default, small, keyed, evil model), a loopback-refused
+    sdcpp backend and a llamacpp twin for the policy comparison."""
+    def sd(**extra):
+        entry = {"kind": "sdcpp", "base_url": peer_url, "auth_header": "none"}
+        entry.update(extra)
+        return entry
+    def route(backend, model=GR_MODEL, **extra):
+        entry = {"backend": backend, "model": model, "modality": "image"}
+        entry.update(extra)
+        return entry
+    return {
+        "auth_token": TF_ROUTER_TOKEN,
+        "backends": {
+            "tfr": sd(),
+            "tfr-key": sd(api_key=TF_KEY_PASS),
+            "tfr-off": sd(allow_loopback=False),
+            "tfr-ll-off": {"kind": "llamacpp", "base_url": peer_url, "allow_loopback": False},
+        },
+        "routes": {
+            GR_KEY: route("tfr"),
+            GR_SMALL: route("tfr", options={"max_n": 2, "max_pixels": 262144}),
+            GR_KEYED: route("tfr-key"),
+            GR_EVIL: route("tfr", model="../sdcpp/v1/models/load"),
+            "tf-sd-off": route("tfr-off"),
+            "tf-ll-off": {"backend": "tfr-ll-off", "model": "tf-ll-up"},
+        },
+    }
+
+
+def gr_script_default(_index, _request):
+    return [("respond_json", 200, gr_ok_obj(), (GR_CORS,))]
+
+
+def group_r(suite, fixture_root):
+    """R. the sdcpp kind (Plan phase 2): one sdcpp router in front of one scripted peer serves most
+    cases; R5, R8, R9 and R12 start their own router.  R1 runs in-process on the loaded module.  Every
+    refusal case also checks that the peer saw nothing."""
+    results = {}
+    setup = "case did not run"
+    try:
+        mod = H.load_module_from_path("ph_llm_router_r", SERVER)
+    except Exception:  # noqa: BLE001 -- R1 then fails with the reason
+        mod = None
+    state = {"script": None}
+    peer = ScriptedPeer(script=lambda i, r: (state["script"] or gr_script_default)(i, r))
+    proc = None
+    try:
+        sandbox = new_sandbox(fixture_root, "sdcpp")
+        proc = RouterProc(sandbox, write_config(sandbox, gr_config(peer.url())), label="sdcpp")
+        port = proc.wait_ready()
+        router_why = None
+        if port is None:
+            router_why = "the router did not start: %s" % gi_redact(
+                proc.stderr_text().strip().splitlines()[-1] if proc.stderr_text().strip() else "(no stderr)")[:200]
+        with peer:
+            client = proc.client()
+            got = {}
+
+            def untouched(before, label):
+                return ["%s: the peer saw %d request(s), expected none" % (label, len(peer.requests) - before)] \
+                    if len(peer.requests) != before else []
+
+            def ask(steps, path=GQ_GEN, body=None, ctype="application/json", raw=False, who=None, timeout=60.0):
+                """One request with the peer scripted to *steps* (None: the default 200); *raw*: an answer that
+                is not recorded for I2's and J5's sweeps."""
+                if steps is not None:
+                    state["script"] = lambda _i, _r: steps
+                try:
+                    body = body if body is not None else gq_json_body(GR_KEY)
+                    if raw:
+                        return gq_post_raw(who or client, path, body, ctype, timeout=timeout)
+                    return gq_post(who or client, path, body, ctype)
+                finally:
+                    state["script"] = None
+
+            def refuse(label, path, body, ctype, needle, absent=()):
+                before = len(peer.requests)
+                status, _h, answer = gq_post(client, path, body, ctype)
+                return gq_expect(label, status, answer, 400, needle, absent) + untouched(before, label)
+
+            def passes(label, path, body, ctype="application/json"):
+                before = len(peer.requests)
+                status, _h, answer = gq_post(client, path, body, ctype)
+                problems = [] if status == 200 else gq_expect(label, status, answer, 200)
+                if len(peer.requests) != before + 1:
+                    return problems + ["%s: the peer saw %d request(s), expected 1" % (label, len(peer.requests) - before)]
+                if peer.requests[-1]["body"] != body:
+                    problems.append("%s: the body reached the peer altered" % label)
+                return problems
+
+            def r1():
+                problems = missing_names(mod, ("load_config",)) if mod is not None else ["cannot import the router"]
+                if problems:
+                    return problems, []
+                box = new_sandbox(fixture_root, "r1")
+                counter = [0]
+
+                def write(mutate=None):
+                    cfg = {"auth_token": TF_ROUTER_TOKEN,
+                           "backends": {
+                               "sd": {"kind": "sdcpp", "base_url": "http://127.0.0.1:1234", "auth_header": "none",
+                                      "allow_private": True, "allow_loopback": True},
+                               "lan": {"kind": "sdcpp", "base_url": "http://192.168.2.245:8082",
+                                       "allow_private": True},
+                               "keyed": {"kind": "sdcpp", "base_url": "http://192.168.2.245:8082",
+                                         "allow_private": True, "auth_header": "none", "api_key": TF_KEY_PASS,
+                                         "allow_cleartext_api_key": True}},
+                           "routes": {
+                               GR_KEY: {"backend": "sd", "model": GR_MODEL, "modality": "image"},
+                               "tf-sd-lan": {"backend": "lan", "model": GR_MODEL, "modality": "image",
+                                             "options": {"max_n": 16, "max_pixels": 67108864}},
+                               "tf-sd-keyed": {"backend": "keyed", "model": GR_MODEL, "modality": "image"}}}
+                    if mutate is not None:
+                        mutate(cfg)
+                    counter[0] += 1
+                    return write_config(box, cfg, filename="r1-%d.json" % counter[0])
+
+                where = "routes.%s" % GR_KEY
+                cfg, problems = ga_accepted(mod, write(), "sdcpp: loopback http, a LAN http, an api_key with auth_header none")
+                if cfg is not None:
+                    route, lan = cfg.routes.get(GR_KEY), cfg.routes.get("tf-sd-lan")
+                    if getattr(route, "modality", None) != "image" or dict(getattr(route, "options", {"x": 1})) != {}:
+                        problems.append("the default sdcpp route is not an image route with empty options")
+                    if getattr(route, "model", None) != GR_MODEL:
+                        problems.append("the route model %r differs from its configured upstream name: sdcpp "
+                                        "routes need no key == model" % getattr(route, "model", None))
+                    if lan is None or dict(lan.options) != {"max_n": 16, "max_pixels": 67108864}:
+                        problems.append("the options at their upper bounds were not kept")
+                    backend = cfg.backends.get("sd")
+                    if getattr(backend, "kind", None) != "sdcpp" or getattr(backend, "auth_header", None) != "none":
+                        problems.append("backend sd is not kind sdcpp with auth_header none")
+                    keyed = cfg.backends.get("keyed")
+                    if getattr(keyed, "auth_header", None) != "none":
+                        problems.append("an api_key with auth_header none changed the auth header")
+                for label, mutate in (
+                        ("a route with no modality (chat)", lambda c: c["routes"][GR_KEY].pop("modality")),
+                        ("modality chat", lambda c: c["routes"][GR_KEY].__setitem__("modality", "chat"))):
+                    problems += ga_refused(mod, write(mutate), [where + ".modality", "kind sdcpp does not serve chat routes"],
+                                           label)
+                problems += ga_refused(mod, write(lambda c: c["backends"]["lan"].pop("allow_private")),
+                                       ["backends.lan", "allow_private"], "http:// base_url without allow_private")
+                problems += ga_refused(
+                    mod, write(lambda c: c["backends"].__setitem__("sd", {
+                        "kind": "sdcpp", "base_url": "https://127.0.0.1:8443", "auth_header": "none",
+                        "allow_private": False, "allow_loopback": True})),
+                    ["backends.sd.allow_loopback", "requires allow_private"], "allow_loopback without allow_private")
+                for key, value in (("max_n", 0), ("max_n", 17), ("max_n", True), ("max_n", "2"),
+                                   ("max_pixels", 65535), ("max_pixels", 67108865), ("max_pixels", 1.5)):
+                    problems += ga_refused(
+                        mod, write(lambda c, k=key, v=value: c["routes"][GR_KEY].__setitem__("options", {k: v})),
+                        [where + ".options." + key], "option %s = %r" % (key, value))
+                for key in ("allow_prompt_args", "count_divisor", "quality"):
+                    problems += ga_refused(
+                        mod, write(lambda c, k=key: c["routes"][GR_KEY].__setitem__("options", {k: 1})),
+                        [where + ".options", "unknown option", key], "unknown option " + key)
+                problems += ga_refused(
+                    mod, write(lambda c: c["backends"]["sd"].__setitem__("kind", "tf-no-such-kind")),
+                    ["backends.sd.kind: must be one of passthrough, llamacpp, mistral, codex, openai, sdcpp"],
+                    "the unknown-kind refusal lists sdcpp")
+                return problems, ["accepted    : sdcpp on http://127.0.0.1 (both flags), on a LAN http:// (allow_private), "
+                                  "an api_key beside auth_header none; model != key; options at their bounds",
+                                  "refused     : a chat route, http:// without allow_private, allow_loopback alone, "
+                                  "max_n / max_pixels out of range, an unknown option by name, the kind list"]
+
+            def r2():
+                problems = []
+                gens = [
+                    ("stream true", gq_json_body(GR_KEY, stream=True), "streaming is not supported yet"),
+                    ("n over the default max_n", gq_json_body(GR_KEY, n=5), "n must be 1-4 for this route"),
+                    ("n zero", gq_json_body(GR_KEY, n=0), "n must be 1-4 for this route"),
+                    ("n a string", gq_json_body(GR_KEY, n="2"), "n: must be an integer"),
+                    ("n a float", gq_json_body(GR_KEY, n=2.0), "n: must be an integer"),
+                    ("response_format url", gq_json_body(GR_KEY, response_format="url"), "response_format"),
+                    ("webp on generations", gq_json_body(GR_KEY, output_format="webp"), "output_format"),
+                    ("size over max_pixels", gq_json_body(GR_KEY, size="2049x2048"), "size"),
+                    ("size 0 wide", gq_json_body(GR_KEY, size="0x1024"), "size"),
+                    ("size garbage", gq_json_body(GR_KEY, size="abcxdef"), "size: must be auto or WIDTHxHEIGHT"),
+                    ("small route: n 3", gq_json_body(GR_SMALL, n=3), "n must be 1-2 for this route"),
+                    ("small route: 513x512", gq_json_body(GR_SMALL, size="513x512"), "size"),
+                ]
+                for label, body, needle in gens:
+                    problems += refuse("generations, " + label, GQ_GEN, body, "application/json", needle)
+                shape = [("model", GR_KEY), ("prompt", "tf r2")]
+                files = [("image", "a.png", "image/png", b"\x89PNG\r\n")]
+                for label, extra, needle in (
+                        ("stream true", [("stream", "true")], "streaming is not supported yet"),
+                        ("webp", [("output_format", "webp")], "output_format"),
+                        ("n over max_n", [("n", "5")], "n must be 1-4 for this route"),
+                        ("n not an integer", [("n", "abc")], "n: must be an integer"),
+                        ("response_format url", [("response_format", "url")], "response_format"),
+                        ("size over max_pixels", [("size", "4096x4096")], "size")):
+                    ctype, mp = gq_multipart("tfr2b", shape + extra, files)
+                    problems += refuse("edits, " + label, GQ_EDIT, mp, ctype, needle)
+                problems += refuse("a JSON-form edit", GQ_EDIT, json.dumps({"model": GR_KEY, "prompt": "x"}).encode(),
+                                   "application/json", "this route accepts multipart edits only")
+                allowed = [
+                    ("n at max_n, 2048x2048, png, b64_json", GQ_GEN, gq_json_body(
+                        GR_KEY, n=4, size="2048x2048", output_format="png", response_format="b64_json"), "application/json"),
+                    ("jpeg, size auto", GQ_GEN, gq_json_body(GR_KEY, output_format="jpeg", size="auto"), "application/json"),
+                    ("small route at its bounds", GQ_GEN, gq_json_body(GR_SMALL, n=2, size="512x512"), "application/json"),
+                    ("stream false", GQ_GEN, gq_json_body(GR_KEY, stream=False), "application/json"),
+                    ("quality/background/moderation left alone", GQ_GEN, gq_json_body(
+                        GR_KEY, quality="high", background="auto", moderation="low"), "application/json")]
+                ctype, mp = gq_multipart("tfr2b", shape + [("n", "2"), ("size", "1024x1024")], files)
+                allowed.append(("multipart edit, n 2", GQ_EDIT, mp, ctype))
+                for label, path, body, ct in allowed:
+                    problems += passes(label, path, body, ct)
+                return problems, ["refused     : %d generations and 7 edits guards (stream, n, webp on both endpoints, "
+                                  "url, size, a JSON edit), each 400 with the peer untouched" % len(gens),
+                                  "passed      : %d allowed requests reach the peer byte-identical" % len(allowed)]
+
+            def r3():
+                problems = []
+                images = ["QUFB", "QkJC", "Q0ND"]
+                obj = gr_ok_obj(*images, usage={"total_tokens": 9}, junk="tf-r3-junk")
+                obj["data"][0]["extra"] = "tf-r3-extra"
+                status, hdrs, answer = ask([("respond_json", 200, obj, (GR_CORS, ("Server", "tf-sd-server"),
+                                                                         ("X-Tf-Upstream", "1")))])
+                if status != 200:
+                    return gq_expect("success", status, answer, 200), []
+                try:
+                    back = json.loads(answer.decode("utf-8"))
+                except ValueError:
+                    return ["the answer is not JSON"], []
+                want = {"created": 1700000000, "output_format": "png", "data": [{"b64_json": b} for b in images]}
+                if back != want:
+                    problems.append("the mapped body is %s, expected exactly created, output_format and the %d b64_json "
+                                    "entries in order" % (gi_redact(json.dumps(back))[:160], len(images)))
+                if list(back) != ["created", "output_format", "data"]:
+                    problems.append("key order %r" % list(back))
+                for needle in ("generation_info", "usage", "junk", "tf-r3-extra"):
+                    if needle.encode() in answer:
+                        problems.append("the answer still carries %r" % needle)
+                lower = {k.lower(): v for k, v in hdrs.items()}
+                if "application/json" not in (lower.get("content-type") or ""):
+                    problems.append("answer Content-Type %r" % lower.get("content-type"))
+                for name, value in lower.items():
+                    # The router's own Server header is not the upstream's; only a relayed value is a finding.
+                    if name.startswith("access-control-") or name == "x-tf-upstream" \
+                            or (name == "server" and "tf-sd-server" in value):
+                        problems.append("the upstream's %s header reached the client" % name)
+                # a body without created / output_format is mapped without them; badly typed ones are dropped
+                status, _h, answer = ask([("respond_json", 200, {"created": "x", "output_format": ["png"],
+                                                                  "data": [{"b64_json": GR_B64}]})])
+                if status != 200 or json.loads(answer.decode("utf-8")) != {"data": [{"b64_json": GR_B64}]}:
+                    problems.append("badly typed created/output_format were not dropped (status %r)" % status)
+                malformed = [
+                    ("data missing", {"created": 1}), ("data not a list", {"data": {"b64_json": "x"}}),
+                    ("an entry that is not an object", {"data": ["x"]}),
+                    ("an entry without b64_json", {"data": [{"generation_info": {}}]}),
+                    ("b64_json not a string", {"data": [{"b64_json": 5}]}), ("a top-level array", [1]),
+                    ("an empty body", b""), ("not JSON", b"<html>tf-r3-html</html>"),
+                    ("a duplicate key", b'{"data":[{"b64_json":"AAAA","b64_json":"BBBB"}]}')]
+                for label, body in malformed:
+                    status, _h, answer = ask([("respond_json", 200, body)])
+                    problems += gq_expect("2xx with " + label, status, answer, 502, absent=("tf-r3-html",))
+                return problems, ["mapped      : {created, output_format, data:[{b64_json}]} in order; generation_info, usage "
+                                  "and every other key dropped; no upstream header relayed",
+                                  "malformed   : %d shapes of a 2xx are a 502 with a fixed text" % len(malformed)]
+
+            def r4():
+                problems = []
+                secret = "sk-proj-****abcd"
+                cases = [
+                    ("400 string error", [("respond_json", 400, {"error": "bad prompt tf-r4"})], 400, "bad prompt tf-r4", None),
+                    ("400 server_error + message", [("respond_json", 400, {
+                        "error": "server_error", "message": "[json.exception.parse_error.101] tf-r4-parse"})],
+                     400, "parse_error.101", None),
+                    ("500 server_error + message", [("respond_json", 500, {
+                        "error": "server_error", "message": "[json.exception.parse_error.101] tf-r4-parse"})],
+                     502, "backend tfr answered 500", ("tf-r4-parse",)),
+                    ("503 no model loaded", [("respond_json", 503, {"error": "No model is loaded",
+                                                                    "code": "model_not_loaded"})],
+                     503, "the image backend has no model loaded", ("No model is loaded",)),
+                    ("503 model loading", [("respond_json", 503, {"error": "Model is loading", "code": "model_loading"})],
+                     503, None, None),
+                    ("503 without a code", [("respond_json", 503, {"error": "busy tf-r4-busy"})],
+                     529, "backend tfr answered 503", ("tf-r4-busy",)),
+                    ("404 empty body, no Content-Type", [("respond_raw", b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n"
+                                                                         b"Connection: close\r\n\r\n")],
+                     404, "backend tfr answered 404", None),
+                    ("400 not JSON", [("respond_json", 400, b"<html>tf-r4-html</html>")], 400,
+                     "backend tfr answered 400", ("tf-r4-html",)),
+                    ("401 fixed text", [("respond_json", 401, {"error": "unauthorized tf-r4-auth"})], 502,
+                     "backend tfr answered 401", ("tf-r4-auth",)),
+                    ("403 fixed text", [("respond_json", 403, {"error": "forbidden tf-r4-auth"})], 502,
+                     "backend tfr answered 403", ("tf-r4-auth",)),
+                    ("400 echoing the router token", [("respond_json", 400, {"error": "bad key " + TF_ROUTER_TOKEN})],
+                     400, "[redacted]", (TF_ROUTER_TOKEN,)),
+                    ("400 echoing a masked key", [("respond_json", 400, {"error": "Incorrect key " + secret})],
+                     400, "[redacted]", ("sk-proj", "abcd")),
+                    ("422 relayed", [("respond_json", 422, {"error": "unprocessable tf-r4"})], 400, "unprocessable tf-r4", None),
+                ]
+                for label, steps, want, needle, absent in cases:
+                    status, _h, answer = ask(steps)
+                    problems += gq_expect(label, status, answer, want, needle, absent or ())
+                    err, _why = gq_err(answer) if status == want else (None, None)
+                    if err is not None and label.startswith("503 no model") and err["code"] != "model_not_loaded":
+                        problems.append("%s: code %r, expected model_not_loaded" % (label, err["code"]))
+                    if err is not None and label == "503 model loading" and err["code"] != "model_loading":
+                        problems.append("%s: code %r, expected model_loading" % (label, err["code"]))
+                    if err is not None and label == "503 no model loaded" and err["type"] != "server_error":
+                        problems.append("%s: type %r" % (label, err["type"]))
+                status, _h, answer = ask([("respond_json", 400, {"error": "x" * 1000})])
+                err, why = gq_err(answer)
+                if why or status != 400 or len(err["message"]) > 300:
+                    problems.append("a 1000-character upstream text was not cut at 300 (%s)" % (why or "status %r" % status))
+                status, hdrs, answer = ask([("respond_json", 429, {"error": "slow down"}, (("Retry-After", "7"),))])
+                problems += gq_expect("429", status, answer, 429, "slow down")
+                if {k.lower(): v for k, v in hdrs.items()}.get("retry-after") != "7":
+                    problems.append("429: Retry-After 7 was not relayed")
+                return problems, ["errors      : string error, server_error+message, 503 model_not_loaded / model_loading, "
+                                  "empty 404, non-JSON, 401/403, scrubbed echoes, 422, 429 + Retry-After"]
+
+            def r5():
+                problems = []
+                before = len(peer.requests)
+                msg = json.dumps({"model": "tf-ll-off", "max_tokens": 8,
+                                  "messages": [{"role": "user", "content": "hi"}]}).encode()
+                s_sd, _h, b_sd = gq_post(client, GQ_GEN, gq_json_body("tf-sd-off"))
+                s_ll, _h, _b = gq_post(client, "/v1/messages", msg)
+                problems += untouched(before, "the loopback-refused backends")
+                if s_sd == 200 or s_ll == 200:
+                    problems.append("a loopback backend without allow_loopback answered 200 (sdcpp %r, llamacpp %r)"
+                                    % (s_sd, s_ll))
+                elif s_sd != s_ll:
+                    problems.append("sdcpp is refused with %r but llamacpp with %r: the policy must be the same" % (s_sd, s_ll))
+                else:
+                    err, why = gq_err(b_sd)
+                    if why:
+                        problems.append("the refusal is not an OpenAI envelope: %s" % why)
+                s_on, _h, b_on = gq_post(client, GQ_GEN, gq_json_body(GR_KEY))
+                problems += [] if s_on == 200 else gq_expect("with allow_loopback", s_on, b_on, 200)
+                if len(peer.requests) != before + 1:
+                    problems.append("the peer saw %d request(s) over the three calls, expected 1" % (len(peer.requests) - before))
+                if mod is not None:
+                    box = new_sandbox(fixture_root, "r5")
+                    problems += ga_refused(
+                        mod, write_config(box, {"auth_token": TF_ROUTER_TOKEN, "backends": {
+                            "sd": {"kind": "sdcpp", "base_url": "http://127.0.0.1:1234", "auth_header": "none",
+                                   "allow_private": False}},
+                            "routes": {}}), ["backends.sd", "allow_private"], "http:// loopback without allow_private")
+                return problems, ["refused     : sdcpp and llamacpp on 127.0.0.1 without allow_loopback fail the same way "
+                                  "(status %r), the peer untouched" % s_sd,
+                                  "accepted    : with allow_loopback the request is served; no new exemption for the kind"]
+
+            def r6():
+                problems = []
+                hostile = {"x-api-key": TF_CLIENT_XKEY, "Cookie": "tf=1", "Proxy-Authorization": "Basic dGY6dGY=",
+                           "Api-Key": TF_CLIENT_XKEY, "OpenAI-Organization": "org-tf"}
+                for route in (GR_KEY, GR_KEYED):
+                    before = len(peer.requests)
+                    status, _h, answer = gq_post(client, GQ_GEN, gq_json_body(route), headers=hostile)
+                    problems += [] if status == 200 else gq_expect(route, status, answer, 200)
+                    if len(peer.requests) != before + 1:
+                        problems.append("%s: the peer saw %d request(s), expected 1" % (route, len(peer.requests) - before))
+                        continue
+                    seen = gq_hdrs(peer.requests[-1])
+                    for name in ("authorization", "x-api-key", "api-key", "cookie", "proxy-authorization",
+                                 "openai-organization"):
+                        if name in seen:
+                            problems.append("%s: the peer got a %s header" % (route, name))
+                    joined = " ".join(v for vals in seen.values() for v in vals)
+                    for label, value in (("the router token", TF_ROUTER_TOKEN), ("the client's key", TF_CLIENT_XKEY),
+                                         ("the configured api_key", TF_KEY_PASS)):
+                        if value in joined:
+                            problems.append("%s: the peer's headers carry %s" % (route, label))
+                return problems, ["peer        : no authorization / x-api-key / cookie, with a client that sent them all; "
+                                  "a configured api_key beside auth_header none is accepted and never sent"]
+
+            def r7():
+                problems = []
+                png = b"\x89PNG\r\n\x1a\n\r\n--fragment\r\n" + b'name="model"' + bytes(range(256)) * 4
+                ctype, mp = gq_multipart("tfr7'+_" + "b" * 20, [("model", GR_KEY), ("prompt", "tf r7 edit"), ("n", "1")],
+                                         [("image", "tf.png", "image/png", png)])
+                before = len(peer.requests)
+                status, _h, answer = gq_post(client, GQ_EDIT, mp, ctype)
+                problems += [] if status == 200 else gq_expect("edit", status, answer, 200)
+                if len(peer.requests) != before + 1:
+                    return problems + ["the peer saw %d request(s), expected 1" % (len(peer.requests) - before)], []
+                req = peer.requests[-1]
+                seen = gq_hdrs(req)
+                if req["line"] != "POST /v1/images/edits HTTP/1.1":
+                    problems.append("edit: peer request line %r" % req["line"])
+                if req["body"] != mp:
+                    problems.append("edit: the multipart body reached the peer altered (%d vs %d bytes)"
+                                    % (len(req["body"]), len(mp)))
+                if seen.get("content-type") != [ctype]:
+                    problems.append("edit: peer Content-Type %r, expected %r" % (seen.get("content-type"), ctype))
+                if status == 200 and json.loads(answer.decode("utf-8")).get("data") != [{"b64_json": GR_B64}]:
+                    problems.append("edit: the answer was not mapped")
+                body = b'{ "prompt" : "tf r7",  "model":"%s", "n": 1,"output_format":"png" }' % GR_KEY.encode()
+                before = len(peer.requests)
+                status, _h, answer = gq_post(client, GQ_GEN, body)
+                problems += [] if status == 200 else gq_expect("generations", status, answer, 200)
+                if len(peer.requests) == before + 1:
+                    req = peer.requests[-1]
+                    seen = gq_hdrs(req)
+                    if req["line"] != "POST /v1/images/generations HTTP/1.1" or req["body"] != body:
+                        problems.append("generations: request line or body differ from what was sent (the model is not "
+                                        "rewritten to %s)" % GR_MODEL)
+                    if seen.get("content-type") != ["application/json"]:
+                        problems.append("generations: peer Content-Type %r" % seen.get("content-type"))
+                else:
+                    problems.append("generations: the peer saw %d request(s), expected 1" % (len(peer.requests) - before))
+                return problems, ["peer        : POST /v1/images/edits (multipart, boundary and bytes identical) and "
+                                  "/v1/images/generations (JSON, key not rewritten to the upstream model)"]
+
+            def r8():
+                problems = []
+                count, size = 40, 100 * 1024
+                images = [chr(65 + i % 26) * size for i in range(count)]
+                status, _h, answer = ask([("respond_json", 200, gr_ok_obj(*images))], raw=True)
+                if status != 200:
+                    problems += gq_expect("a 4 MiB data list", status, answer, 200)
+                else:
+                    back = json.loads(answer.decode("utf-8"))
+                    if [e.get("b64_json") for e in back.get("data", [])] != images or "generation_info" in answer.decode("utf-8"):
+                        problems.append("a 4 MiB data list was not mapped intact")
+                del images
+                limit = getattr(mod, "_UPSTREAM_BODY_LIMIT", 64 << 20) if mod is not None else 64 << 20
+                prefix, suffix = b'{"data":[{"b64_json":"', b'"}]}'
+                big = prefix + b"A" * (limit + 1 - len(prefix) - len(suffix)) + suffix
+                status, _h, answer = ask([("respond_json", 200, big)], raw=True)
+                del big
+                problems += gq_expect("a 2xx one byte over the upstream limit", status, answer, 502)
+                if len(answer) > 4096:
+                    problems.append("the over-limit answer has %d body byte(s), expected a small envelope" % len(answer))
+                return problems, ["mapped      : 40 images of 100 KiB (4 MiB) in a data list, intact",
+                                  "bound       : a 2xx of _UPSTREAM_BODY_LIMIT + 1 bytes is a 502, no partial body"]
+
+            def sweep_router(label):
+                """(RouterProc, log path) of a --debug router with a log file."""
+                box = new_sandbox(fixture_root, label)
+                log_path = os.path.join(box, label + ".log")
+                lp = RouterProc(box, write_config(box, gr_config(peer.url())), ("--debug", "--log-file", log_path), label=label)
+                return lp, log_path
+
+            def read_log(log_path):
+                time.sleep(0.3)
+                try:
+                    with open(log_path, "r", encoding="utf-8", errors="replace") as fh:
+                        return fh.read()
+                except OSError:
+                    return ""
+
+            def r9():
+                problems = []
+                prompt_s, b64_s, info_s = (v for _l, v in GR_PROMPT_SENTINELS)
+                lp, log_path = sweep_router("r9")
+                try:
+                    if lp.wait_ready() is None:
+                        return [gb_not_ready(lp)], []
+                    lc = lp.client()
+                    ok = gr_ok_obj(b64_s)
+                    ok["data"][0]["generation_info"]["note"] = info_s
+                    status, _h, back = ask([("respond_json", 200, ok)], body=gq_json_body(GR_KEY, prompt_s), raw=True, who=lc)
+                    if status != 200 or b64_s.encode() not in back:
+                        problems.append("the planted b64 did not come back (status %r)" % status)
+                    if info_s.encode() in back:
+                        problems.append("generation_info reached the client")
+                    ctype, mp = gq_multipart("tfr9b", [("model", GR_KEY), ("prompt", prompt_s)],
+                                             [("image", "a.png", "image/png", b"\x89PNG" + prompt_s.encode())])
+                    status, _h, back = ask([("respond_json", 200, ok)], GQ_EDIT, mp, ctype, raw=True, who=lc)
+                    status, _h, back = ask([("respond_json", 400, {"error": "tf r9 " + prompt_s + " " + info_s})],
+                                           body=gq_json_body(GR_KEY, prompt_s), who=lc)
+                    got = [r["body"] for r in peer.requests[-3:]]
+                    if len(got) < 3 or prompt_s.encode() not in got[0] or prompt_s.encode() not in got[1]:
+                        problems.append("the peer did not receive the planted prompt: the sweep would prove nothing")
+                    log_text = read_log(log_path)
+                    if not log_text.strip():
+                        problems.append("the --debug --log-file is empty: nothing to sweep")
+                    elif "endpoint='images_generations'" not in log_text:
+                        problems.append("no `req endpoint='images_generations'` line in the log")
+                    stderr = lp.stderr_text()
+                    for label, value in GR_PROMPT_SENTINELS:
+                        if value in log_text or value in stderr:
+                            problems.append("%s reached the log or stderr" % label)
+                finally:
+                    lp.close()
+                return problems, ["planted     : prompt (JSON, multipart, in an upstream error), b64 and generation_info "
+                                  "sentinels in the answers",
+                                  "swept       : the --debug --log-file and stderr; generation_info absent from the client body"]
+
+            def r10():
+                problems = []
+                variants = [("lower case", "a cat <sd_cpp_extra_args>{}</sd_cpp_extra_args>"),
+                            ("upper case", "a cat SD_CPP_EXTRA_ARGS"),
+                            ("mixed case", "Sd_Cpp_Extra_Args at the start"),
+                            ("only the closing tag", "</sd_cpp_extra_args> a cat"),
+                            ("the bare word", "sd_cpp_extra_args")]
+                for label, prompt in variants:
+                    problems += refuse("generations, " + label, GQ_GEN, gq_json_body(GR_KEY, prompt), "application/json",
+                                       GR_REFUSAL, absent=(prompt,))
+                escaped = b'{"model":"%s","prompt":"sd_cpp\\u005fextra_args"}' % GR_KEY.encode()
+                problems += refuse("generations, \\u005f in the raw body", GQ_GEN, escaped, "application/json", GR_REFUSAL)
+                for label, prompt in variants:
+                    ctype, mp = gq_multipart("tfr10b", [("model", GR_KEY), ("prompt", prompt)],
+                                             [("image", "a.png", "image/png", b"\x89PNG")])
+                    problems += refuse("edits, " + label, GQ_EDIT, mp, ctype, GR_REFUSAL, absent=(prompt,))
+                return problems, ["refused     : the marker in any letter case, opening or closing tag, JSON-escaped, in "
+                                  "a JSON generations prompt and a multipart edit prompt: 400 with the rule text, peer untouched"]
+
+            def r11():
+                problems = []
+                passing = [("braces and JSON-looking text", 'draw {"sample_steps": 999, "width": 4096} and {x}'),
+                           ("quotes, parentheses and <", 'a "red" (cat) <b> & it\'s ok'),
+                           ("newline and tab", "line one\nline\ttwo"),
+                           ("exactly 32 KiB", "a" * 32768)]
+                for label, prompt in passing:
+                    problems += passes("generations, " + label, GQ_GEN, gq_json_body(GR_KEY, prompt))
+                ctype, mp = gq_multipart("tfr11b", [("model", GR_KEY), ("prompt", 'draw {"steps": 999} (x)')],
+                                         [("image", "a.png", "image/png", b"\x89PNG")])
+                problems += passes("edits, braces", GQ_EDIT, mp, ctype)
+                problems += refuse("an unterminated opener", GQ_GEN, gq_json_body(GR_KEY, "a cat <sd_cpp_extra_args>{"),
+                                   "application/json", GR_REFUSAL)
+                problems += refuse("32 KiB + 1, generations", GQ_GEN, gq_json_body(GR_KEY, "a" * 32769),
+                                   "application/json", "prompt: is over 32768 bytes")
+                ctype, mp = gq_multipart("tfr11b", [("model", GR_KEY), ("prompt", "a" * 32769)], [])
+                problems += refuse("32 KiB + 1, edits", GQ_EDIT, mp, ctype, "prompt: is over 32768 bytes")
+                ctype, mp = gq_multipart("tfr11b", [("model", GR_KEY), ("prompt", "a" * 32768)],
+                                         [("image", "a.png", "image/png", b"\x89PNG")])
+                problems += passes("edits, exactly 32 KiB", GQ_EDIT, mp, ctype)
+                return problems, ["passed      : braces / JSON-looking text, quotes, parentheses, < and exactly 32768 bytes "
+                                  "reach the peer byte-identical",
+                                  "refused     : an unterminated opener (substring rule) and 32 KiB + 1 (field cap)"]
+
+            def r12():
+                problems = []
+                prompt_s = GR_PROMPT_SENTINELS[0][1]
+                lp, log_path = sweep_router("r12")
+                try:
+                    if lp.wait_ready() is None:
+                        return [gb_not_ready(lp)], []
+                    lc = lp.client()
+                    before = len(peer.requests)
+                    marked = "%s <sd_cpp_extra_args>{}</sd_cpp_extra_args>" % prompt_s
+                    status, _h, body = gq_post(lc, GQ_GEN, gq_json_body(GR_KEY, marked))
+                    problems += gq_expect("marker, JSON", status, body, 400, GR_REFUSAL, absent=(prompt_s,))
+                    ctype, mp = gq_multipart("tfr12b", [("model", GR_KEY), ("prompt", marked)], [])
+                    status, _h, body = gq_post(lc, GQ_EDIT, mp, ctype)
+                    problems += gq_expect("marker, multipart", status, body, 400, GR_REFUSAL, absent=(prompt_s,))
+                    status, _h, body = gq_post(lc, GQ_GEN, gq_json_body(GR_KEY, prompt_s + " " + "a" * 33000))
+                    problems += gq_expect("over the field cap", status, body, 400, "prompt", absent=(prompt_s,))
+                    problems += untouched(before, "the refused prompts")
+                    status, _h, body = gq_post_raw(lc, GQ_GEN, gq_json_body(GR_KEY, prompt_s + " control"))
+                    if status != 200 or len(peer.requests) != before + 1 or prompt_s.encode() not in peer.requests[-1]["body"]:
+                        problems.append("control: the same prompt without the marker did not reach the peer (status %r)"
+                                        % status)
+                    log_text = read_log(log_path)
+                    if not log_text.strip():
+                        problems.append("the --debug --log-file is empty: nothing to sweep")
+                    elif log_text.count("endpoint='images_generations'") < 2:
+                        problems.append("fewer than two `req endpoint='images_generations'` lines in the log")
+                    if prompt_s in log_text or prompt_s in lp.stderr_text():
+                        problems.append("the prompt reached the log or stderr")
+                finally:
+                    lp.close()
+                return problems, ["refused     : three prompts (marker JSON, marker multipart, over the cap); text and log "
+                                  "carry no prompt; the control with the same prompt reaches the peer"]
+
+            def r13():
+                problems = []
+                before = len(peer.requests)
+                for label, model in (("dot-dot", "../sdcpp/v1/models/load"), ("encoded dot-dot", "%2e%2e/models"),
+                                     ("a query", GR_KEY + "?x=1")):
+                    status, _h, body = gq_post(client, GQ_GEN, gq_json_body(model))
+                    problems += gq_expect("model " + label, status, body, 404)
+                for path in (GQ_GEN + "?x=1", GQ_GEN + "/../sdcpp/v1/models/load", "/sdcpp/v1/models/load",
+                             "/v1/images/variations"):
+                    status, _h, body = gq_post(client, path, gq_json_body(GR_KEY))
+                    if status not in (400, 404):
+                        problems.append("POST %s: status %r, expected 400 or 404" % (path, status))
+                problems += untouched(before, "the hostile models and paths")
+                evil = gq_json_body(GR_EVIL)
+                ctype, mp = gq_multipart("tfr13b", [("model", GR_EVIL), ("prompt", "x")], [])
+                for path, raw, ct in ((GQ_GEN, evil, "application/json"), (GQ_EDIT, mp, ctype)):
+                    status, _h, body = gq_post(client, path, raw, ct)
+                    if status != 200:
+                        problems += gq_expect("evil upstream model " + path, status, body, 200)
+                lines = sorted(r["line"] for r in peer.requests[before:])
+                want = sorted(["POST /v1/images/generations HTTP/1.1", "POST /v1/images/edits HTTP/1.1"])
+                if lines != want:
+                    problems.append("the peer saw %r, expected exactly %r" % (lines, want))
+                if peer.requests[before:] and peer.requests[before]["body"] not in (evil, mp):
+                    problems.append("the body was altered")
+                return problems, ["refused     : a traversal- or query-spelled model or path is a 404/400, the peer untouched",
+                                  "peer        : a route whose upstream model is '../sdcpp/v1/models/load' still reaches "
+                                  "only /v1/images/generations and /edits"]
+
+            for cid, fn in zip(GR_CASES, (r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13)):
+                if router_why is not None and fn is not r1:
+                    got[cid] = ([router_why], [])
+                    continue
+                try:
+                    got[cid] = fn()
+                except Exception as exc:  # noqa: BLE001 -- a broken case fails, never aborts the group
+                    got[cid] = (["case raised %s: %s" % (type(exc).__name__, gi_redact(str(exc))[:200])], [])
+            results = got
+    except Exception as exc:  # noqa: BLE001 -- a setup failure fails every case not yet run
+        setup = "the group setup raised %s: %s" % (type(exc).__name__, gi_redact(str(exc))[:200])
+    finally:
+        if proc is not None:
+            proc.close()
+        peer.close()
+    for cid, rid in zip(GR_CASES, GR_IDS):
+        problems, detail = results.get(cid, ([setup], []))
+        suite.record(GR, cid, problems, detail=["case        : " + rid] + list(detail))
+
+
+# ---------------------------------------------------------------------------
 # Group S: codex image endpoints (EXPERIMENTAL; Plan Phase 3, Steps 15-16)
 # ---------------------------------------------------------------------------
 
@@ -20436,7 +21093,7 @@ GJ_TF_CLASS = '\n\nclass _TfAdapter(ResponsesAdapter):\n    kind = "%s"\n' % GJ_
 # J29 (Plan Step 17, FR-6): the access and ID tokens are never on disk.
 GJ_PERSIST_FORBIDDEN = ("access", "id_token")
 
-GJ_KINDS = ("codex", "llamacpp", "mistral", "openai", "passthrough")   # J12: KIND_CLASSES must hold all five
+GJ_KINDS = ("codex", "llamacpp", "mistral", "openai", "passthrough", "sdcpp")   # J12: KIND_CLASSES must hold all six
 
 # J39 (R-0084, NFR-2): the registry half of "a new kind is one row".  The five per-kind
 # names, pinned at their pre-R-0084 values -- type, order and content -- and written
@@ -20444,16 +21101,17 @@ GJ_KINDS = ("codex", "llamacpp", "mistral", "openai", "passthrough")   # J12: KI
 GJ_REG_TABLE = "_RT_KIND_TABLE"
 GJ_REG_CHECK = "_rt_check_kind_table"
 GJ_REG_DERIVED = ("_KINDS", "RESERVED_KINDS", "_RT_KIND_AUTH_PROFILES", "KIND_CLASSES", "ADAPTERS")
-GJ_REG_KINDS = ("passthrough", "llamacpp", "mistral", "codex", "openai", "anthropic")
+GJ_REG_KINDS = ("passthrough", "llamacpp", "mistral", "codex", "openai", "sdcpp", "anthropic")
 GJ_REG_RESERVED = ("anthropic",)
 GJ_REG_AUTH = (("codex", (("oauth", "codex"),)),
                ("openai", (("oauth", "openai-oauth"), ("api_key", "openai-apikey"))))
 GJ_REG_CLASSES = (("passthrough", "PassthroughAdapter"), ("llamacpp", "LlamacppAdapter"),
-                  ("mistral", "MistralAdapter"), ("codex", "CodexAdapter"), ("openai", "OpenaiAdapter"))
+                  ("mistral", "MistralAdapter"), ("codex", "CodexAdapter"), ("openai", "OpenaiAdapter"),
+                  ("sdcpp", "SdcppAdapter"))
 # The A14 refusals, byte for byte: the unknown-kind list keeps the table's order.
 GJ_REG_REFUSALS = (
-    ({"kind": "tf-no-such-kind"}, "backends.tf.kind: must be one of passthrough, llamacpp, mistral, codex, openai"),
-    ({"kind": 7}, "backends.tf.kind: must be one of passthrough, llamacpp, mistral, codex, openai"),
+    ({"kind": "tf-no-such-kind"}, "backends.tf.kind: must be one of passthrough, llamacpp, mistral, codex, openai, sdcpp"),
+    ({"kind": 7}, "backends.tf.kind: must be one of passthrough, llamacpp, mistral, codex, openai, sdcpp"),
     ({"kind": "anthropic"}, 'backends.tf.kind: "anthropic" is reserved and not implemented'),
 )
 
@@ -22491,6 +23149,27 @@ def group_j(suite, fixture_root, pyc_before, tree_before):
             problems.append("codex IMAGE_PATHS %r do not sit beside the profile path %r" % (paths, row.path))
         if not mod.ADAPTERS["codex"].IMAGE_EDIT_JSON:
             problems.append("codex.IMAGE_EDIT_JSON is false: the Codex CLI sends JSON edits")
+        # Phase 2: sdcpp serves image routes only, takes multipart edits only (sd-server refuses a JSON
+        # edit), needs no key == model (the server ignores `model`), sniffs the prompt, and overrides all
+        # three image hooks; its chat hooks stay the base ones (NotImplementedError, never called).
+        sd = type(mod.ADAPTERS["sdcpp"]) if "sdcpp" in mod.ADAPTERS else None
+        if sd is None:
+            problems.append("ADAPTERS holds no sdcpp")
+        else:
+            if sd.MODALITIES != frozenset({"image"}):
+                problems.append("sdcpp.MODALITIES is %r, expected {'image'}" % (set(sd.MODALITIES),))
+            if sd.IMAGE_EDIT_JSON or sd.IMAGE_MODEL_IS_KEY:
+                problems.append("sdcpp must set IMAGE_EDIT_JSON and IMAGE_MODEL_IS_KEY false")
+            if "prompt" not in sd.IMAGE_FIELDS:
+                problems.append("sdcpp.IMAGE_FIELDS lacks prompt: the native-arguments refusal could not see it")
+            if dict(sd.IMAGE_PATHS) != {"generations": "/v1/images/generations", "edits": "/v1/images/edits"}:
+                problems.append("sdcpp IMAGE_PATHS %r" % (dict(sd.IMAGE_PATHS),))
+            for hook in GJ_IMG_HOOKS:
+                if getattr(sd, hook, None) is getattr(base, hook, None) and hook != "image_head":
+                    problems.append("sdcpp does not override %s" % hook)
+            for hook in ("upstream_request", "count_tokens", "json_response", "stream_translator"):
+                if getattr(sd, hook, None) is not getattr(base, hook, None):
+                    problems.append("sdcpp overrides the chat hook %s" % hook)
         with open(SERVER, "r", encoding="utf-8") as fh:
             tree, findings = gj_parse(fh.read())
         problems += findings
@@ -22500,7 +23179,7 @@ def group_j(suite, fixture_root, pyc_before, tree_before):
         elif not any(isinstance(n, ast.Name) and n.id == "_RT_IMAGE_ENDPOINTS" for n in ast.walk(post[0])):
             problems.append("_post never references _RT_IMAGE_ENDPOINTS: the image endpoints are not dispatched there")
         return problems, ["kinds       : %s keep the base image hooks and MODALITIES {'chat'}" % ", ".join(shown),
-                          "modalities  : openai and codex chat+image; _post references _RT_IMAGE_ENDPOINTS"]
+                          "modalities  : openai and codex chat+image, sdcpp image only; _post references _RT_IMAGE_ENDPOINTS"]
 
     def gj_control_hits(rule, planted_tail, needles):
         """Problems unless *rule* is silent on the live source and names each needle once *planted_tail* is appended."""
@@ -22951,14 +23630,15 @@ def group_j_hygiene(suite, fixture_root, pyc_before, tree_before):
 # and repo snapshots taken at the start, so both must run last.
 GROUP_ORDER = ("group_a", "group_b", "group_c", "group_d", "group_e",
                "group_f", "group_g", "group_h", "group_k", "group_l",
-               "group_m", "group_n", "group_o", "group_p", "group_q", "group_s", "group_i", "group_j")
+               "group_m", "group_n", "group_o", "group_p", "group_q", "group_r", "group_s", "group_i",
+               "group_j")
 
 
 def run(opts=None):
     opts = opts or H.Options()
     suite = H.Suite(NAME,
                     title="llm-router routes by model and translates at the edge: "
-                          "config, front, outbound, five backend kinds, "
+                          "config, front, outbound, six backend kinds, "
                           "timeouts and secret hygiene against scripted peers",
                     opts=opts, mode="grouped", cid_width=30)
     pyc_before = H.pycache_snapshot()

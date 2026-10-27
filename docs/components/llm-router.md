@@ -3,7 +3,7 @@ name: llm-router
 type: component
 status: active
 title: llm-router — an Anthropic Messages router for Claude Code
-description: The stdlib-only HTTP server between Claude Code and several kinds of LLM backend -- an Anthropic Messages front that routes each request by its exact model string to a passthrough, llama.cpp, Mistral, codex or openai adapter, the last two speaking the OpenAI Responses API through one profile table; its command line and login subcommand, its 0600 JSON config and the OAuth write-back into it, the per-kind header allow-list and llama.cpp quirk rows, reasoning across kinds, images per kind and the route's vision key, the OpenAI-shaped image generation and edit endpoints behind the route's modality key, the inbound and outbound security rules, how it is tested and what it declares rather than gates.
+description: The stdlib-only HTTP server between Claude Code and several kinds of LLM backend -- an Anthropic Messages front that routes each request by its exact model string to a passthrough, llama.cpp, Mistral, codex, openai or sdcpp (a local stable-diffusion.cpp sd-server, image routes only) adapter, codex and openai speaking the OpenAI Responses API through one profile table; its command line and login subcommand, its 0600 JSON config and the OAuth write-back into it, the per-kind header allow-list and llama.cpp quirk rows, reasoning across kinds, images per kind and the route's vision key, the OpenAI-shaped image generation and edit endpoints behind the route's modality key, the inbound and outbound security rules, how it is tested and what it declares rather than gates.
 sources:
   - Scripts/llm-router.py
   - Scripts/_mcp_oauth.py
@@ -40,7 +40,8 @@ that route names — relayed as-is (`passthrough`), with llama.cpp's deviations
 repaired (`llamacpp`), translated to and from Mistral's chat-completions API
 (`mistral`), or translated to and from the OpenAI Responses API, on the
 ChatGPT-subscription endpoint over OAuth (`codex`) or on the platform endpoint
-with an API key or a Sign-in-with-ChatGPT login (`openai`)
+with an API key or a Sign-in-with-ChatGPT login (`openai`) — or, for the image
+endpoints only, to a local stable-diffusion.cpp `sd-server` (`sdcpp`)
 `Scripts/llm-router.py:KIND_CLASSES`. The OAuth backends are logged in once by
 the `login` subcommand, and the router keeps their refresh tokens current in
 the same config file. Every answer the client sees is
@@ -392,6 +393,26 @@ profile `Scripts/llm-router.py:_rt_cfg_profile`. The help epilogs carry
 worked examples of both kinds, each loaded through `load_config`
 `Scripts/llm-router.py:_RT_LOGIN_HELP_EPILOG`.
 
+The `sdcpp` kind, a stable-diffusion.cpp `sd-server` that serves only the image
+endpoints (no chat, no credential, so no `api_key` is needed and `auth_header`
+stays `none`):
+
+```json
+"backends": {
+  "sd": {"kind": "sdcpp", "base_url": "http://192.168.2.245:8082", "allow_private": true}
+},
+"routes": {
+  "sd-cpp-local": {"backend": "sd", "model": "sd-cpp-local", "modality": "image",
+                   "options": {"max_n": 4, "max_pixels": 4194304}}
+}
+```
+
+The address policy is the `llamacpp` one, with no exemption for the kind: a LAN
+host needs `allow_private` (the `http://` URL requires it), a loopback sd-server
+needs `allow_private` **and** `allow_loopback`. An `api_key` beside
+`"auth_header": "none"` is accepted and never sent; without `auth_header`, an
+`api_key` selects `x-api-key`, so leave it out.
+
 **Top level** — exactly `auth_token`, `backends`, `routes`, `default`; any
 other key is refused by name `Scripts/llm-router.py:_RT_TOP_KEYS`.
 
@@ -412,7 +433,7 @@ other key is refused by name `Scripts/llm-router.py:_RT_TOP_KEYS`.
 
 | Key | Default | Rule |
 |---|---|---|
-| `kind` | required | `passthrough`, `llamacpp`, `mistral`, `codex` or `openai`; `anthropic` is reserved and refused `Scripts/llm-router.py:_KINDS` |
+| `kind` | required | `passthrough`, `llamacpp`, `mistral`, `codex`, `openai` or `sdcpp`; `anthropic` is reserved and refused `Scripts/llm-router.py:_KINDS` |
 | `base_url` | required, except codex and `openai` (their profile row's) | `http` or `https`; no userinfo, query or fragment; path segments `[A-Za-z0-9._~-]` `Scripts/llm-router.py:_rt_cfg_base_url`. An `http://` URL requires `allow_private` |
 | `allow_private` | `false` | admits private, ULA, CGNAT and site-local addresses, minus the metadata addresses and Teredo (see Security) |
 | `allow_loopback` | `false` | admits loopback; requires `allow_private` |
@@ -441,7 +462,7 @@ limits, `vision` and `modality`; an unknown key or option is refused by name
 | `display_name` | the route key | a string of 1-`Scripts/llm-router.py:_RT_DISPLAY_NAME_LIMIT` (256) characters with no control character; shown by `GET /v1/models` only. Allowed on `default` too, where it is unused |
 | `max_input_tokens`, `max_tokens` | none | integers from `Scripts/llm-router.py:_RT_TOKEN_LIMIT_MIN` to `Scripts/llm-router.py:_RT_TOKEN_LIMIT_MAX`; advertised by `GET /v1/models` (with `context_window`), never enforced |
 | `vision` | `true` | a JSON boolean (`0`, `1`, `"false"`, `null` are refused by path); `false` makes the router answer 400 to any request holding an image block, never strip it — see *Images* under Backends `Scripts/llm-router.py:RouteSpec`. Allowed on `default` too |
-| `modality` | `chat` | `chat` or `image` `Scripts/llm-router.py:_RT_MODALITIES`. An `image` route is served by the two image endpoints only and needs a kind that lists `image` in its adapter's `MODALITIES` (`openai`, and the experimental `codex`), a backend that is not the `openai-oauth` profile ("image generation is not available with Sign in with ChatGPT tokens; use an api_key backend"), and a `model` equal to the route key, because the body is forwarded byte for byte and the upstream reads the client's `model`. The key is refused on `default`, checked on the config path and not on the route's name, so a typo can never send a prompt to an image model `Scripts/llm-router.py:_rt_cfg_route` |
+| `modality` | `chat` | `chat` or `image` `Scripts/llm-router.py:_RT_MODALITIES`. An `image` route is served by the two image endpoints only and needs a kind that lists `image` in its adapter's `MODALITIES` (`openai`, `sdcpp` — which serves nothing else, so an `sdcpp` route without `"modality": "image"` is refused — and the experimental `codex`), a backend that is not the `openai-oauth` profile ("image generation is not available with Sign in with ChatGPT tokens; use an api_key backend"), and, for every kind but `sdcpp`, a `model` equal to the route key, because the body is forwarded byte for byte and the upstream reads the client's `model` (sd-server ignores `model`, so an `sdcpp` route may name any upstream model). The key is refused on `default`, checked on the config path and not on the route's name, so a typo can never send a prompt to an image model `Scripts/llm-router.py:_rt_cfg_route` |
 
 | Kind | Option | Rule |
 |---|---|---|
@@ -458,10 +479,12 @@ limits, `vision` and `modality`; an unknown key or option is refused by name
 | codex, `openai` | `reasoning_effort` | one of `Scripts/llm-router.py:_RT_RS_EFFORTS` (`none` to `xhigh`); wins over the client's `output_config.effort` and over the effort its thinking budget maps to |
 | codex, `openai` | `verbosity` | `low`, `medium` or `high`; sent as `text.verbosity` |
 | `openai` with an `api_key` | `temperature`, `top_p`, `max_tokens_cap` | as for mistral; refused at load on the two OAuth profiles, which take no sampling |
+| `sdcpp` | `max_n` | integer 1-16, default 4; the most images one request may ask for (`n`) `Scripts/llm-router.py:SdcppAdapter` |
+| `sdcpp` | `max_pixels` | integer 65536-67108864, default 4194304 (2048 x 2048); the most `width x height` a `size` may ask for. A `allow_prompt_args` option is reserved and refused as unknown |
 
 `Scripts/llm-router.py:PassthroughAdapter` `Scripts/llm-router.py:LlamacppAdapter`
 `Scripts/llm-router.py:MistralAdapter` `Scripts/llm-router.py:CodexAdapter`
-`Scripts/llm-router.py:OpenaiAdapter`
+`Scripts/llm-router.py:OpenaiAdapter` `Scripts/llm-router.py:SdcppAdapter`
 
 ## Backends
 
@@ -743,7 +766,8 @@ Two OpenAI-shaped endpoints serve clients other than Claude Code: `POST
 objects). The router reads only `model` and a few guard fields, forwards the
 client's bytes untouched, and relays a 2xx JSON answer untouched
 `Scripts/llm-router.py:ResponsesImageAdapter`. Only kind `openai` with an
-`api_key` serves them (and, experimentally, kind `codex`, below), through the
+`api_key` serves them (and, experimentally, kind `codex`, and kind `sdcpp`,
+whose answer is rebuilt, both below), through the
 route key `modality` (route table above); every other kind inherits the
 chat-only defaults of the image hooks `Scripts/llm-router.py:Adapter`. Why the design is a route marker, a raw relay and
 a canonical-only sniffer, and what lost, is the image-endpoints addendum of
@@ -892,6 +916,77 @@ neither is proven there; the paths and headers are taken from the open-source
 Codex CLI and are **not yet measured live** (live smoke: pending), and the test
 group S uses synthetic fixtures. An account id an upstream error text echoes is
 not scrubbed (only the tokens are).
+
+**The `sdcpp` kind: a stable-diffusion.cpp sd-server.** An `sdcpp` backend serves
+image routes only (`MODALITIES` is `{image}`; its chat hooks are the base ones and
+are never reached, because an image route is refused on `/v1/messages` first), over
+the same two endpoints, the same single `_rt_send`, the fixed
+`IMAGE_PATHS` and the OpenAI envelope. No credential leaves the router: the
+backend's `auth_header` is `none`, the client's `Authorization`, `x-api-key` and
+cookies are never forwarded, and an `api_key` set beside `"auth_header": "none"`
+is accepted and not sent `Scripts/llm-router.py:SdcppAdapter`. The body is the
+client's bytes and the `model` is not rewritten (sd-server ignores it, so the route
+key need not equal the upstream name). sd-server's whole policy is therefore the
+router's, in five request guards and one prompt rule, each a 400 naming a rule and
+never a value, with the peer untouched `Scripts/llm-router.py:SdcppAdapter`:
+
+- `stream` true is refused (sd-server accepts it and ignores it silently), and a
+  JSON-form edit is refused ("this route accepts multipart edits only"; sd-server
+  answers a JSON edit 400 itself), both in the parser through the adapter's
+  `IMAGE_EDIT_JSON` flag `Scripts/llm-router.py:_rt_parse_image_inbound`.
+- `n` outside 1 to the route's `max_n` (default 4; the server itself clamps to 1-8),
+  `response_format` `url` (the answer is always base64), `output_format` `webp` on
+  generations and edits (this build answers 400 `output_formats = [png, jpeg]`, and
+  an older one returned a PNG labelled otherwise), and a `size` of `WxH` that is
+  zero-sided or over the route's `max_pixels` (default 2048 x 2048). `size` is
+  `auto` or `WxH` by the shared vocabulary: sd-server accepts `abcxdef` and runs a
+  full 1024 x 1024 generation, which the router refuses instead.
+- **The prompt rule.** A prompt that holds `sd_cpp_extra_args` in any letter case
+  (the decoded JSON string or the multipart `prompt` field, so a `_` escape does
+  not hide it) is refused with "the prompt carries sd.cpp native arguments; not
+  allowed on this route". sd-server takes native arguments inside the prompt, in an
+  `<sd_cpp_extra_args>{...}</sd_cpp_extra_args>` block, and that block overrides every
+  guard above (steps, size, batch count, the unbounded `custom_sigmas`, hires and
+  base64 media arrays) and, on its OpenAI routes, carries a raw server-side LoRA path.
+  Measured at sd.cpp `be486498`: only the tag pair is recognised, so there is no
+  brace rule, and a prompt with braces, quotes or JSON-looking text passes
+  byte-exact. The substring is deliberately wider than the server's case-sensitive
+  regex. The prompt field is sniffed with a 32 KiB cap (one byte more is a 400
+  naming `prompt`). `allow_prompt_args` is reserved and refused as an unknown
+  option; there is no opt-in.
+
+The answer is not relayed raw. A 2xx is parsed (under `_UPSTREAM_BODY_LIMIT`) and
+must be an object with a `data` list of objects that each hold a string `b64_json`;
+it is rebuilt as `{created, output_format, data: [{b64_json}]}` with `created` and
+`output_format` kept only when well typed, and `generation_info` (whose `seed` is a
+JSON string), any `usage` and every other key dropped; no `usage` is synthesized
+(there are no tokens). Anything else is a 502 "answered with a body that is not an
+image result". No upstream header is relayed (sd-server sends
+`Access-Control-Allow-Origin: *` on everything; the client sees only the router's
+Content-Type and Content-Length and an all-digit `Retry-After`)
+`Scripts/llm-router.py:_rt_sd_answer`. Errors take the mapping above with sd-server's
+shapes: `{"error": "<string>"}` and `{"error": "server_error", "message": "..."}`
+(the message, a JSON library parse error for an unparseable body, is the text for
+the whitelisted statuses and fixed text for a 500), an empty body (its 404s) or
+non-JSON text is the fixed per-status text, 401 and 403 carry the fixed text with
+no credential wording (sd-server holds none), and a 503 with `code`
+`model_not_loaded` or `model_loading` stays a 503 with the fixed text "the image
+backend has no model loaded" / "is loading its model" and that code
+`Scripts/llm-router.py:SdcppAdapter` `Scripts/llm-router.py:_rt_image_error`.
+
+**Declared limits of `sdcpp`.** sd-server has no authentication: the router's
+bearer is the only gate on the router, and the sd-server itself must be reachable
+only through the router (a loopback bind or a firewall). A client that reaches it
+directly has the powers the prompt rule withholds, including a raw server-side
+LoRA path in the extra-args block of the OpenAI routes, where the server's
+sandboxing resolver is not used (what it does with a non-model file is unmeasured).
+Other prompt-embedded syntaxes are the backend's and are not inspected
+(`<lora:...>` tags are off on its OpenAI routes). The model-management routes
+(`/sdcpp/v1/...`, load and unload) are unreachable through the router: the upstream
+path is only ever `/v1/images/generations` or `/edits`. The limits are measured at
+one sd.cpp commit and one model; re-measure when the build changes, and note that
+`size: auto` and the server's request-size cap are unmeasured. A direct sd.cpp
+change that accepts `stream` or webp is not followed until the router is.
 
 ## OAuth: the token store and the write-back
 
@@ -1149,6 +1244,27 @@ a chat request on the same backend unchanged (S2); a 401, one refresh and the
 same raw body resent, then the OpenAI-shaped re-login answer (S3); the
 usage-limit and plan error mapping and the token scrub (S4); and no token,
 account id or prompt in the log or stderr (S5).
+
+**The sdcpp kind.** Group R `tests/test_llm_router.py:group_r`
+`tests/test_llm_router.py:GR_IDS` drives an `sdcpp` backend on a scripted peer whose
+fixtures follow a live probe of a real sd-server (the 200 shape with
+`generation_info` and the permissive CORS header, the string-error and
+`server_error` + `message` 400/500s, an empty 404): the kind's config (a chat route,
+an `http://` URL without `allow_private`, `allow_loopback` alone, the option bounds,
+an unknown option by name, the kind list in the refusal) (R1); every request guard
+and the allowed values that must reach the peer byte for byte (R2); the rebuilt
+answer, key order, the dropped keys and headers, and nine malformed 2xx shapes as a
+502 (R3); the error shapes, the 503 codes and the scrubbed echoes (R4); the same
+loopback refusal as a `llamacpp` backend (R5); no credential header at the peer,
+with a keyed backend too (R6); byte-identical multipart and JSON bodies with the
+model not rewritten (R7); a 4 MiB `data` list mapped and a 2xx one byte over
+`_UPSTREAM_BODY_LIMIT` a 502 (R8); no prompt, base64 or `generation_info` text in a
+`--debug` log (R9); the marker refused in every case, spelling and field, braces and
+JSON-looking text passed, the 32 KiB prompt cap (R10, R11); the refusal text and log
+carry no prompt, with a control that reaches the peer (R12); and an upstream path no
+route name or model spelling can change (R13). J12, J39 and A14's refusal text carry
+the sixth kind, and J42 pins `sdcpp` as image-only with the three image hooks and
+none of the chat ones overridden.
 
 **Deadlines in milliseconds.** A case whose observable is one of the router's
 own deadlines — the ping interval, the relay tick, the pre-auth, header and

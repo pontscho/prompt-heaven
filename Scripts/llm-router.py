@@ -8,7 +8,7 @@
 One router instance serves Claude Code. It accepts Anthropic Messages requests
 (/v1/messages, /v1/messages/count_tokens), looks the request's `model` up in
 its JSON config, and forwards the call to the backend that route names. There
-are five backend kinds (the sixth name, anthropic, is reserved and refused):
+are six backend kinds (the seventh name, anthropic, is reserved and refused):
   passthrough  relayed as-is to an Anthropic-compatible upstream;
   llamacpp     llama-server's own /v1/messages, its quirks repaired;
   mistral      translated to and from the Mistral chat-completions API, with
@@ -19,7 +19,9 @@ are five backend kinds (the sixth name, anthropic, is reserved and refused):
   codex        the OpenAI Responses API on the ChatGPT-subscription endpoint,
                OAuth only, sent with the omp client identity;
   openai       the OpenAI Responses API on the platform endpoint, with an
-               api_key or an OAuth (Sign in with ChatGPT) login.
+               api_key or an OAuth (Sign in with ChatGPT) login;
+  sdcpp        a stable-diffusion.cpp sd-server, image routes only (no chat, no
+               credential): the image endpoints below, its answer rebuilt.
 codex and openai share one adapter driven by a profile row per wire dialect;
 they always stream upstream and aggregate for a non-stream client, and carry
 reasoning as thinking blocks signed "lrs1.<backend>.". GET /v1/models and
@@ -30,7 +32,7 @@ also carries the OpenAI model fields (object, created, owned_by) and the route's
 Every answer the client sees is Anthropic-shaped: a JSON body, an SSE stream
 that always closes its envelope, or the {"type":"error","error":{...}}
 envelope -- except on the image endpoints. A route with `"modality": "image"` (an openai
-backend with an api_key, or, experimentally, a codex backend) is served by POST /v1/images/generations and /v1/images/edits (a
+backend with an api_key, a sdcpp backend, or, experimentally, a codex backend) is served by POST /v1/images/generations and /v1/images/edits (a
 JSON body, or a multipart/form-data one for edits): the router reads `model` and a few
 guard fields, forwards the client's bytes untouched, relays a 2xx JSON answer untouched, and
 answers its own errors in the OpenAI envelope {"error":{message,type,param,code}} (no stream).
@@ -1359,7 +1361,8 @@ def _rt_cfg_route(name: str, entry: Any, backends: Mapping[str, BackendSpec],
     a JSON boolean (default true; false makes the router refuse a request that
     holds any image block with a 400, see _rt_vision_refusal); modality, when present, is
     "chat" (default) or "image" -- an image route serves /v1/images/generations and /edits
-    only, needs a kind whose adapter lists it in MODALITIES (openai, and the experimental codex), not
+    only, needs a kind whose adapter lists it in MODALITIES (openai, sdcpp -- which serves nothing else --
+    and the experimental codex), not
     the openai-oauth profile, and a route key equal to its model; the key is refused on the default route;
     options are checked by the backend kind's validators and an unknown option is refused by name.
     """
@@ -5472,6 +5475,123 @@ class OpenaiAdapter(ResponsesImageAdapter):
     IMAGE_EDIT_JSON = True
 
 
+_RT_SD_MAX_N = 4                        # the default `max_n` route option: images per request
+_RT_SD_MAX_PIXELS = 2048 * 2048         # the default `max_pixels` route option: width x height
+_RT_SD_MARKER = "sd_cpp_extra_args"     # the tag name of sd-server's in-prompt native-arguments block (D5b)
+_RT_SD_REFUSAL = "the prompt carries sd.cpp native arguments; not allowed on this route"
+_RT_SD_SIZE_RE = re.compile(r"([0-9]{1,5})x([0-9]{1,5})")
+_RT_SD_OUTPUT_FORMATS = ("png", "jpeg", "webp")
+# sd-server's 503 codes the client may act on (the model is not there yet), each with a fixed text.
+_RT_SD_UNAVAILABLE = {"model_not_loaded": "the image backend has no model loaded",
+                      "model_loading": "the image backend is loading its model"}
+
+
+class SdcppAdapter(Adapter):
+    """kind sdcpp: a stable-diffusion.cpp sd-server behind the image endpoints (and nothing else).
+
+    No credential (sd-server has no auth; auth_header none), no chat: MODALITIES is {image}. The client's
+    bytes go to /v1/images/generations or /edits untouched, so the router's guards are the whole policy:
+    JSON edits (sd-server takes multipart only), stream, n outside 1..max_n, response_format url,
+    output_format webp (sd-server's build refuses it, on edits it would be silently PNG), a size over
+    max_pixels, and a prompt that carries the `sd_cpp_extra_args` tag name (D5b: the block overrides every
+    guard above and takes a raw server-side LoRA path on the OpenAI routes; a case-insensitive substring
+    test, wider than the server's own case-sensitive tag regex, and no brace rule -- the server parses
+    the tag pair only). The 2xx answer is rebuilt as {created, output_format, data:[{b64_json}]}: the
+    generation_info, any usage and every other key are dropped. The chat hooks are the base ones and are
+    never called (an image route is refused on /v1/messages before the adapter is reached)."""
+
+    kind = "sdcpp"
+    ROUTE_OPTIONS: Mapping[str, _RtOptionValidator] = {
+        "max_n": _rt_opt_int(1, 16),
+        "max_pixels": _rt_opt_int(65536, 67108864),
+    }
+    MODALITIES = frozenset({"image"})
+    IMAGE_PATHS = {"generations": "/v1/images/generations", "edits": "/v1/images/edits"}
+    IMAGE_FIELDS = frozenset({"prompt"})
+    IMAGE_EDIT_JSON = False
+    IMAGE_MODEL_IS_KEY = False          # sd-server ignores `model`: the route key may differ from the upstream name
+
+    def image_request(self, inbound: InboundRequest) -> Tuple[str, bytes]:
+        """The fixed upstream path and the client's bytes, after the guards (each an ApiError 400 naming a
+        rule, never a value). `fields` are the sniffed, vocabulary-checked guard fields."""
+        fields = inbound.fields
+        options = inbound.route.options
+        max_n = options.get("max_n", _RT_SD_MAX_N)
+        max_pixels = options.get("max_pixels", _RT_SD_MAX_PIXELS)
+        if _RT_SD_MARKER in fields.get("prompt", "").casefold():
+            raise ApiError(400, "invalid_request_error", _RT_SD_REFUSAL)
+        if "n" in fields and not 1 <= int(fields["n"]) <= max_n:
+            raise ApiError(400, "invalid_request_error", "n must be 1-%d for this route" % max_n)
+        if fields.get("output_format") == "webp":
+            raise _rt_bad("output_format", "webp is not supported on this route")
+        if fields.get("response_format") == "url":
+            raise _rt_bad("response_format", "url is not supported on this route; b64_json only")
+        match = _RT_SD_SIZE_RE.fullmatch(fields.get("size", ""))
+        if match is not None:
+            width, height = int(match.group(1)), int(match.group(2))
+            if width < 1 or height < 1 or width * height > max_pixels:
+                raise _rt_bad("size", "must be positive and at most %d pixels on this route" % max_pixels)
+        return self.IMAGE_PATHS[_RT_IMAGE_KINDS[inbound.endpoint]], inbound.raw
+
+    def image_response(self, inbound: InboundRequest, status: int, body: bytes,
+                       content_type: str) -> Tuple[int, bytes]:
+        """2xx: the whole body parsed and rebuilt (_rt_sd_answer); a body that is not an object with a
+        `data` list of objects with a string b64_json is a 502. Non-2xx: the status through
+        _UPSTREAM_STATUS, a 503 model_not_loaded / model_loading with its fixed text and code, else
+        _rt_image_error (text only for 400/404/413/422/429, scrubbed, stripped and cut; 401 and 403 get
+        the fixed per-status text, sd-server holds no credential); an empty or non-JSON error body is the
+        fixed text."""
+        name = inbound.backend.name
+        if 200 <= status < 300:
+            rebuilt = _rt_sd_answer(body)
+            if rebuilt is None:
+                return 502, _rt_dumps(_rt_openai_error_body(
+                    502, "backend %s answered with a body that is not an image result" % name))
+            return status, rebuilt
+        parsed = _rt_sd_error_object(body)
+        code = parsed.get("code") if isinstance(parsed, dict) else None
+        if status == 503 and isinstance(code, str) and code in _RT_SD_UNAVAILABLE:
+            return 503, _rt_dumps(_rt_openai_error_body(503, _RT_SD_UNAVAILABLE[code], code=code))
+        if isinstance(parsed, dict) and isinstance(parsed.get("error"), str) and isinstance(parsed.get("message"), str):
+            # sd-server's {"error": "server_error", "message": "..."}: the message is the text.
+            body = _rt_dumps({"error": {"message": parsed["message"]}})
+        text, up_type, up_code, up_param = _rt_image_error(inbound, status, body)
+        return _UPSTREAM_STATUS.get(status, 502), _rt_dumps(_rt_openai_error_body(
+            _UPSTREAM_STATUS.get(status, 502), text, param=up_param, code=up_code, err_type=up_type))
+
+
+def _rt_sd_error_object(body: bytes) -> Any:
+    """The parsed JSON of an sd-server error body of at most _RT_LEARN_BODY_LIMIT bytes, else None."""
+    if len(body) > _RT_LEARN_BODY_LIMIT:
+        return None
+    try:
+        return _rt_loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        return None
+
+
+def _rt_sd_answer(body: bytes) -> Optional[bytes]:
+    """An sd-server 2xx body rebuilt as {created, output_format, data:[{b64_json}]} (created and
+    output_format only when well typed), or None when it is not an object with a `data` list of objects
+    that each hold a string b64_json. generation_info, usage and every other key are dropped."""
+    try:
+        obj = _rt_loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        return None
+    data = obj.get("data") if isinstance(obj, dict) else None
+    if not isinstance(data, list) or not all(isinstance(e, dict) and isinstance(e.get("b64_json"), str)
+                                             for e in data):
+        return None
+    out: Dict[str, Any] = {}
+    created = obj.get("created")
+    if isinstance(created, int) and not isinstance(created, bool):
+        out["created"] = created
+    if obj.get("output_format") in _RT_SD_OUTPUT_FORMATS:
+        out["output_format"] = obj["output_format"]
+    out["data"] = [{"b64_json": e["b64_json"]} for e in data]
+    return _rt_dumps(out)
+
+
 class _RtKindRow(NamedTuple):
     """One backend kind of _RT_KIND_TABLE (R-0084, NFR-2)."""
     kind: str                           # the config enum value (backends.<name>.kind)
@@ -5490,7 +5610,8 @@ _RT_KIND_TABLE: Tuple[_RtKindRow, ...] = (
     _RtKindRow("mistral", MistralAdapter, {}),
     _RtKindRow("codex", CodexAdapter, {"oauth": "codex"}),
     _RtKindRow("openai", OpenaiAdapter, {"oauth": "openai-oauth", "api_key": "openai-apikey"}),
-    _RtKindRow("anthropic", None, {}),      # reserved: decided by its own plan (D6)
+    _RtKindRow("sdcpp", SdcppAdapter, {}),
+    _RtKindRow("anthropic", None, {}),     # reserved: decided by its own plan (D6)
 )
 
 
@@ -9059,7 +9180,8 @@ example config (chmod 600; token: python3 -c 'import secrets;print(secrets.token
       "mistral":  {"kind": "mistral", "base_url": "https://api.mistral.ai", "api_key": "<key>"},
       "codex":    {"kind": "codex", "oauth": {}},
       "openai":   {"kind": "openai", "api_key": "<sk-...>"},
-      "openai-siwc": {"kind": "openai", "oauth": {}}
+      "openai-siwc": {"kind": "openai", "oauth": {}},
+      "sd":       {"kind": "sdcpp", "base_url": "http://192.168.2.245:8082", "allow_private": true}
     },
     "routes": {
       "claude-opus-4-5":   {"backend": "codex", "model": "gpt-5-codex"},
@@ -9067,7 +9189,9 @@ example config (chmod 600; token: python3 -c 'import secrets;print(secrets.token
       "claude-sonnet-4-5": {"backend": "mistral", "model": "mistral-large-latest",
                             "max_input_tokens": 262144},
       "claude-haiku-4-5":  {"backend": "llama", "model": "qwen3-coder"},
-      "gpt-image-1":       {"backend": "openai", "model": "gpt-image-1", "modality": "image"}
+      "gpt-image-1":       {"backend": "openai", "model": "gpt-image-1", "modality": "image"},
+      "sd-cpp-local":      {"backend": "sd", "model": "sd-cpp-local", "modality": "image",
+                            "options": {"max_n": 4, "max_pixels": 4194304}}
     },
     "default": {"backend": "infernox", "model": "local-model"}
   }
@@ -9086,7 +9210,14 @@ example config (chmod 600; token: python3 -c 'import secrets;print(secrets.token
   the private <base>/codex/images/... endpoints with the client's body as sent (the Codex CLI
   shape); unstable, not on Free plans, quota-limited, not measured live. The router reads only
   model and a few guard fields and forwards the body as it came;
-  raise --body-limit for large edit uploads. GET /v1/models lists every route with its modality
+  raise --body-limit for large edit uploads. A sdcpp backend (a stable-diffusion.cpp sd-server;
+  loopback needs allow_private AND allow_loopback, a LAN host allow_private) takes image routes
+  only, any route key (sd-server ignores `model`), options max_n (1-16, default 4) and
+  max_pixels (65536-67108864, default 2048*2048); the router refuses stream, JSON-form edits
+  (multipart only), n outside 1..max_n, response_format url, output_format webp, a size over
+  max_pixels and any prompt holding "sd_cpp_extra_args" (sd-server's in-prompt native
+  arguments, which would bypass those limits), and drops generation_info from the answer.
+  sd-server has no auth: keep it reachable only through the router. GET /v1/models lists every route with its modality
   (?modality=chat|image|all filters it); --max-image-requests caps image requests in flight.
   A mistral route's option tool_result_images (boolean, default true): an image inside a
   tool_result goes upstream as image_url parts in the tool message; false sends "[image omitted]".
