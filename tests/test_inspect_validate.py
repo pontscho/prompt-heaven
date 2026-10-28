@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Functional suite for the mcp-inspect VALIDATION family (groups A-R).
+"""Functional suite for the mcp-inspect VALIDATION family (groups A-S).
 
 Spawns ONE long-lived `python3 Scripts/mcp-inspect.py` child, speaks
 line-delimited JSON-RPC 2.0 to it, and asserts on `isError` plus substrings of
@@ -38,6 +38,9 @@ Coverage by group:
      `timeout`, `max_answer_chars` -- passes the gate; a pinned format
      validator refuses `format`/`fmt` instead of overriding it; `versions`
      takes tools | tool | name | names and refuses two at once (ADR 0015)
+  S  md_outline: wc -l line count and ATX header rows, fences (``` and ~~~,
+     matching lengths) ignored, CommonMark shape, max_level/limit/offset,
+     CRLF, no final newline, refusals, aliases
   Rthe accepted table cannot drift: every registry function has a row and no
      row names a missing one, and each row EQUALS the keys the handler reads,
      extracted from the server source by ast (helpers that receive `p`
@@ -200,6 +203,37 @@ BIN_FIXTURES = {
 
 
 MARKER = "bash-must-not-run.marker"
+
+# group S fixture: 24 lines, every trap on its own line (numbers in comments).
+OUTLINE_MD = "\n".join([
+    "# Title",                       # 1  header
+    "intro",                         # 2
+    "## Sub two ##",                 # 3  header, closing hashes dropped
+    "```python",                     # 4
+    "# in backtick fence",           # 5
+    "```",                           # 6
+    "~~~",                           # 7
+    "# in tilde fence",              # 8
+    "```",                           # 9  does not close a ~~~ fence
+    "# still in tilde fence",        # 10
+    "~~~",                           # 11
+    "````",                          # 12
+    "```",                           # 13 shorter run does not close
+    "# inside long fence",           # 14
+    "````",                          # 15
+    "   ### Indented three",         # 16 header (3 spaces is allowed)
+    "    # four spaces",             # 17 indented code
+    "#nospace",                      # 18 no space after the hashes
+    "####### seven",                 # 19 seven hashes
+    "###### Six",                    # 20 header
+    "Setext",                        # 21 setext, skipped by design
+    "======",                        # 22
+    "#",                             # 23 header with empty text
+    "## After fences",               # 24 header
+]) + "\n"
+OUTLINE_EXPECT = [(1, 1, "Title"), (3, 2, "Sub two"),
+                  (16, 3, "Indented three"), (20, 6, "Six"), (23, 1, ""),
+                  (24, 2, "After fences")]
 
 
 def side_effect_script(work):
@@ -910,6 +944,7 @@ def run(opts=None):
             ("sha256", {"path": SERVER}),
             ("md5", {"path": SERVER}),
             ("validate", {"path": SERVER}),
+            ("md_outline", {"path": H.repo_path("docs", "INDEX.md")}),
         ]
         # Named WITH the reason rather than quietly absent: an uncovered handler
         # is exactly how `### system (launchctl limit)` survived this group's
@@ -1020,6 +1055,9 @@ def run(opts=None):
             "sha256": dict(hash_all, algo="sha256", algorithm="sha256"),
             "md5": dict(hash_all, algo="md5", algorithm="md5"),
             "validate": dict(validate_all, format="json", fmt="json"),
+            "md_outline": {"path": f("outline.md"), "file": f("outline.md"),
+                           "max_level": 3, "limit": 5, "offset": 0,
+                           "max_mb": 1},
         }
         for fmt in PINNED_FORMATS:
             accepts[fmt] = dict(validate_all)
@@ -1091,6 +1129,94 @@ def run(opts=None):
                      [] if "params: tools | tool | name | names" in vline else
                      ["versions line lacks the spellings: %r" % vline],
                      text=vline)
+
+        # ============ S: md_outline -- the `wc -l; grep -n "^#"` pair ============
+        # Correct where the one-liner is not: a `#` line inside a fence is not a
+        # header, and `#nospace`, 4-space indent and 7 hashes are not either.
+        # Setext headers are skipped by design (the docstring says so).
+        work.write_text("outline.md", OUTLINE_MD)
+        work.write_bytes("nofinal.md", b"# A\n## B")
+        work.write_bytes("empty.md", b"")
+        work.write_bytes("crlf.md", b"# A\r\n## B ##\r\n")
+        work.write_bytes("binary.md", b"# A\n\x00\n")
+        osc = f("outline.md")
+
+        def outline_rows(text):
+            out = []
+            for ln in text.splitlines():
+                parts = ln.split(None, 2)
+                if parts and parts[0].isdigit() and len(parts) >= 2 \
+                        and parts[1].isdigit():
+                    out.append((int(parts[0]), int(parts[1]),
+                                parts[2] if len(parts) > 2 else ""))
+            return out
+
+        t = case(suite, cli, "S", "outline-lines-total", "md_outline",
+                 {"path": osc}, must=["lines: 24"],
+                 must_not=["no final newline"])
+        got = outline_rows(t)
+        suite.record("S", "outline-rows-exact",
+                     [] if got == OUTLINE_EXPECT else
+                     ["rows %r != %r" % (got, OUTLINE_EXPECT)], text=t)
+        t = case(suite, cli, "S", "outline-max-level-2", "md_outline",
+                 {"path": osc, "max_level": 2})
+        got = outline_rows(t)
+        want = [r for r in OUTLINE_EXPECT if r[1] <= 2]
+        suite.record("S", "outline-max-level-rows",
+                     [] if got == want else ["rows %r != %r" % (got, want)],
+                     text=t)
+        t = case(suite, cli, "S", "outline-limit-offset", "md_outline",
+                 {"path": osc, "limit": 2, "offset": 1},
+                 must=["offset=3"])
+        got = outline_rows(t)
+        suite.record("S", "outline-limit-offset-rows",
+                     [] if got == OUTLINE_EXPECT[1:3] else
+                     ["rows %r != %r" % (got, OUTLINE_EXPECT[1:3])], text=t)
+        t = case(suite, cli, "S", "outline-offset-past-end", "md_outline",
+                 {"path": osc, "offset": 99}, must=["lines: 24"])
+        suite.record("S", "outline-offset-past-end-rows",
+                     [] if not outline_rows(t) else ["rows past the end"],
+                     text=t)
+        case(suite, cli, "S", "outline-no-final-newline", "md_outline",
+             {"path": f("nofinal.md")},
+             must=["lines: 1", "no final newline", "2"])
+        case(suite, cli, "S", "outline-empty-file", "md_outline",
+             {"path": f("empty.md")}, must=["lines: 0"])
+        t = case(suite, cli, "S", "outline-crlf", "md_outline",
+                 {"path": f("crlf.md")}, must=["lines: 2"],
+                 must_not=["\r"])
+        suite.record("S", "outline-crlf-rows",
+                     [] if outline_rows(t) == [(1, 1, "A"), (2, 2, "B")] else
+                     ["rows %r" % outline_rows(t)], text=t)
+        # the wc -l figure cross-checked against the bytes of a real file
+        real = H.repo_path("docs", "INDEX.md")
+        with open(real, "rb") as fh:
+            nl = fh.read().count(b"\n")
+        case(suite, cli, "S", "outline-real-file-wc", "md_outline",
+             {"path": real}, must=["lines: %d" % nl])
+        for al in ("outline", "headers", "toc"):
+            t2 = case(suite, cli, "S", "alias-" + al, al, {"path": osc},
+                      must=["lines: 24"], must_not=["unknown function"])
+        case(suite, cli, "S", "outline-file-spelling", "md_outline",
+             {"file": osc}, must=["lines: 24"])
+        for cid, params, frag in [
+                ("no-path", {}, "path"),
+                ("both-path-and-paths", {"path": osc, "paths": [osc]},
+                 "paths"),
+                ("missing-file", {"path": f("nope.md")}, "cannot read"),
+                ("directory", {"path": f("hashtree")}, "directory"),
+                ("max-level-7", {"path": osc, "max_level": 7}, "max_level"),
+                ("max-level-0", {"path": osc, "max_level": 0}, "max_level"),
+                ("max-level-str", {"path": osc, "max_level": "x"},
+                 "max_level"),
+                ("limit-negative", {"path": osc, "limit": -1}, "limit"),
+                ("offset-negative", {"path": osc, "offset": -1}, "offset"),
+                ("max-mb-cap", {"path": big, "max_mb": 1}, "max_mb"),
+                ("binary", {"path": f("binary.md")}, "binary")]:
+            case(suite, cli, "S", "refuse-" + cid, "md_outline", params,
+                 want_error=True, must=[frag])
+        case(suite, cli, "S", "outline-limit-0-no-cap", "md_outline",
+             {"path": osc, "limit": 0}, must=["Six"])
 
         cli.close()
 

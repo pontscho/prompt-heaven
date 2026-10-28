@@ -2252,6 +2252,104 @@ def h_bash(p: dict) -> str:
     return h_validate(p, "bash")
 
 
+_MD_OUTLINE_MAX_MB = 32      # same ceiling as validate: the whole file is read
+_MD_OUTLINE_LIMIT = 200      # header rows per call unless `limit` says otherwise
+_MD_FENCE_OPEN = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+_MD_ATX = re.compile(r"^ {0,3}(#{1,6})(?:[ \t]+(.*))?$")
+_MD_ATX_CLOSE = re.compile(r"(?:^|[ \t]+)#+[ \t]*$")
+
+
+def _md_headers(text: str) -> List[Tuple[int, int, str]]:
+    """ATX headers of `text` as (line, level, text), fenced code excluded.
+
+    CommonMark shapes only: 0-3 spaces of indent, 1-6 `#`, then a space/tab or
+    the end of the line (`#tag` and 7 hashes are not headers), an optional
+    closing `#` run dropped.  A ``` or ~~~ fence (0-3 spaces indent, 3+ marks,
+    a backtick fence's info string free of backticks) hides everything up to
+    a closing fence of the same mark and at least the same length, or to EOF.
+    NOT handled, by design: Setext headers (`Title` over `=====`), fences
+    nested in blockquotes or list items, and HTML blocks -- a `#` line inside
+    those still counts.  Lines split on `\\n` only, a trailing `\\r` ignored.
+    """
+    out: List[Tuple[int, int, str]] = []
+    fence = ""                        # the opening run while inside a fence
+    for no, raw in enumerate(text.split("\n"), 1):
+        line = raw[:-1] if raw.endswith("\r") else raw
+        if fence:
+            m = re.match(r"^ {0,3}(" + re.escape(fence[0]) + r"{"
+                         + str(len(fence)) + r",})[ \t]*$", line)
+            if m:
+                fence = ""
+            continue
+        m = _MD_FENCE_OPEN.match(line)
+        if m and not (m.group(1)[0] == "`" and "`" in m.group(2)):
+            fence = m.group(1)
+            continue
+        m = _MD_ATX.match(line)
+        if m:
+            title = _MD_ATX_CLOSE.sub("", (m.group(2) or "").strip()).strip()
+            out.append((no, len(m.group(1)), title))
+    return out
+
+
+def h_md_outline(p: dict) -> str:
+    raw = p.get("path") or p.get("file")
+    if not raw or not str(raw).strip():
+        raise ValueError("'md_outline' requires params.path.")
+    path = os.path.expanduser(str(raw).strip())
+    max_level = _int_param(p["max_level"], "max_level") \
+        if p.get("max_level") is not None else 6
+    if not 1 <= max_level <= 6:
+        raise ValueError(f"'max_level' must be 1-6; got {max_level}.")
+    limit = _int_param(p["limit"], "limit") \
+        if p.get("limit") is not None else _MD_OUTLINE_LIMIT
+    if limit < 0:
+        raise ValueError(f"'limit' must be >= 0 (0 = no cap); got {limit}.")
+    offset = _int_param(p["offset"], "offset") \
+        if p.get("offset") is not None else 0
+    if offset < 0:
+        raise ValueError(f"'offset' must be >= 0; got {offset}.")
+    max_mb = _int_param(p["max_mb"], "max_mb") \
+        if p.get("max_mb") is not None else _MD_OUTLINE_MAX_MB
+    if os.path.isdir(path):
+        raise ValueError(f"{path} is a directory.")
+    try:
+        size = os.path.getsize(path)
+        if max_mb > 0 and size > max_mb * 1024 * 1024:
+            raise ValueError(f"{path} is {_kb_human(size / 1024)}, exceeds "
+                             f"max_mb={max_mb} (0 = no cap).")
+        with open(path, "rb") as fh:
+            data = fh.read()
+    except OSError as exc:
+        raise ValueError(f"cannot read {path}: {exc.strerror or exc}")
+    if b"\x00" in data:
+        raise ValueError(f"{path} looks binary (NUL byte); not a markdown file.")
+
+    newlines = data.count(b"\n")                 # exactly what `wc -l` prints
+    info = [f"lines: {newlines}"]
+    if data and not data.endswith(b"\n"):
+        info.append(f"note: no final newline -- the last line is {newlines + 1}"
+                    f", wc -l counts {newlines}")
+    headers = [h for h in _md_headers(data.decode("utf-8", "replace"))
+               if h[1] <= max_level]
+    info.append(f"headers: {len(headers)} (level <= {max_level})")
+    page = headers[offset:offset + limit] if limit else headers[offset:]
+    if headers and not page:
+        info.append(f"shown: none -- offset {offset} is past the last header")
+    elif page:
+        info.append(f"shown: {offset + 1}-{offset + len(page)}")
+        rest = len(headers) - offset - len(page)
+        if rest > 0:
+            info.append(f"more: {rest} header(s) after these; pass "
+                        f"offset={offset + len(page)}")
+    text = _md_lines(info)
+    if page:
+        text += "\n\n" + _md_fence(_fmt_table(
+            ["line", "level", "text"],
+            [[str(n), str(lv), t] for n, lv, t in page]))
+    return text
+
+
 # canonical -> (handler, one-line description)
 HANDLERS: Dict[str, Tuple[Any, str]] = {
     "processes":   (h_processes, "List processes (params: filter, user, sort=cpu|mem|pid, limit, timeout)"),
@@ -2277,6 +2375,7 @@ HANDLERS: Dict[str, Tuple[Any, str]] = {
     "sha256":      (h_sha256, "SHA-256 of a file or files (params: path | paths [req], expect, max_mb, recursive, max_files)"),
     "md5":         (h_md5, "MD5 of a file or files (params: path | paths [req], expect, max_mb, recursive, max_files)"),
     "validate":    (h_validate, "Syntax/format validation, format auto-detected from the extension (params: path | paths | content+format; format, strict, max_mb)"),
+    "md_outline":  (h_md_outline, "Markdown outline: `wc -l` line count plus one row per ATX header, line | level | text, fenced code skipped, Setext headers not listed (params: path [req], max_level=1-6 (default 6), limit (default 200, 0 = no cap), offset, max_mb)"),
     "json":        (h_json, "Validate JSON (params: path | paths | content)"),
     "python":      (h_python, "Validate Python syntax via in-memory compile() — stronger than ast.parse, writes no .pyc (params: path | paths | content)"),
     "yaml":        (h_yaml, "Validate YAML, all documents — PyYAML if installed, else a LIMITED stdlib pre-check (params: path | paths | content)"),
@@ -2324,6 +2423,8 @@ ALIASES = {
     # the same two spellings the FORMAT table accepts, so `function="sh"` and
     # `params.format="sh"` cannot disagree about which parser they mean
     "sh": "bash", "shell": "bash",
+    "outline": "md_outline", "headers": "md_outline", "toc": "md_outline",
+    "md": "md_outline", "markdown": "md_outline",
 }
 
 
@@ -2375,6 +2476,8 @@ HANDLER_ACCEPTED_PARAMS: Dict[str, set] = {
     "sha256":      _COMMON_PARAMS | _HASH_PARAMS,
     "md5":         _COMMON_PARAMS | _HASH_PARAMS,
     "validate":    _COMMON_PARAMS | _VALIDATE_FILE_PARAMS | {"format", "fmt"},
+    "md_outline":  _COMMON_PARAMS | {"path", "file", "max_level", "limit",
+                                     "offset", "max_mb"},
 }
 for _pinned in ("json", "python", "yaml", "toml", "xml", "ini", "csv", "tsv",
                 "plist", "javascript", "bash"):
@@ -2584,6 +2687,11 @@ INSPECT_CALL_TOOL = {
         "  validate (lint/check) params: path | paths (a LIST — check many files "
         "in ONE call) | content+format; format (else from the extension), "
         "strict, max_mb (0 = no cap)\n"
+        "  md_outline (outline/headers/toc) params: path [required], max_level "
+        "1-6 (default 6), limit (default 200, 0 = no cap), offset, max_mb — "
+        "replaces `wc -l f.md; grep -n \"^#\" f.md`: line count (wc -l, with a "
+        "no-final-newline note) + `line | level | text` per ATX header, "
+        "``` / ~~~ fenced code ignored; Setext headers not listed\n"
         "  json python yaml toml xml ini csv tsv plist javascript bash — each is "
         "also its own function, same params, format pinned (so format/fmt is "
         "refused — use validate); aliases "

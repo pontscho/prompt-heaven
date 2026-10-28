@@ -297,7 +297,7 @@ def run_smoke(opts):
 #     Adding or retiring a server would trip a typed count for no defect.
 SUITES = [
     ("inspect_validate", run_inspect_validate,
-     "mcp-inspect VALIDATION family", 280),
+     "mcp-inspect VALIDATION family", 313),
     ("mcp_first_guard", run_mcp_first_guard,
      "mcp-first-guard PreToolUse Bash hook", 381),
     # The egress work added five rows (M EG1-EG4: --egress-port /

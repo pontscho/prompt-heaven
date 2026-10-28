@@ -83,6 +83,7 @@ If you are about to type any of these as the **primary** Bash command, STOP and 
 | `which foo`, `command -v foo` | `inspect_call {function:"which", params:{name:"foo"}}` |
 | `foo --version` | `inspect_call {function:"versions", params:{tools:"foo"}}` |
 | `shasum -a 256 f`, `md5 f`, `md5sum f` | `inspect_call {function:"sha256", params:{path:"f"}}` |
+| `wc -l f.md; grep -n "^#" f.md \| head -60` | `inspect_call {function:"md_outline", params:{path:"f.md"}}` |
 | `python3 -c "import ast; ast.parse(open('f').read())"` | `inspect_call {function:"python", params:{path:"f"}}` |
 | `python3 -m py_compile f.py` | `inspect_call {function:"python", params:{path:"f.py"}}` |
 | `python3 -m json.tool f.json`, `jq . f.json` | `inspect_call {function:"json", params:{path:"f.json"}}` |
@@ -134,7 +135,8 @@ daemons) · `interfaces` (ifconfig, ip, interface, nics, addr) ·
 
 **Files**
 `stat` (file_info, fileinfo, metadata) · `hash` (checksum, digest) ·
-`sha256` (sha256sum, shasum, sha) · `md5` (md5sum)
+`sha256` (sha256sum, shasum, sha) · `md5` (md5sum) ·
+`md_outline` (outline, headers, toc, md, markdown)
 
 **Validation**
 `validate` (lint, check, verify, syntax, parse, wellformed) · `json` (jsonlint) ·
@@ -347,6 +349,15 @@ itself**: type, `filemode` + octal, owner `user:group` with numeric uid/gid, siz
 link count, inode + device, mtime/atime/ctime, the link target and its realpath with an
 explicit `BROKEN` marker when it dangles, entry counts for a directory, and the access
 bits **for the server process** (not for you).
+
+### md_outline
+`path` (alias `file`) **[required]**, `max_level` (1-6, default 6), `limit` (default 200,
+`0` = no cap), `offset` (skip that many headers), `max_mb` (default 32). Replies with
+`lines: N` (exactly what `wc -l` prints; a `note:` line says when the file has no final
+newline) and a `line level text` row per ATX header. `#` lines inside ``` / ~~~ fences
+(matching mark, closing run at least as long) are skipped; a header needs 0-3 spaces of
+indent and a space/tab or end of line after 1-6 hashes. Setext headers (`Title` over
+`=====`), and fences nested in blockquotes or list items, are not handled.
 
 ### hash / sha256 / md5
 `path` (alias `file`) or `paths` (a list) **[required]**, `expect` (single path only →
