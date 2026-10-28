@@ -1000,8 +1000,31 @@ generation answered 200 in about 22 s and a JSON edit carrying
 `images[].image_url` 200 in about 16 s, each answer holding the keys
 `background`, `created`, `data` (`[{b64_json, generation_id}]`), `output_format`,
 `quality` (`auto` came back resolved to `low`), `safety_identifier`, `size`
-(`auto` came back resolved to `1254x1254`) and `usage`. Not tried there: a
-multipart edit and `output_format` `jpeg`. A successful answer carries no quota
+(`auto` came back resolved to `1254x1254`) and `usage`. A follow-up probe
+(2026-10-27/28) measured two refusals the router now enforces
+`Scripts/llm-router.py:CodexAdapter`: the backend **ignores `output_format`**
+(a generation asked for `jpeg` answered 200 with a PNG and `output_format`
+`png`), so `output_format` `jpeg` or `webp` is a router 400 "output_format: this
+backend always answers png" on generations and JSON edits (absent or `png` pass),
+in the adapter's `image_request` guard like the sdcpp `webp` one; and a
+hand-built **multipart edit was rejected upstream** (400), so every multipart
+edit is a router 400 "multipart edits are not supported on this route; send the
+JSON form" through the adapter's `IMAGE_EDIT_MULTIPART` flag (default true, false
+on codex only) beside `IMAGE_EDIT_JSON` in
+`Scripts/llm-router.py:_rt_parse_image_inbound`; the JSON edit form is the
+working one. That 400 had reached the client as only "backend codex answered 400":
+the ChatGPT backend's errors are probably `{"detail": "..."}`, so the shared
+error extraction `Scripts/llm-router.py:_rt_image_error` now also reads a
+top-level **string** `detail` (same scrub, secret strip and 300-character cut; a
+list or dict `detail`, such as FastAPI validation errors, keeps the fixed text).
+The backend also **ignores `size` and `quality`** (measured by the ai-soul
+sibling on 2026-10-28: a request for `1024x1024` at `quality` `high` answered
+200 with a `1370x1148` PNG echoing `quality` `low`): it picks the image size
+and the quality itself. The router does not refuse these two fields, because a
+refusal would break clients that send them to every image route; a client must
+read the answer's `size`, `quality` and `output_format` echoes and the decoded
+image, not the values it sent.
+A successful answer carries no quota
 or limit information, and the shape of a quota-exhausted error has not been
 seen. The test group S still uses synthetic fixtures. The login's account id
 (at least `Scripts/llm-router.py:_RT_ACCOUNT_PIN_MIN` characters) is pinned in
@@ -1389,12 +1412,14 @@ comment-only trickle past `idle_timeout` a stall (T13)
 `tests/test_llm_router.py:GS_IDS` drives a codex OAuth backend through the N
 group's rig (a TLS auth peer and a TLS codex peer) with synthetic fixtures: the
 route config, the openai-oauth refusal kept (S1); the `/codex/images/...` paths,
-byte-identical bodies of a generation, a JSON edit and a multipart edit, the
-login's Bearer and account id, `Accept: application/json`, no `session_id`, and
-a chat request on the same backend unchanged (S2); a 401, one refresh and the
+byte-identical bodies of a generation and a JSON edit (`output_format` absent
+or `png`), the login's Bearer and account id, `Accept: application/json`, no
+`session_id`, `jpeg`/`webp` and every multipart edit refused with the peer
+untouched, and a chat request on the same backend unchanged (S2); a 401, one refresh and the
 same raw body resent, then the OpenAI-shaped re-login answer (S3); the
 usage-limit and plan error mapping and the token scrub, with a 400 and a 429
-echoing the account id relayed with `[redacted]` (S4)
+echoing the account id relayed with `[redacted]`, and a string `detail` relayed
+and scrubbed while a list, dict or number `detail` keeps the fixed text (S4)
 `tests/test_llm_router.py:gs_s4`; and no token, account id or prompt in the log
 or stderr (S5). The live run of 2026-10-27 is recorded above and in ADR 0028's
 addendum, not as a fixture.
@@ -1562,13 +1587,18 @@ read before relying on one of them. In brief:
   sniffer accepts only the canonical spelling rather than guessing the
   upstream's. The live SSE event names and sizes are unverified too (the bullet
   above). Measured live, by contrast: the codex image routes (generations and a
-  JSON edit, not a multipart edit or `jpeg`) and an `sdcpp` backend against one
-  sd-server build, both in *Image endpoints* above.
+  JSON edit; a multipart edit and `jpeg` were tried and are refused) and an
+  `sdcpp` backend against one sd-server build, both in *Image endpoints* above.
 - **The codex image routes ride a private, unstable endpoint.** It may change or
   vanish without notice; a successful answer says nothing about the remaining
   quota, and what a quota-exhausted error looks like has not been seen, so its
   `type` and `code` reach the client only if they pass the token rule. The
-  codex image stream is not relayed (`stream: true` is a 400).
+  codex image stream is not relayed (`stream: true` is a 400). The router
+  refuses `output_format` other than `png` and multipart edits on these routes
+  because the backend ignores the first and rejects the second; if it ever
+  honours either, the two guards are the lines to lift. A `detail` that is not a
+  string (a validation-error list) is not relayed: the client sees the fixed
+  "backend codex answered 400".
 - **An sd-server has no authentication,** so the router's bearer protects only
   the router: the sd-server must be reachable through the router alone (see
   *Declared limits of `sdcpp`* above).

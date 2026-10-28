@@ -1405,3 +1405,29 @@ The `llm_router` suite moved 400 (75909bc), 404 (af3ca10), 425 (5448fca), 430 (P
 - On codex: a multipart edit, `output_format` `jpeg`, the quota-exhausted error and any stream.
 - Live acceptance of the list-form `function_call_output` by codex and openai-oauth.
 - What sd-server does with a LoRA path that is not a model file (OQ-10).
+
+## Addendum (2026-10-28): Live findings on the codex image route: output_format, multipart edits, size and quality
+
+The codex image route (the ChatGPT backend's private images endpoints, reached through a codex backend with modality image) was probed live on 2026-10-27 and 2026-10-28 through the running router on the `gpt-image-2` route. The earlier addendum recorded the first measurement; this one records what the follow-up probes found and what the router now does about it.
+
+### Measured
+
+- A generation asked for `output_format` jpeg answered 200 with a PNG (magic 89504E47) and the answer echoed `output_format` png: the backend ignores the field.
+- A hand-built multipart `/v1/images/edits` (fields model, prompt, quality, background and an `image[]` file part) was rejected upstream with a 400; the router had relayed only the fixed text `backend codex answered 400`. The JSON edit form (`images[].image_url` data URLs) is the working one.
+- A sibling session (ai-soul) measured that `size` and `quality` are ignored as well: a request for 1024x1024 at quality high answered 200 with a 1370x1148 PNG, the answer echoing quality low and size 1370x1148. `auto` values resolve the same way (quality low, size 1254x1254 in the first probe).
+
+### Decisions
+
+- `output_format` other than png is a router 400 on codex image routes (rule-only message `this backend always answers png`), in the codex adapter's image_request guard, as the sdcpp kind refuses webp: a silently ignored format is a defect because the client decodes by what it asked for. Absent or png pass.
+- Multipart edits are a router 400 on codex image routes (`multipart edits are not supported on this route; send the JSON form`), through a new adapter attribute `IMAGE_EDIT_MULTIPART` (default true, false on codex only, pinned by J42) checked next to `IMAGE_EDIT_JSON` in the image parser; the check follows the stream check so a streaming request keeps its own refusal.
+- `size` and `quality` are NOT refused. The alternative, refusing them as the sdcpp kind refuses a bad size, would break the one known client (ai-soul sends a size enum and quality auto to every image route) for a difference in the result, not in correctness; the limit is declared instead: a client reads the answer's size, quality and output_format echoes and decodes by the bytes.
+- The shared upstream error extraction now also reads a top-level string `detail` (the ChatGPT backend's probable error shape) for the relayed statuses, with the same scrub, secret strip, control-character filter and 300-character cut; a list or dict `detail` keeps the fixed text; 401, 403 and 5xx are unchanged.
+
+### Declared limits added
+
+- The codex image backend picks the image size and quality itself and ignores output_format; it is private, unstable and not available on Free plans, and its quota-exhausted error shape has not been seen.
+- Multipart edits on codex are refused at the router on the strength of one upstream 400 whose reason was not visible; if the backend ever accepts them, the flag is one attribute.
+
+### Tests
+
+Group S cases S2 (output_format guard, multipart refusal, byte-exact relay of png and absent) and S4 (the `detail` extraction and its scrubbing), the J42 pin on `IMAGE_EDIT_MULTIPART`, and one adjustment of T1 (a multipart edit on codex is now refused before it can be streamed). The llm_router suite stays at 456 cases.

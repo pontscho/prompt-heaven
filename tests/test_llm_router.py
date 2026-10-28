@@ -19742,10 +19742,12 @@ def gs_s1(fixture_root, mod):
 
 
 def gs_s2(fixture_root, ctx):
-    """S2: on the peer, generations go to /codex/images/generations and edits (JSON and multipart) to
-    /codex/images/edits with the body byte-identical, the Content-Type as sent, the stored login's
-    Authorization, chatgpt-account-id and the chat identity pairs, Accept: application/json and NO
-    session_id; a chat request on the same backend keeps its session_id and event-stream Accept."""
+    """S2: on the peer, generations go to /codex/images/generations and JSON edits to
+    /codex/images/edits with the body byte-identical (output_format absent or png), the Content-Type as
+    sent, the stored login's Authorization, chatgpt-account-id and the chat identity pairs, Accept:
+    application/json and NO session_id; output_format jpeg/webp and every multipart edit are 400 at the
+    router with the peer untouched; a chat request on the same backend keeps its session_id and
+    event-stream Accept."""
     rot = gn_mint_refresh("s2")
 
     def body(rig):
@@ -19756,11 +19758,15 @@ def gs_s2(fixture_root, ctx):
                                            {"file_id": "file-tf-s2"}]}, indent=1).encode("utf-8")
         ctype, sent_mp = gq_multipart("tfs2b", [("model", GS_IMG), ("prompt", "tf s2 mp")],
                                       [("image", "a.png", "image/png", b"\x89PNG\r\n\x1a\n")])
+        sent_gen_png = gq_json_body(GS_IMG, "tf s2 png", output_format="png")
+        sent_json_png = json.dumps({"model": GS_IMG, "prompt": "tf s2 edit png", "output_format": "png",
+                                    "images": [{"file_id": "file-tf-s2"}]}).encode("utf-8")
         shown = []
         for label, path, want_path, payload, ct in (
                 ("generations", GQ_GEN, GS_PATH_GEN, sent_gen, "application/json"),
+                ("generations output_format png", GQ_GEN, GS_PATH_GEN, sent_gen_png, "application/json"),
                 ("JSON edit", GQ_EDIT, GS_PATH_EDIT, sent_json, "application/json"),
-                ("multipart edit", GQ_EDIT, GS_PATH_EDIT, sent_mp, ctype)):
+                ("JSON edit output_format png", GQ_EDIT, GS_PATH_EDIT, sent_json_png, "application/json")):
             before = len(rig.up.requests)
             status, _h, answer = gq_post(rig.client, path, payload, ct)
             problems += [] if status == 200 else gq_expect(label, status, answer, 200)
@@ -19790,6 +19796,30 @@ def gs_s2(fixture_root, ctx):
                 if name in seen:
                     problems.append("%s: the peer got a %s header" % (label, name))
             shown.append(want_path)
+        # Refused at the router, the peer untouched: output_format other than png (the backend ignores it and
+        # answers png) on generations and the JSON edit, and every multipart edit (the endpoint rejects it).
+        before = len(rig.up.requests)
+        fmt_want = "output_format: this backend always answers png"
+        for fmt in ("jpeg", "webp"):
+            for label, path, make in (
+                    ("generations", GQ_GEN, lambda f: gq_json_body(GS_IMG, "tf s2 fmt", output_format=f)),
+                    ("JSON edit", GQ_EDIT, lambda f: json.dumps({"model": GS_IMG, "prompt": "tf s2 fmt",
+                                                                 "output_format": f}).encode("utf-8"))):
+                status, _h, answer = gq_post(rig.client, path, make(fmt))
+                problems += gq_expect("%s output_format %s" % (label, fmt), status, answer, 400, needle=fmt_want)
+        ctype_png, sent_mp_png = gq_multipart("tfs2c", [("model", GS_IMG), ("prompt", "tf s2 mp"),
+                                                        ("output_format", "png")],
+                                              [("image", "a.png", "image/png", b"\x89PNG\r\n\x1a\n")])
+        ctype_jpeg, sent_mp_jpeg = gq_multipart("tfs2d", [("model", GS_IMG), ("prompt", "tf s2 mp"),
+                                                          ("output_format", "jpeg")],
+                                                [("image", "a.png", "image/png", b"\x89PNG\r\n\x1a\n")])
+        mp_want = "multipart edits are not supported on this route; send the JSON form"
+        for label, payload, ct in (("multipart edit", sent_mp, ctype), ("multipart edit png", sent_mp_png, ctype_png),
+                                   ("multipart edit jpeg", sent_mp_jpeg, ctype_jpeg)):
+            status, _h, answer = gq_post(rig.client, GQ_EDIT, payload, ct)
+            problems += gq_expect(label, status, answer, 400, needle=mp_want)
+        if len(rig.up.requests) != before:
+            problems.append("a refused image request reached the peer (%d request(s))" % (len(rig.up.requests) - before))
         before = len(rig.up.requests)
         problems += gn_answer("chat control", rig.ask(), 200)
         chat = rig.up.requests[before:]
@@ -19916,8 +19946,30 @@ def gs_s4(fixture_root, ctx):
         problems += more
         _err, more = ask("500", 500, {"error": {"message": "tf s4 boom " + marker}}, 502, absent=(marker,))
         problems += more
+        # The ChatGPT backend's {"detail": "..."} shape: a top-level string is the message source.
+        fixed400 = "backend %s answered 400" % GN_BACKEND
+        _err, more = ask("400 detail string", 400, {"detail": "bad thing"}, 400, needle="bad thing")
+        problems += more
+        _err, more = ask("400 detail with the account id", 400,
+                         {"detail": "tf s4 detail " + TF_ACCOUNT_CODEX + " denied"}, 400,
+                         needle="tf s4 detail [redacted] denied", absent=(TF_ACCOUNT_CODEX,))
+        problems += more
+        _err, more = ask("400 detail with an sk- fragment", 400,
+                         {"detail": "tf s4 key sk-abcdef123456 bad"}, 400, needle="tf s4 key [redacted] bad",
+                         absent=("sk-abcdef123456",))
+        problems += more
+        for label, value in (("a list", [{"loc": ["body", "prompt"], "msg": "tf s4 field required " + marker}]),
+                             ("a dict", {"msg": "tf s4 nested " + marker}), ("a number", 7)):
+            _err, more = ask("400 detail as " + label, 400, {"detail": value}, 400, needle=fixed400,
+                             absent=(marker,))
+            problems += more
+        _err, more = ask("403 detail", 403, {"detail": "tf s4 detail403 " + marker}, 502, absent=(marker,))
+        problems += more
+        _err, more = ask("500 detail", 500, {"detail": "tf s4 detail500 " + marker}, 502, absent=(marker,))
+        problems += more
         return problems, ["mapped      : 429 (message, type, code relayed), 403 (fixed login text, 502), 400 (tokens "
-                          "scrubbed), 500 (502, no upstream text)"]
+                          "scrubbed), 500 (502, no upstream text); a string detail relayed and scrubbed, a "
+                          "non-string detail fixed, 403/500 detail never relayed"]
 
     def script(_index, _request):
         return state["steps"] or [("respond_json", 200, GQ_OK)]
@@ -20221,7 +20273,13 @@ def gt_t1(ctx):
                 try:
                     inbound = mod._rt_parse_image_inbound(endpoint, c, raw, {}, cfg)
                 except Exception as exc:  # noqa: BLE001
-                    problems.append("%s stream false on %s was refused: %s" % (label, route, str(exc)[:80]))
+                    # codex refuses every multipart edit (IMAGE_EDIT_MULTIPART false), stream or not.
+                    if not (route == "tf-t1-cx" and label == "multipart"
+                            and "multipart edits are not supported" in str(getattr(exc, "message", exc))):
+                        problems.append("%s stream false on %s was refused: %s" % (label, route, str(exc)[:80]))
+                    continue
+                if route == "tf-t1-cx" and label == "multipart":
+                    problems.append("multipart stream false on %s was accepted" % route)
                     continue
                 if inbound.stream is not False:
                     problems.append("%s stream false on %s: inbound.stream is %r" % (label, route, inbound.stream))
@@ -24415,6 +24473,13 @@ def group_j(suite, fixture_root, pyc_before, tree_before):
             problems.append("codex IMAGE_PATHS %r do not sit beside the profile path %r" % (paths, row.path))
         if not mod.ADAPTERS["codex"].IMAGE_EDIT_JSON:
             problems.append("codex.IMAGE_EDIT_JSON is false: the Codex CLI sends JSON edits")
+        # The ChatGPT backend rejects a multipart edit (measured live 2026-10-27): only codex refuses it.
+        if base.IMAGE_EDIT_MULTIPART is not True:
+            problems.append("Adapter.IMAGE_EDIT_MULTIPART is %r, expected True" % (base.IMAGE_EDIT_MULTIPART,))
+        for kind, cls in sorted((k, type(a)) for k, a in mod.ADAPTERS.items()):
+            if cls.IMAGE_EDIT_MULTIPART is not (kind != "codex"):
+                problems.append("%s.IMAGE_EDIT_MULTIPART is %r, expected %r"
+                                % (kind, cls.IMAGE_EDIT_MULTIPART, kind != "codex"))
         # Phase 4: only the openai kind streams image answers (the codex stream is unmeasured, sd-server has
         # none): it alone sets IMAGE_STREAMING and overrides the two stream hooks; every other kind (the
         # chat kinds, codex, sdcpp) keeps the base's False and the base hooks.

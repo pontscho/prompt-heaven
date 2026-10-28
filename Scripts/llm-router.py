@@ -2276,7 +2276,8 @@ def _rt_parse_image_inbound(endpoint: str, content_type: str, raw: bytes, header
     The model is sniffed (_rt_image_fields) and looked up by exact name only -- an unknown model is a 404,
     never the default route; a chat route is a 400; a JSON edit to a kind that takes multipart only is a
     400; stream true is a 400 (not supported yet) unless the adapter sets IMAGE_STREAMING (the openai
-    kind), then InboundRequest.stream is True. The body is not parsed further: InboundRequest.raw
+    kind), then InboundRequest.stream is True; a multipart edit to a kind with IMAGE_EDIT_MULTIPART
+    false (codex) is a 400 after the stream check. The body is not parsed further: InboundRequest.raw
     is the client's bytes and .content_type the rebuilt canonical value (D9). Headers follow the chat
     rule (_rt_forwarded_headers)."""
     media, boundary = _rt_image_ctype(content_type)
@@ -2295,6 +2296,9 @@ def _rt_parse_image_inbound(endpoint: str, content_type: str, raw: bytes, header
     stream = fields.get("stream") == "true"
     if stream and not getattr(adapter_cls, "IMAGE_STREAMING", False):
         raise _rt_bad("stream", "streaming is not supported yet")
+    if endpoint == "images_edits" and media != "application/json" and not adapter_cls.IMAGE_EDIT_MULTIPART:
+        raise ApiError(400, "invalid_request_error",
+                       "multipart edits are not supported on this route; send the JSON form")
     client_headers = _rt_forwarded_headers(headers, backend.forward_headers)
     return InboundRequest(endpoint=endpoint, requested_model=model, body={"model": model}, stream=stream,
                           route=route, backend=backend, client_headers=client_headers, scrub=cfg.scrub,
@@ -2723,6 +2727,8 @@ class Adapter:
     IMAGE_PATHS: Mapping[str, str] = {}
     IMAGE_FIELDS: FrozenSet[str] = frozenset()
     IMAGE_EDIT_JSON: bool = False
+    # Whether a multipart edit body is accepted (every kind but codex: its endpoint rejects the form).
+    IMAGE_EDIT_MULTIPART: bool = True
     IMAGE_MODEL_IS_KEY: bool = True
     # Whether `stream: true` is accepted on this kind's image routes (the openai kind only: the Images API's
     # SSE is documented; the codex stream is unmeasured and sd-server has none). A kind that sets it also
@@ -5565,7 +5571,8 @@ class CodexAdapter(ResponsesImageAdapter):
     private ChatGPT backend image endpoints beside it (POST <codex base>/codex/images/generations and
     /edits, authenticated like /responses; the Codex CLI's JSON bodies are relayed raw). Measured live
     2026-10-27 (generations and the JSON edit form answered 200); unstable, not on Free plans; the
-    multipart edit form is accepted but unproven."""
+    multipart edit form is rejected by the endpoint (upstream 400) and refused here, and the backend
+    ignores output_format (it always answers png), so jpeg and webp are refused (image_request)."""
 
     kind = "codex"
     ROUTE_OPTIONS: Mapping[str, _RtOptionValidator] = {
@@ -5577,6 +5584,14 @@ class CodexAdapter(ResponsesImageAdapter):
     # Beside the profile row's /codex/responses (J42 pins it), under the row's base (.../backend-api).
     IMAGE_PATHS = {"generations": "/codex/images/generations", "edits": "/codex/images/edits"}
     IMAGE_EDIT_JSON = True
+    IMAGE_EDIT_MULTIPART = False
+
+    def image_request(self, inbound: InboundRequest) -> Tuple[str, bytes]:
+        """The base path and bytes, after the guard (an ApiError 400 naming the rule, never a value):
+        output_format other than png (absent is fine) is refused, the backend ignores it."""
+        if inbound.fields.get("output_format", "png") != "png":
+            raise _rt_bad("output_format", "this backend always answers png")
+        return self.IMAGE_PATHS[_RT_IMAGE_KINDS[inbound.endpoint]], inbound.raw
 
 
 # An image answer's upstream error text is relayed only for the statuses whose message is about the
@@ -5612,7 +5627,8 @@ def _rt_image_error(inbound: InboundRequest, status: int,
 
     The message is fixed ("backend <n> answered <status>") unless the status is in
     _RT_IMAGE_TEXT_STATUSES and the body is a JSON object of at most _RT_LEARN_BODY_LIMIT bytes with a
-    string message (error.message, error as a string, or message): then that text with control
+    string message (error.message, error as a string, message, or a top-level string detail; a
+    list or dict detail is ignored): then that text with control
     characters turned to spaces, run through the KD-9 scrubber and the _RT_IMAGE_SECRET_RES pattern
     strip (sk-..., Bearer ..., org-/proj-/req-/sess- ids, ****abcd key tails; any case), whitespace
     collapsed and cut at _ERROR_TEXT_WIDTH. Only with a relayed message are error.type, error.code
@@ -5635,6 +5651,8 @@ def _rt_image_error(inbound: InboundRequest, status: int,
             message = err
         if not isinstance(message, str):
             message = obj.get("message")
+        if not isinstance(message, str):
+            message = obj.get("detail")         # the ChatGPT backend's {"detail": "..."}; a list or dict is ignored
     if not isinstance(message, str):
         return fixed
     text = inbound.scrub("".join(ch if ch.isprintable() else " " for ch in message))
@@ -9460,7 +9478,9 @@ example config (chmod 600; token: python3 -c 'import secrets;print(secrets.token
   back to it). EXPERIMENTAL: a codex backend (ChatGPT login) also takes image routes, relayed to
   the private <base>/codex/images/... endpoints with the client's body as sent (the Codex CLI
   shape); unstable, not on Free plans, quota-limited; generations and the JSON edit form were
-  measured live (2026-10-27), the multipart edit form was not. The router reads only
+  measured live (2026-10-27). That backend ignores output_format (it always answers png) and
+  rejects multipart edits, so the router refuses output_format jpeg/webp and multipart edits
+  there with a 400 (send the JSON form). The router reads only
   model and a few guard fields and forwards the body as it came;
   raise --body-limit for large edit uploads. A sdcpp backend (a stable-diffusion.cpp sd-server;
   loopback needs allow_private AND allow_loopback, a LAN host allow_private) takes image routes
