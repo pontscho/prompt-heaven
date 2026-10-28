@@ -577,3 +577,7 @@ The flag changes only where the proxy reads its own credential at startup; nothi
 ### Counts
 
 `mcp_proxy` went from 123 to 124 cases with J50 `tests/test_mcp_proxy.py:j50_require_token_file`, run red first: live, the flag refused with `MCP_PROXY_TOKEN` set (beside `--token-file` and alone), without `--token-file` and without `--http`, each rc 2 with the token never on stderr; in-process, the flag with a token file accepted and the default without the flag unchanged.
+
+## Addendum (2026-10-28): F33 closed: --log-file is opened with O_NOFOLLOW and an fstat check
+
+The deferred finding F33 (`--log-file` opened without O_NOFOLLOW) is closed by the canonical `_configure_logging` fix made during the sd-router security review (ADR 0034, F-H, finding M10, CWE-59). The open now adds O_NOFOLLOW, then fstat, and raises OSError unless the target is a regular file owned by the effective uid; only then does it fchmod 0600. The change is in Scripts/_mcp_logging.py and was regenerated into every host that carries the block, mcp-proxy included. Test: group E `log-file-symlink-refused` in tests/test_generated_region.py. A FIFO at the path can still block the open (no O_NONBLOCK); that stays declared, the path being operator-chosen.

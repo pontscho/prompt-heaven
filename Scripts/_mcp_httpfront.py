@@ -87,21 +87,26 @@ def _http_token_value(value: str, where: str, min_len: int, error) -> bytes:
 # --- ready file --------------------------------------------------------------
 
 def _http_write_ready_file(path: str, port: int, error) -> None:
-    """{"port", "pid"} written 0600 and atomically (.tmp + os.replace); a failure
-    raises the host's *error* class naming the strerror or the type only."""
-    tmp = path + ".tmp"
+    """{"port", "pid"} written 0600 and atomically (a unique temp + os.replace); a
+    failure raises the host's *error* class naming the strerror or the type only.
+
+    The temp is `<path>.<pid>.<8 hex>` in the same directory, created O_EXCL and
+    O_NOFOLLOW, so a planted name is never removed, followed or reused (CWE-377);
+    only this call's own temp is removed when anything before the replace fails."""
+    tmp = "%s.%d.%s" % (path, os.getpid(), os.urandom(4).hex())
     try:
-        if os.path.lexists(tmp):
-            os.remove(tmp)
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 json.dump({"port": port, "pid": os.getpid()}, fh)
                 fh.write("\n")
             os.replace(tmp, path)
-        finally:
-            if os.path.lexists(tmp):
+        except BaseException:
+            try:
                 os.remove(tmp)
+            except OSError:
+                pass
+            raise
     except OSError as exc:
         raise error(f"cannot write --ready-file: {exc.strerror or type(exc).__name__}") from None
 

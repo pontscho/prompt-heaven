@@ -251,20 +251,26 @@ def _configure_logging(debug, log_file):
     """DEBUG to *log_file* (mode 0600) or to stderr, else WARNING. Never stdout.
 
     Either flag enables DEBUG: `--log-file` does not redirect the log, it turns
-    it on. `Scripts/_mcp_logging.py` carries the rest -- why the 0600 pair needs
-    both calls, and what deliberately stays out of this block.
+    it on. A symlink at the path, or anything but a regular file this euid
+    owns, is refused with OSError (CWE-59). `Scripts/_mcp_logging.py` carries
+    the rest -- why the 0600 pair needs both calls, and what stays out.
     """
+    import stat
     level = logging.DEBUG if (debug or log_file) else logging.WARNING
     handlers = []
     if log_file:
-        fd = os.open(log_file, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
+        fd = os.open(log_file, os.O_CREAT | os.O_APPEND | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid():
+            os.close(fd)
+            raise OSError("--log-file: not a regular file owned by this user")
         os.fchmod(fd, 0o600)
         handlers.append(logging.StreamHandler(os.fdopen(fd, "a")))
     else:
         handlers.append(logging.StreamHandler(sys.stderr))
     fmt = "%(asctime)s %(name)s %(levelname)s %(message)s"
     logging.basicConfig(level=level, format=fmt, handlers=handlers)
-# END GENERATED: f77d402d6254
+# END GENERATED: 57e0eb3befd6
 
 
 # ============================================================

@@ -396,9 +396,9 @@ worked examples of both kinds, each loaded through `load_config`
 `Scripts/llm-router.py:_RT_LOGIN_HELP_EPILOG`.
 
 The `sdcpp` kind, a stable-diffusion.cpp `sd-server` that serves only the image
-endpoints (no chat, no credential: an `api_key`, or an `auth_header` other than
-`none`, is a config error naming the path, and the backend's `auth_header` is
-forced to `none`):
+endpoints (no chat; sd-server has no authentication, so a backend without an
+`api_key` sends no credential, and one with a key, for a bearer-checking front
+such as [[sd-router]], sends it as `Authorization: Bearer`):
 
 ```json
 "backends": {
@@ -412,10 +412,16 @@ forced to `none`):
 
 The address policy is the `llamacpp` one, with no exemption for the kind: a LAN
 host needs `allow_private` (the `http://` URL requires it), a loopback sd-server
-needs `allow_private` **and** `allow_loopback`. The loader refuses `api_key` (any
-value) and `auth_header` `authorization` or `x-api-key` on this kind, because
-sd-server has no authentication and a key would only travel in the clear to a
-server that ignores it `Scripts/llm-router.py:_rt_cfg_backend`.
+needs `allow_private` **and** `allow_loopback`. An `api_key` is optional on this
+kind. Without one, `auth_header` resolves to `none`, and `authorization` or
+`x-api-key` is refused by the rule that a header needs an `api_key`. With one,
+`auth_header` must be omitted or `authorization` and resolves to
+`authorization`; `none` or `x-api-key` beside a key is a config error naming
+`backends.<n>.auth_header`. The key obeys every `api_key` rule below, the
+non-loopback `http://` refusal and the difference from `auth_token` included,
+and those run before the kind's own rule `Scripts/llm-router.py:_rt_cfg_backend`.
+A keyed `sdcpp` backend points at one [[sd-router]] model, with a `base_url` of
+`http://<host>:<port>/m/<model>` and the sd-router token as its key.
 
 **Top level** — exactly `auth_token`, `backends`, `routes`, `default`; any
 other key is refused by name `Scripts/llm-router.py:_RT_TOP_KEYS`.
@@ -442,12 +448,12 @@ other key is refused by name `Scripts/llm-router.py:_RT_TOP_KEYS`.
 | `allow_private` | `false` | admits private, ULA, CGNAT and site-local addresses, minus the metadata addresses and Teredo (see Security) |
 | `allow_loopback` | `false` | admits loopback; requires `allow_private` |
 | `ca_file` | none | an absolute path to a PEM CA, https only; replaces the system trust store for this backend `Scripts/llm-router.py:_rt_read_ca_file` |
-| `api_key` | none | at least `Scripts/llm-router.py:_API_KEY_MIN_LEN` (16) printable ASCII characters, no whitespace, different from `auth_token`; required for `mistral`, refused for codex, and for `openai` the alternative to `oauth`. With an `http://` `base_url` it needs a loopback host (`localhost` or a loopback literal, never resolved) `Scripts/llm-router.py:_rt_is_loopback_host` or `allow_cleartext_api_key` |
+| `api_key` | none | at least `Scripts/llm-router.py:_API_KEY_MIN_LEN` (16) printable ASCII characters, no whitespace, different from `auth_token`; required for `mistral`, refused for codex, optional for `sdcpp` (sent as a bearer), and for `openai` the alternative to `oauth`. With an `http://` `base_url` it needs a loopback host (`localhost` or a loopback literal, never resolved) `Scripts/llm-router.py:_rt_is_loopback_host` or `allow_cleartext_api_key` |
 | `oauth` | none | codex (required) and `openai` only: the login state, `{}` before the first `login`. Keys `Scripts/llm-router.py:_RT_OAUTH_PERSIST_KEYS` only — `refresh_token` (the token rule, at least 16 characters, different from `auth_token`), `account_id`, `expires_at`, and for `openai` the issued `client_id` and `host_id`; written by `login` and the router, never by hand in normal use `Scripts/llm-router.py:_rt_cfg_oauth` |
 | `identity` | the omp row | codex only: overrides of `originator`, `user-agent` and `version` in `Scripts/llm-router.py:_RT_CODEX_IDENTITY`, each 1-256 printable ASCII characters `Scripts/llm-router.py:_rt_cfg_identity` |
 | `auth_base_url` | the provider's | an OAuth profile only: where the token endpoint lives instead (tests, a proxy). The `base_url` rules, but `https` only, except an `http://` loopback host under `allow_private` and `allow_loopback`; with it the token endpoint inherits the backend's address policy and `ca_file`, without it the token endpoint is public-only with the system trust store |
 | `allow_cleartext_api_key` | `false` | a JSON bool; `true` lets the `api_key` — or an OAuth profile's access token, the same opt-in — travel over a non-loopback `http://` URL in clear text — a LAN backend you accept that for. No effect without an `api_key` or an `oauth` |
-| `auth_header` | `x-api-key` with an `api_key`, else `none` | `authorization`, `x-api-key` or `none`; anything but `none` needs an `api_key`; `mistral` and `openai` with an `api_key` use `authorization` only; refused on an OAuth profile, whose credential comes from the token store |
+| `auth_header` | `x-api-key` with an `api_key`, else `none` | `authorization`, `x-api-key` or `none`; anything but `none` needs an `api_key`; `mistral` and `openai` with an `api_key` use `authorization` only, and so does `sdcpp` with an `api_key`; refused on an OAuth profile, whose credential comes from the token store |
 | `forward_headers` | the kind's `DEFAULT_FORWARD` | lower-case names, each in the kind's `FORWARDABLE` (table below) |
 | `connect_timeout` | `Scripts/llm-router.py:_CONNECT_TIMEOUT_S` (10 s) | resolve, connect and TLS handshake under one deadline (the resolver runs on a daemon thread joined with what remains of it; a late answer is a 504 and the thread is abandoned); `0 < x <= 3600` |
 | `idle_timeout` | `Scripts/llm-router.py:_IDLE_TIMEOUT_S` (300 s) | per upstream read; `0 < x <= 3600`. It bounds the wait for an answer's head too, and is not a total deadline: a slow image model needs it raised on its backend |
@@ -515,6 +521,7 @@ answers a failure with a 502, as for a bad token
 | mistral | (none) | (none) | `Authorization: Bearer <api_key>` |
 | codex | (none) | (none) | `Authorization: Bearer <access token>` from the token store, plus `chatgpt-account-id` and the omp identity headers |
 | openai | (none) | (none) | `Authorization: Bearer` the `api_key`, or the access token of an OAuth login |
+| sdcpp | (none) | (none) | `Authorization: Bearer <api_key>` with a key, else none |
 | anthropic | reserved: refused by the loader | — | — |
 
 `Scripts/llm-router.py:_NEVER_FORWARD` lists the names no table may ever hold —
@@ -1057,10 +1064,12 @@ disk and every refresh, so an upstream error text that echoes it is relayed with
 image routes only (`MODALITIES` is `{image}`; its chat hooks are the base ones and
 are never reached, because an image route is refused on `/v1/messages` first), over
 the same two endpoints, the same single `_rt_send`, the fixed
-`IMAGE_PATHS` and the OpenAI envelope. No credential leaves the router: the
-backend's `auth_header` is `none` (the loader refuses an `api_key` or any other
-`auth_header` on this kind), and the client's `Authorization`, `x-api-key` and
-cookies are never forwarded `Scripts/llm-router.py:SdcppAdapter`. The body is the
+`IMAGE_PATHS` and the OpenAI envelope. sd-server has no authentication, so a
+backend without an `api_key` sends no credential (`auth_header` `none`); a
+backend with one, an [[sd-router]] or another bearer-checking front, sends only
+`Authorization: Bearer <key>` (`auth_header` omitted or `authorization`; `none`
+or `x-api-key` beside a key is a config error). The client's `Authorization`,
+`x-api-key` and cookies are never forwarded `Scripts/llm-router.py:SdcppAdapter`. The body is the
 client's bytes and the `model` is not rewritten (sd-server ignores it, so the route
 key need not equal the upstream name). sd-server's whole policy is therefore the
 router's, in the request guards below and one prompt rule, each a 400 naming a rule and
@@ -1512,14 +1521,19 @@ an unknown option by name, the kind list in the refusal) (R1); every request gua
 and the allowed values that must reach the peer byte for byte (R2); the rebuilt
 answer, key order, the dropped keys and headers, and nine malformed 2xx shapes as a
 502 (R3); the error shapes, the 503 codes and the scrubbed echoes (R4); the same
-loopback refusal as a `llamacpp` backend (R5); no credential header at the peer,
-with a keyed backend too (R6); byte-identical multipart and JSON bodies with the
+loopback refusal as a `llamacpp` backend (R5); exactly `Authorization: Bearer
+<key>` at the peer when a key is configured and no credential header when none is
+(R6); R1 also accepts a key alone or with `auth_header` `authorization`, refuses
+one beside `none` or `x-api-key` by `backends.<n>.auth_header`, and refuses a key
+over a non-loopback `http://` URL while the same key over loopback loads; byte-identical multipart and JSON bodies with the
 model not rewritten (R7); a 4 MiB `data` list mapped and a 2xx one byte over
 `_UPSTREAM_BODY_LIMIT` a 502 (R8); no prompt, base64 or `generation_info` text in a
 `--debug` log (R9); the marker refused in every case, spelling and field, braces and
 JSON-looking text passed, the 32 KiB prompt cap (R10, R11); the refusal text and log
 carry no prompt, with a control that reaches the peer (R12); and an upstream path no
-route name or model spelling can change (R13). J12, J39 and A14's refusal text carry
+route name or model spelling can change (R13); and the key absent from stderr,
+the `--log-file`, the answer body, the route repr and the structured
+upstream-failure WARNING (R14). J12, J39 and A14's refusal text carry
 the sixth kind, and J42 pins `sdcpp` as image-only with the three image hooks and
 none of the chat ones overridden.
 

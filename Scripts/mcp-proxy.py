@@ -299,20 +299,26 @@ def _configure_logging(debug, log_file):
     """DEBUG to *log_file* (mode 0600) or to stderr, else WARNING. Never stdout.
 
     Either flag enables DEBUG: `--log-file` does not redirect the log, it turns
-    it on. `Scripts/_mcp_logging.py` carries the rest -- why the 0600 pair needs
-    both calls, and what deliberately stays out of this block.
+    it on. A symlink at the path, or anything but a regular file this euid
+    owns, is refused with OSError (CWE-59). `Scripts/_mcp_logging.py` carries
+    the rest -- why the 0600 pair needs both calls, and what stays out.
     """
+    import stat
     level = logging.DEBUG if (debug or log_file) else logging.WARNING
     handlers = []
     if log_file:
-        fd = os.open(log_file, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
+        fd = os.open(log_file, os.O_CREAT | os.O_APPEND | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid():
+            os.close(fd)
+            raise OSError("--log-file: not a regular file owned by this user")
         os.fchmod(fd, 0o600)
         handlers.append(logging.StreamHandler(os.fdopen(fd, "a")))
     else:
         handlers.append(logging.StreamHandler(sys.stderr))
     fmt = "%(asctime)s %(name)s %(levelname)s %(message)s"
     logging.basicConfig(level=level, format=fmt, handlers=handlers)
-# END GENERATED: f77d402d6254
+# END GENERATED: 57e0eb3befd6
 
 
 # Strict JSON for every frame the proxy reads or writes, on both fronts and both
@@ -2220,21 +2226,26 @@ def _bounded_sink(q: "queue.Queue") -> Callable[[Any], None]:
 # Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
 # BEGIN GENERATED: _mcp_httpfront.py :: _http_write_ready_file, _http_remove_ready_file
 def _http_write_ready_file(path: str, port: int, error) -> None:
-    """{"port", "pid"} written 0600 and atomically (.tmp + os.replace); a failure
-    raises the host's *error* class naming the strerror or the type only."""
-    tmp = path + ".tmp"
+    """{"port", "pid"} written 0600 and atomically (a unique temp + os.replace); a
+    failure raises the host's *error* class naming the strerror or the type only.
+
+    The temp is `<path>.<pid>.<8 hex>` in the same directory, created O_EXCL and
+    O_NOFOLLOW, so a planted name is never removed, followed or reused (CWE-377);
+    only this call's own temp is removed when anything before the replace fails."""
+    tmp = "%s.%d.%s" % (path, os.getpid(), os.urandom(4).hex())
     try:
-        if os.path.lexists(tmp):
-            os.remove(tmp)
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 json.dump({"port": port, "pid": os.getpid()}, fh)
                 fh.write("\n")
             os.replace(tmp, path)
-        finally:
-            if os.path.lexists(tmp):
+        except BaseException:
+            try:
                 os.remove(tmp)
+            except OSError:
+                pass
+            raise
     except OSError as exc:
         raise error(f"cannot write --ready-file: {exc.strerror or type(exc).__name__}") from None
 
@@ -2264,7 +2275,7 @@ def _http_remove_ready_file(path: str, logger) -> None:
             logger.debug("ready file left: not this pid")
     except (OSError, ValueError) as exc:
         logger.debug("ready file left: %s", type(exc).__name__)
-# END GENERATED: 1c2c5cd7b652
+# END GENERATED: 0bbed5d158d9
 
 
 def _stop_http_server(srv: "_ProxyHttpServer") -> None:

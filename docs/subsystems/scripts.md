@@ -3,7 +3,7 @@ name: scripts
 type: subsystem
 status: active
 title: Scripts & MCP Servers
-description: The standalone scripts in Scripts/ -- the MCP servers and the canonical sources their generated regions come from, the llm-router and mcp-proxy HTTP fronts, the requirements.yaml task utilities, the fetch.py browser-like fetcher, and the shell scripts behind restartable sessions.
+description: The standalone scripts in Scripts/ -- the MCP servers and the canonical sources their generated regions come from, the llm-router, sd-router and mcp-proxy HTTP fronts, the requirements.yaml task utilities, the fetch.py browser-like fetcher, and the shell scripts behind restartable sessions.
 sources:
   - Scripts
   - Scripts/context-guard.sh
@@ -41,6 +41,8 @@ links:
   - 0026-speak-chrome-from-the-stdlib-verify-by-default
   - 0029-the-http-front-is-a-domain
   - 0030-point-at-the-near-miss-never-resolve-it
+  - sd-router
+  - 0034-sd-router-a-supervisor-and-proxy-for-sd-server
 ---
 
 # Scripts & MCP Servers
@@ -48,8 +50,9 @@ links:
 `Scripts/` holds standalone scripts, Python 3.9+ unless named otherwise: the MCP servers, the canonical
 sources their shared helpers are generated from `Scripts/amalgamate.py`, the
 `requirements.yaml` task utilities, the search tools, a browser-like
-single-URL fetcher ("fetch.py" below), one HTTP server that is
-not an MCP server, the LLM router ("LLM router" below), and the shell scripts
+single-URL fetcher ("fetch.py" below), two HTTP servers that are
+not MCP servers, the LLM router ("LLM router" below) and the sd-server
+supervisor ("SD router" below), and the shell scripts
 behind a restartable session ("Restartable sessions" below). The servers share that
 plumbing by generation rather than import; the canonical sources, the
 rules deciding what may be a shared block, and the copies deliberately left in
@@ -234,9 +237,10 @@ framing ceiling, the restart budget, the forwarded cancel — the HTTP front's
 access rules, how to run it for ai-soul, how it is tested and its declared
 limits are [[mcp-proxy]]; why it relays and never composes is
 [[0027-the-proxy-relays-it-never-composes]]. Its HTTP front's identical pieces
-are generated from `Scripts/_mcp_httpfront.py` into it and into the LLM router's
-`Scripts/llm-router.py:_RouterHttpServer`, each keeping declared adaptations
-([[0029-the-http-front-is-a-domain]]; see "LLM router" below).
+are generated from `Scripts/_mcp_httpfront.py` into it, into the LLM router's
+`Scripts/llm-router.py:_RouterHttpServer` and into sd-router's
+`Scripts/sd-router.py:_SdHttpServer`, each keeping declared adaptations
+([[0029-the-http-front-is-a-domain]]; see "LLM router" and "SD router" below).
 
 `Scripts/mcp-search.py` (`search_call`: web search over DDG lite and Bing, code
 search over grep.app) is the other live server outside the table: it is **not
@@ -1379,6 +1383,31 @@ command line, the config schema and its OAuth write-back, the per-kind header
 allow-lists, the security rules, the `llm_router` suite and the declared limits
 are [[llm-router]]; why it routes by model and translates at the edge is
 [[0028-route-by-model-translate-at-the-edge]].
+
+## SD router
+
+`Scripts/sd-router.py` is the second HTTP server here that is **not an MCP
+server**: a stdlib-only supervisor and reverse proxy in front of
+stable-diffusion.cpp `sd-server` on a host with one GPU, run by path with
+`--config <file>` `Scripts/sd-router.py:_sd_parser`. Its 0600 JSON config
+declares the models, each launched as an `sd-server` child from an argv list
+`Scripts/sd-router.py:load_config`; image requests are relayed byte-exact to
+the child for the model they name, in strict FIFO order with one request in
+flight, and a request for another model swaps the resident child out
+`Scripts/sd-router.py:Scheduler`. The supervisor kills a child's whole process
+group and verifies it gone before an unload answers
+`Scripts/sd-router.py:Supervisor`. Every route needs a bearer token, and the
+image routes are one allowlisted table `Scripts/sd-router.py:ROUTES`. Its
+intended client is the LLM router's `sdcpp` kind, which sends the router token
+as `Authorization: Bearer` `Scripts/llm-router.py:_rt_cfg_backend`. It is a
+hand-declared host of the generator `Scripts/amalgamate.py:DECLARED_HOSTS`:
+its HTTP front, `Scripts/sd-router.py:_SdHttpServer`, is generated from
+`Scripts/_mcp_httpfront.py` with its declared adaptations, and its logging from
+`Scripts/_mcp_logging.py` ([[generated-regions]]). The config, the request
+pipeline, the scheduler and its state machine, unload, the closed error table,
+the `sd_router` suite and the declared limits are [[sd-router]]; the decision
+and the alternatives that lost are
+[[0034-sd-router-a-supervisor-and-proxy-for-sd-server]].
 
 ## Restartable sessions: `context-guard.sh` and `loop-restart.sh`
 

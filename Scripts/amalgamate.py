@@ -95,9 +95,12 @@ CANONICAL_SOURCES = {name: SCRIPTS_DIR / name for name in CANONICAL_NAMES}
 # server run by path, not an MCP server; it takes `_configure_logging`, the
 # `_log_value` sanitiser with its two bounds, and the OAuth core plus its
 # callback wrapper, and the stdlib HTTP front (Scripts/_mcp_httpfront.py) it
-# shares with mcp-proxy.
+# shares with mcp-proxy. sd-router.py is a stdlib HTTP server run by path too,
+# a supervisor and reverse proxy for stable-diffusion.cpp sd-server; like
+# llm-router.py it takes `_configure_logging`, the `_log_value` sanitiser and
+# the stdlib HTTP front from Scripts/_mcp_httpfront.py.
 DECLARED_HOSTS = ("search_duckduckgo.py", "search_github.py",
-                  "llm-router.py", "fetch.py")
+                  "llm-router.py", "fetch.py", "sd-router.py")
 
 # Canonical sources a host takes WHOLE or not at all (G-c): the Chrome client
 # and its two decoders are one state machine whose blocks call each other, so a

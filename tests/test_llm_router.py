@@ -18922,9 +18922,12 @@ GR_CASES = (
     "no brace rule, 32 KiB cap",         # R11
     "refusal text and log hygiene",      # R12
     "upstream path never client's",      # R13
+    "the bearer key never leaks",        # R14
 )
-GR_IDS = ("R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8", "R9", "R10", "R11", "R12", "R13")
+GR_IDS = ("R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8", "R9", "R10", "R11", "R12", "R13", "R14")
 GR_KEY = "tf-sd"                    # an image route on the sdcpp backend (the upstream model differs: sd ignores it)
+GR_KEYED = "tf-sd-key"              # an sdcpp route whose backend has an api_key and no auth_header (-> authorization)
+GR_KEYED_AUTH = "tf-sd-key-auth"    # the same with auth_header authorization spelled out
 GR_MODEL = "sd-cpp-local"
 GR_SMALL = "tf-sd-small"            # max_n 2, max_pixels 262144 (512 x 512)
 GR_EVIL = "tf-sd-evil"              # an upstream model spelled like a traversal
@@ -18973,13 +18976,28 @@ def gr_config(peer_url):
     }
 
 
+def gr_keyed_config(peer_url):
+    """gr_config plus two keyed sdcpp backends (the credential phase, D-10: sd-router takes a bearer):
+    one with an api_key alone, one with auth_header authorization spelled out, each behind one route.
+    A separate config so that the main R router still starts where a keyed sdcpp backend is refused."""
+    cfg = gr_config(peer_url)
+    for backend, route, extra in (("tfr-key", GR_KEYED, {}),
+                                  ("tfr-key-auth", GR_KEYED_AUTH, {"auth_header": "authorization"})):
+        entry = {"kind": "sdcpp", "base_url": peer_url, "api_key": TF_KEY_PASS}
+        entry.update(extra)
+        cfg["backends"][backend] = entry
+        cfg["routes"][route] = {"backend": backend, "model": GR_MODEL, "modality": "image"}
+    return cfg
+
+
 def gr_script_default(_index, _request):
     return [("respond_json", 200, gr_ok_obj(), (GR_CORS,))]
 
 
 def group_r(suite, fixture_root):
     """R. the sdcpp kind (Plan phase 2): one sdcpp router in front of one scripted peer serves most
-    cases; R5, R8, R9 and R12 start their own router.  R1 runs in-process on the loaded module.  Every
+    cases; R5, R6 (its keyed half), R8, R9, R12 and R14 start their own router (R6 and R14 on
+    gr_keyed_config).  R1 runs in-process on the loaded module.  Every
     refusal case also checks that the peer saw nothing."""
     results = {}
     setup = "case did not run"
@@ -19074,18 +19092,49 @@ def group_r(suite, fixture_root):
                     lan_backend = cfg.backends.get("lan")
                     if getattr(lan_backend, "auth_header", None) != "none" or getattr(lan_backend, "api_key", 1) is not None:
                         problems.append("an sdcpp backend without auth_header is not forced to auth_header none, no key")
-                # V9: sd-server has no authentication; a credential for it is a config error naming the path.
-                for label, extra, needle in (
-                        ("an api_key", {"api_key": TF_KEY_PASS}, "backends.lan.api_key"),
-                        ("an api_key with auth_header none", {"api_key": TF_KEY_PASS, "auth_header": "none"},
-                         "backends.lan.api_key"),
-                        ("an api_key with auth_header x-api-key", {"api_key": TF_KEY_PASS, "auth_header": "x-api-key"},
-                         "backends.lan.api_key"),
-                        ("auth_header x-api-key", {"auth_header": "x-api-key"}, "backends.lan.auth_header"),
-                        ("auth_header authorization", {"auth_header": "authorization"}, "backends.lan.auth_header")):
+                # V9 (credential phase, D-10): the backend may hold an api_key, sent as a bearer to sd-router
+                # (auth_header omitted -> authorization).  The keyed cases sit on the loopback backend `sd` so
+                # that V14 (no key over a non-loopback http://) cannot answer for the auth_header rule.
+                for label, extra in (("an api_key alone", {"api_key": TF_KEY_PASS}),
+                                     ("an api_key with auth_header authorization",
+                                      {"api_key": TF_KEY_PASS, "auth_header": "authorization"})):
+                    def keyed(c, e=extra):
+                        c["backends"]["sd"].pop("auth_header", None)
+                        c["backends"]["sd"].update(e)
+                    kcfg, kproblems = ga_accepted(mod, write(keyed), "sdcpp backend on http://127.0.0.1 with " + label)
+                    problems += kproblems
+                    if kcfg is not None:
+                        kb = kcfg.backends.get("sd")
+                        if getattr(kb, "auth_header", None) != "authorization":
+                            problems.append("sdcpp with %s: auth_header %r, expected authorization"
+                                            % (label, getattr(kb, "auth_header", None)))
+                        if getattr(kb, "api_key", None) != TF_KEY_PASS:
+                            problems.append("sdcpp with %s: the api_key was not kept" % label)
+                        if TF_KEY_PASS in repr(kb) or TF_KEY_PASS in repr(kcfg) or TF_KEY_PASS in repr(kcfg.routes):
+                            problems.append("sdcpp with %s: the accepted config's repr echoes the key" % label)
+                # With a key, any header but authorization is refused naming auth_header, never the key.
+                for label, extra in (("an api_key with auth_header none", {"api_key": TF_KEY_PASS, "auth_header": "none"}),
+                                     ("an api_key with auth_header x-api-key",
+                                      {"api_key": TF_KEY_PASS, "auth_header": "x-api-key"})):
                     problems += ga_refused(
-                        mod, write(lambda c, e=extra: c["backends"]["lan"].update(e)), [needle, "sdcpp"],
+                        mod, write(lambda c, e=extra: c["backends"]["sd"].update(e)), ["backends.sd.auth_header", "sdcpp"],
                         "sdcpp backend with " + label, absent=(TF_KEY_PASS,))
+                # Without a key, a header is refused: x-api-key naming the path; authorization through the
+                # generic "<header> requires an api_key" rule (the loader's own text).
+                for label, extra, needles in (
+                        ("auth_header x-api-key", {"auth_header": "x-api-key"}, ["backends.lan.auth_header"]),
+                        ("auth_header authorization", {"auth_header": "authorization"},
+                         ["backends.lan.auth_header", "authorization requires an api_key"])):
+                    problems += ga_refused(
+                        mod, write(lambda c, e=extra: c["backends"]["lan"].update(e)), needles,
+                        "sdcpp backend with " + label, absent=(TF_KEY_PASS,))
+                # S-L4: the kind-neutral V14 rule still holds for sdcpp: a key over a non-loopback http://
+                # base_url is refused (the relaxation must not skip it); over http://127.0.0.1 it is accepted (above).
+                problems += ga_refused(
+                    mod, write(lambda c: c["backends"]["lan"].update({"api_key": TF_KEY_PASS,
+                                                                      "auth_header": "authorization"})),
+                    ["backends.lan.api_key", "non-loopback http://"],
+                    "sdcpp backend with an api_key over a LAN http://", absent=(TF_KEY_PASS,))
                 for label, mutate in (
                         ("a route with no modality (chat)", lambda c: c["routes"][GR_KEY].pop("modality")),
                         ("modality chat", lambda c: c["routes"][GR_KEY].__setitem__("modality", "chat"))):
@@ -19113,9 +19162,13 @@ def group_r(suite, fixture_root):
                     ["backends.sd.kind: must be one of passthrough, llamacpp, mistral, codex, openai, sdcpp"],
                     "the unknown-kind refusal lists sdcpp")
                 return problems, ["accepted    : sdcpp on http://127.0.0.1 (both flags), on a LAN http:// (allow_private), "
-                                  "forced to auth_header none; model != key; options at their bounds (8, 4096*4096)",
-                                  "refused     : an api_key or an auth_header other than none (path named, never the "
-                                  "value), a chat route, http:// without allow_private, allow_loopback alone, "
+                                  "forced to auth_header none without a key; an api_key on http://127.0.0.1 alone or "
+                                  "with auth_header authorization (-> authorization, key kept, repr redacted); "
+                                  "model != key; options at their bounds (8, 4096*4096)",
+                                  "refused     : an api_key with auth_header none or x-api-key (auth_header named), "
+                                  "x-api-key or authorization without a key, an api_key over a LAN http:// (V14) "
+                                  "(path named, never the value), a chat route, http:// without allow_private, "
+                                  "allow_loopback alone, "
                                   "max_n / max_pixels out of range, an unknown option by name, the kind list"]
 
             def r2():
@@ -19372,29 +19425,59 @@ def group_r(suite, fixture_root):
                                   "(status %r), the peer untouched" % s_sd,
                                   "accepted    : with allow_loopback the request is served; no new exemption for the kind"]
 
+            def keyed_router(label, debug=False):
+                """(RouterProc, log path or None, config path) of a router on gr_keyed_config."""
+                box = new_sandbox(fixture_root, label)
+                log_path = os.path.join(box, label + ".log") if debug else None
+                cfg_path = write_config(box, gr_keyed_config(peer.url()))
+                extra = ("--debug", "--log-file", log_path) if debug else ()
+                return RouterProc(box, cfg_path, extra, label=label), log_path, cfg_path
+
             def r6():
                 problems = []
                 hostile = {"x-api-key": TF_CLIENT_XKEY, "Cookie": "tf=1", "Proxy-Authorization": "Basic dGY6dGY=",
                            "Api-Key": TF_CLIENT_XKEY, "OpenAI-Organization": "org-tf"}
-                for route in (GR_KEY,):
+
+                def check(who, route, bearer):
+                    """The peer sees exactly `Authorization: Bearer <key>` when *bearer*, no credential otherwise."""
+                    out = []
                     before = len(peer.requests)
-                    status, _h, answer = gq_post(client, GQ_GEN, gq_json_body(route), headers=hostile)
-                    problems += [] if status == 200 else gq_expect(route, status, answer, 200)
+                    status, _h, answer = gq_post(who, GQ_GEN, gq_json_body(route), headers=hostile)
+                    out += [] if status == 200 else gq_expect(route, status, answer, 200)
                     if len(peer.requests) != before + 1:
-                        problems.append("%s: the peer saw %d request(s), expected 1" % (route, len(peer.requests) - before))
-                        continue
+                        return out + ["%s: the peer saw %d request(s), expected 1" % (route, len(peer.requests) - before)]
                     seen = gq_hdrs(peer.requests[-1])
-                    for name in ("authorization", "x-api-key", "api-key", "cookie", "proxy-authorization",
-                                 "openai-organization"):
+                    if bearer:
+                        if seen.get("authorization") != ["Bearer " + TF_KEY_PASS]:
+                            out.append("%s: the peer's Authorization is not exactly one `Bearer <the configured key>` "
+                                       "(%d value(s))" % (route, len(seen.get("authorization", []))))
+                    elif "authorization" in seen:
+                        out.append("%s: the peer got an authorization header" % route)
+                    for name in ("x-api-key", "api-key", "cookie", "proxy-authorization", "openai-organization"):
                         if name in seen:
-                            problems.append("%s: the peer got a %s header" % (route, name))
+                            out.append("%s: the peer got a %s header" % (route, name))
                     joined = " ".join(v for vals in seen.values() for v in vals)
-                    for label, value in (("the router token", TF_ROUTER_TOKEN), ("the client's key", TF_CLIENT_XKEY),
-                                         ("a key that is configured nowhere", TF_KEY_PASS)):
+                    for label, value in (("the router token", TF_ROUTER_TOKEN), ("the client's key", TF_CLIENT_XKEY)) \
+                            + (() if bearer else (("a key that is configured nowhere", TF_KEY_PASS),)):
                         if value in joined:
-                            problems.append("%s: the peer's headers carry %s" % (route, label))
-                return problems, ["peer        : no authorization / x-api-key / cookie, with a client that sent them all; "
-                                  "the kind takes no api_key at all (R1 refuses one at load)"]
+                            out.append("%s: the peer's headers carry %s" % (route, label))
+                    return out
+
+                problems += check(client, GR_KEY, bearer=False)
+                kp, _log, _cfg = keyed_router("r6")
+                try:
+                    if kp.wait_ready() is None:
+                        return problems + ["the keyed sdcpp router: " + gb_not_ready(kp)], []
+                    kc = kp.client()
+                    for route in (GR_KEYED, GR_KEYED_AUTH):
+                        problems += check(kc, route, bearer=True)
+                    problems += check(kc, GR_KEY, bearer=False)
+                finally:
+                    kp.close()
+                return problems, ["peer        : exactly `Authorization: Bearer <key>` for an sdcpp backend with an "
+                                  "api_key (auth_header omitted or authorization), no credential without one; never "
+                                  "x-api-key / cookie / the router token / the client's key, with a client that sent "
+                                  "them all"]
 
             def r7():
                 problems = []
@@ -19622,7 +19705,60 @@ def group_r(suite, fixture_root):
                                   "peer        : a route whose upstream model is '../sdcpp/v1/models/load' still reaches "
                                   "only /v1/images/generations and /edits"]
 
-            for cid, fn in zip(GR_CASES, (r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13)):
+            def r14():
+                problems = []
+                lp, log_path, cfg_path = keyed_router("r14", debug=True)
+                try:
+                    if lp.wait_ready() is None:
+                        return ["the keyed sdcpp router: " + gb_not_ready(lp)], []
+                    lc = lp.client()
+                    before = len(peer.requests)
+                    status, _h, back = ask(None, body=gq_json_body(GR_KEYED), who=lc)
+                    problems += [] if status == 200 else gq_expect("a keyed 200", status, back, 200)
+                    if len(peer.requests) != before + 1 or \
+                            gq_hdrs(peer.requests[-1]).get("authorization") != ["Bearer " + TF_KEY_PASS]:
+                        problems.append("the peer did not receive the bearer: the sweep would prove nothing")
+                    status, _h, back = ask([("respond_json", 400, {"error": "tf r14 echo " + TF_KEY_PASS})],
+                                           body=gq_json_body(GR_KEYED), who=lc)
+                    if status == 200:
+                        problems.append("an upstream 400 that echoes the key answered 200")
+                    if TF_KEY_PASS.encode() in back:
+                        problems.append("an upstream echo of the key reached the client's body")
+                    status, _h, back = ask([], body=gq_json_body(GR_KEYED), who=lc)   # closed before any head
+                    if status == 200:
+                        problems.append("a pre-head close answered 200")
+                    if TF_KEY_PASS.encode() in back:
+                        problems.append("the pre-head close's answer carries the key")
+                    warn, log_text, stderr = [], "", ""
+                    deadline = time.monotonic() + 8.0
+                    while not warn and time.monotonic() < deadline:
+                        log_text, stderr = read_log(log_path), lp.stderr_text()
+                        warn = [ln for ln in (log_text + "\n" + stderr).splitlines()
+                                if "upstream failed" in ln and "images_generations" in ln]
+                    if not warn:
+                        problems.append("no `upstream failed ... images_generations` WARNING: the WARNING sweep "
+                                        "would prove nothing")
+                    if not log_text.strip():
+                        problems.append("the --debug --log-file is empty: nothing to sweep")
+                    for where, text in (("stderr", stderr), ("the --log-file", log_text),
+                                        ("the upstream-failure WARNING", "\n".join(warn))):
+                        if TF_KEY_PASS in text:
+                            problems.append("TF_KEY_PASS reached %s" % where)
+                    cfg, cproblems = ga_accepted(mod, cfg_path, "the keyed sdcpp config in-process")
+                    problems += cproblems
+                    if cfg is not None:
+                        for where, text in (("a backend repr", repr(cfg.backends)), ("a route repr", repr(cfg.routes)),
+                                            ("the config repr", repr(cfg))):
+                            if TF_KEY_PASS in text:
+                                problems.append("TF_KEY_PASS reached %s" % where)
+                finally:
+                    lp.close()
+                return problems, ["planted     : TF_KEY_PASS as an sdcpp bearer; a 200, an upstream 400 echoing it, a "
+                                  "pre-head close (the structure-only WARNING)",
+                                  "swept       : stderr, the --debug --log-file, the WARNING line, the client bodies, "
+                                  "the backend / route / config repr"]
+
+            for cid, fn in zip(GR_CASES, (r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14)):
                 if router_why is not None and fn is not r1:
                     got[cid] = ([router_why], [])
                     continue

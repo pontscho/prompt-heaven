@@ -20,8 +20,9 @@ are six backend kinds (the seventh name, anthropic, is reserved and refused):
                OAuth only, sent with the omp client identity;
   openai       the OpenAI Responses API on the platform endpoint, with an
                api_key or an OAuth (Sign in with ChatGPT) login;
-  sdcpp        a stable-diffusion.cpp sd-server, image routes only (no chat, no
-               credential): the image endpoints below, its answer rebuilt.
+  sdcpp        a stable-diffusion.cpp sd-server, image routes only (no chat; an
+               optional api_key goes as a bearer, e.g. to an sd-router in
+               front): the image endpoints below, its answer rebuilt.
 codex and openai share one adapter driven by a profile row per wire dialect;
 they always stream upstream and aggregate for a non-stream client, and carry
 reasoning as thinking blocks signed "lrs1.<backend>.". GET /v1/models and
@@ -284,20 +285,26 @@ def _configure_logging(debug, log_file):
     """DEBUG to *log_file* (mode 0600) or to stderr, else WARNING. Never stdout.
 
     Either flag enables DEBUG: `--log-file` does not redirect the log, it turns
-    it on. `Scripts/_mcp_logging.py` carries the rest -- why the 0600 pair needs
-    both calls, and what deliberately stays out of this block.
+    it on. A symlink at the path, or anything but a regular file this euid
+    owns, is refused with OSError (CWE-59). `Scripts/_mcp_logging.py` carries
+    the rest -- why the 0600 pair needs both calls, and what stays out.
     """
+    import stat
     level = logging.DEBUG if (debug or log_file) else logging.WARNING
     handlers = []
     if log_file:
-        fd = os.open(log_file, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
+        fd = os.open(log_file, os.O_CREAT | os.O_APPEND | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid():
+            os.close(fd)
+            raise OSError("--log-file: not a regular file owned by this user")
         os.fchmod(fd, 0o600)
         handlers.append(logging.StreamHandler(os.fdopen(fd, "a")))
     else:
         handlers.append(logging.StreamHandler(sys.stderr))
     fmt = "%(asctime)s %(name)s %(levelname)s %(message)s"
     logging.basicConfig(level=level, format=fmt, handlers=handlers)
-# END GENERATED: f77d402d6254
+# END GENERATED: 57e0eb3befd6
 
 
 # ---------------------------------------------------------------------------
@@ -1262,12 +1269,6 @@ def _rt_cfg_backend(name: str, entry: Any, token: str) -> BackendSpec:
         raise ConfigError(f"{where}.kind: must be one of {known}")
     if kind in RESERVED_KINDS:
         raise ConfigError(f'{where}.kind: "{kind}" is reserved and not implemented')
-    if kind == "sdcpp":
-        # sd-server has no authentication: a key would only be sent in the clear to a server that ignores it.
-        if "api_key" in entry:
-            raise ConfigError(f"{where}.api_key: not allowed for kind sdcpp (sd-server has no authentication)")
-        if entry.get("auth_header", "none") != "none":
-            raise ConfigError(f"{where}.auth_header: kind sdcpp has no authentication; omit it or use none")
     adapter_cls = KIND_CLASSES[kind]               # unit 5, module global read at call time
     forwardable, default_forward = adapter_cls.FORWARDABLE, adapter_cls.DEFAULT_FORWARD
     profile = _rt_cfg_profile(kind, entry.get("api_key") is not None, entry.get("oauth") is not None, where)
@@ -1333,6 +1334,16 @@ def _rt_cfg_backend(name: str, entry: Any, token: str) -> BackendSpec:
         owner = f"profile {profile}" if profile else f"kind {kind}"
         if auth_header not in (None, "authorization"):
             raise ConfigError(f"{where}.auth_header: {owner} uses authorization only")
+        auth_header = "authorization"
+    elif kind == "sdcpp" and api_key is not None:
+        # D-10: sd-server has no auth of its own; a keyed sdcpp backend is an sd-router (or another
+        # bearer-checking front), so the key travels only as `Authorization: Bearer`.  This branch
+        # must precede the generic x-api-key default below; V14 and the auth_token rule above have
+        # already run.  Without a key the chain falls through: auth_header none, and any other
+        # header is refused by the "requires an api_key" rule.
+        if auth_header not in (None, "authorization"):
+            raise ConfigError(f"{where}.auth_header: kind sdcpp with an api_key sends it as a bearer; "
+                              f"use authorization or omit it")
         auth_header = "authorization"
     elif auth_header is None:
         auth_header = "x-api-key" if api_key is not None else "none"
@@ -5757,7 +5768,10 @@ _RT_SD_UNAVAILABLE = {"model_not_loaded": "the image backend has no model loaded
 class SdcppAdapter(Adapter):
     """kind sdcpp: a stable-diffusion.cpp sd-server behind the image endpoints (and nothing else).
 
-    No credential (sd-server has no auth; auth_header none), no chat: MODALITIES is {image}. The client's
+    sd-server has no auth: without an api_key the backend sends no credential (auth_header none); with
+    one (an sd-router or another bearer-checking front, D-10) the key goes only as `Authorization: Bearer`
+    (auth_header omitted or authorization; none or x-api-key with a key is a config error, and a key
+    over a non-loopback http:// base_url stays refused by V14). No chat: MODALITIES is {image}. The client's
     bytes go to /v1/images/generations or /edits untouched, so the router's guards are the whole policy:
     JSON edits (sd-server takes multipart only), stream, n outside 1..max_n, response_format url,
     output_format webp (sd-server's build refuses it, on edits it would be silently PNG), a size over
@@ -8138,21 +8152,26 @@ def _rt_pump(conn: Any, resp: Any, q: _RtByteQueue, stop: threading.Event,
 # Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
 # BEGIN GENERATED: _mcp_httpfront.py :: _http_write_ready_file, _http_remove_ready_file
 def _http_write_ready_file(path: str, port: int, error) -> None:
-    """{"port", "pid"} written 0600 and atomically (.tmp + os.replace); a failure
-    raises the host's *error* class naming the strerror or the type only."""
-    tmp = path + ".tmp"
+    """{"port", "pid"} written 0600 and atomically (a unique temp + os.replace); a
+    failure raises the host's *error* class naming the strerror or the type only.
+
+    The temp is `<path>.<pid>.<8 hex>` in the same directory, created O_EXCL and
+    O_NOFOLLOW, so a planted name is never removed, followed or reused (CWE-377);
+    only this call's own temp is removed when anything before the replace fails."""
+    tmp = "%s.%d.%s" % (path, os.getpid(), os.urandom(4).hex())
     try:
-        if os.path.lexists(tmp):
-            os.remove(tmp)
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 json.dump({"port": port, "pid": os.getpid()}, fh)
                 fh.write("\n")
             os.replace(tmp, path)
-        finally:
-            if os.path.lexists(tmp):
+        except BaseException:
+            try:
                 os.remove(tmp)
+            except OSError:
+                pass
+            raise
     except OSError as exc:
         raise error(f"cannot write --ready-file: {exc.strerror or type(exc).__name__}") from None
 
@@ -8182,7 +8201,7 @@ def _http_remove_ready_file(path: str, logger) -> None:
             logger.debug("ready file left: not this pid")
     except (OSError, ValueError) as exc:
         logger.debug("ready file left: %s", type(exc).__name__)
-# END GENERATED: 1c2c5cd7b652
+# END GENERATED: 0bbed5d158d9
 
 
 class _RouterHttpServer(ThreadingHTTPServer):
@@ -9541,8 +9560,10 @@ example config (chmod 600; token: python3 -c 'import secrets;print(secrets.token
   image; generations without one get the server's default), an output_compression outside 0-100
   and any prompt holding "sd_cpp_extra_args" (sd-server's in-prompt native arguments, which would
   bypass those limits), and drops generation_info from the answer (a data list empty or longer
-  than n is a 502). sd-server has no auth: an sdcpp backend takes no api_key and no auth_header
-  other than none (a config error); keep the server reachable only through the router. GET /v1/models lists every route with its modality
+  than n is a 502). sd-server has no auth: without an api_key an sdcpp backend sends no
+  credential; with one (e.g. an sd-router in front) it sends `Authorization: Bearer <key>`
+  (auth_header omitted or authorization; none or x-api-key with a key is a config error).
+  Keep a bare sd-server reachable only through the router. GET /v1/models lists every route with its modality
   (?modality=chat|image|all filters it); --max-image-requests caps image requests in flight.
   An openai image route also takes "stream": true (partial_images 0-3 passes through): the Images
   API's SSE events are relayed whole, byte for byte, with a `: ping` comment while idle (an event

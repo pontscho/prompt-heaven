@@ -234,6 +234,26 @@ synthetic is recorded per file in `llm_router/README.md`, not here. **No
 fixture holds a key** in any form; case J5 sweeps the directory on every run.
 The `tf` prefix is kept on every file name.
 
+## sd_router/ — not an LSP fixture
+
+```
+sd_router/ tf_stub_sd.py   the adversarial stub sd-server child for tests/test_sd_router.py
+```
+
+A stdlib-only (Python 3.9) loopback HTTP/1.1 stand-in for stable-diffusion.cpp
+`sd-server`, run as `__main__` as a model's `bin` by `tests/test_sd_router.py`;
+nothing imports it. It serves the four synchronous image routes with canned
+sd-shaped JSON carrying the SHA-256 of the request body it received, answers
+`GET /` with the readiness status sd-router expects, and crashes, stalls, keeps
+generating, spawns a grandchild or fails its first N starts on command, so the
+suite can drive switching, retries, the restart budget and the kill ladder.
+With `--state-dir` it records one metadata-only JSON line per event, its pids
+and the exact POST bodies (0600) under the suite's `.claude/tmp/test_sd_router/`
+run directory: the evidence behind the byte-exact relay rows. It never prints
+a request body, a header value or an environment value. Every symbol inside
+carries the `tf` prefix, and its routes, state files and flags are documented
+in its own docstring.
+
 ## Notes on the toolchain
 
 - No `compile_commands.json` is committed. It is inherently machine-specific and

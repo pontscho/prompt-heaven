@@ -318,9 +318,12 @@ kept only for a cancelled non-`tools/call` request.
 **Running it for ai-soul.** Start
 `python3 Scripts/mcp-proxy.py --http --config <config.json> --project-root <root>
 --token-file <token> --port <N>` (`--port 0`, the default, picks an ephemeral
-port; `--ready-file` reports it, and an ordered shutdown removes that file again
-while it still holds the proxy's own pid, never through a symlink
-`Scripts/_mcp_httpfront.py:_http_remove_ready_file`), then point the SDK's
+port; `--ready-file` reports it, written `0600` through a unique
+`O_EXCL|O_NOFOLLOW` temp name in the same directory and replaced into place, so
+a name planted beside it is never removed, followed or reused
+`Scripts/_mcp_httpfront.py:_http_write_ready_file`, and an ordered shutdown
+removes that file again while it still holds the proxy's own pid, never through
+a symlink `Scripts/_mcp_httpfront.py:_http_remove_ready_file`), then point the SDK's
 `StreamableHTTPClientTransport` at `http://127.0.0.1:<N>/mcp` — `127.0.0.1`, not
 `localhost`, because the listener is IPv4-only — with
 `Authorization: Bearer <token>` in `requestInit.headers`. Two client-side
@@ -403,3 +406,7 @@ of the proxy meets first:
   place between the pid read and the unlink is removed unseen, and SIGKILL, or
   any exit that skips the ordered shutdown, leaves the file behind with a dead
   pid.
+- The ready file's directory and the `--log-file` path are the operator's
+  choice: the directory's mode is not checked, and a FIFO at the log path can
+  block the open, which refuses a symlink or anything but a regular file this
+  euid owns only once it returns `Scripts/mcp-proxy.py:_configure_logging`.

@@ -242,6 +242,10 @@ def run_llm_router(opts):
     return run_python_suite("test_llm_router", opts)
 
 
+def run_sd_router(opts):
+    return run_python_suite("test_sd_router", opts)
+
+
 def run_tshark_fields(opts):
     return run_python_suite("test_tshark_fields", opts)
 
@@ -541,7 +545,7 @@ SUITES = [
      "front's two hosts pinned: every stdlib override in their front classes "
      "generated or declared with a reason; and the near-miss suggestion "
      "generated into, and called by, every server; and the unknown-params "
-     "refusal unit-tested and called by every host that carries it", 140),
+     "refusal unit-tested and called by every host that carries it", 142),
     ("mcp_websocket", run_mcp_websocket,
      "the stdlib WebSocket client: exact-match handshake, every frame length "
      "form, the refusals a frame header earns, fragments, ping/pong, close, "
@@ -744,7 +748,7 @@ SUITES = [
      "every file parsing as 3.9 SYNTAX, the stdlib Bing parser pinned to "
      "lxml's fields, every ctypes system library declared, no 3.10+ API "
      "in the new sources, and webfetch's PEP 723 deps bounded with its lxml "
-     "builder declared", 64),
+     "builder declared", 65),
     # TYPED: a fixed case table (A 6, B 9, C 5, E 2).
     ("search_parsers", run_search_parsers,
      "the DDG lite and grep.app result parsers as single html.parser passes "
@@ -948,7 +952,7 @@ SUITES = [
      95),
     # TYPED: a fixed case table (A 50, B 32, C 16, D 17, E 15, F 31, G 23,
     # H 6 x 4 kinds + H7 + H8-H9 = 27, I 16, J 44, K 29, L 20, M 23, N 42,
-    # O 18, P 4, Q 18, R 13, S 5, T 13, U 3 = 459), so a count that moves is the alarm, not noise.
+    # O 18, P 4, Q 18, R 14, S 5, T 13, U 3 = 460), so a count that moves is the alarm, not noise.
     ("llm_router", run_llm_router,
      "llm-router, the Anthropic Messages router: config refusals (0600, "
      "duplicate keys), bearer/Host/Origin/misplaced token, GET /v1/models, "
@@ -957,10 +961,22 @@ SUITES = [
      "and openai Responses kinds (request translation and stream), OAuth "
      "token store, login and config write-back, timeouts and disconnects "
      "per kind, upstream failure log, image endpoints (openai, a local "
-     "stable-diffusion.cpp sd-server, and the experimental codex ones), "
+     "stable-diffusion.cpp sd-server with an optional bearer api_key, and "
+     "the experimental codex ones), "
      "streamed image answers (openai), advertised image sizes, "
      "secret leaks, static rules, "
-     "hygiene", 459),
+     "hygiene", 460),
+    # TYPED: a fixed case table (A 17, L 32, R 20, D 22, S 20, Q-sched 16,
+    # Q-http 5, T 13, P 38, U 18, G 6, E2E 4 = 211), so a count that moves is
+    # the alarm.
+    ("sd_router", run_sd_router,
+     "sd-router, the supervisor and proxy for stable-diffusion.cpp "
+     "sd-server: config refusals, one model loaded at a time with switch on "
+     "demand, the bounded queue and scheduler, /v1/unload (queued and "
+     "?force=1), crash retries and the DISABLED state, the kill ladder and "
+     "process-group sweep, byte-exact relay through stub children, "
+     "OpenAI-shaped refusals, bearer auth, structure-only logs, static "
+     "rules, end-to-end through llm-router", 211),
     # TYPED: a fixed case table (A 7, E 3), so a count that moves is the alarm.
     ("tshark_fields", run_tshark_fields,
      "mcp-tshark analyze's `fields` parameter, in-process with tshark "

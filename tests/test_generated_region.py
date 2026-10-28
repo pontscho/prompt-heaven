@@ -138,6 +138,7 @@ import io
 import json
 import logging
 import os
+import shutil
 import socket
 import stat
 import sys
@@ -207,7 +208,7 @@ CANONICAL_NAMES = (BROTLI_CANONICAL_NAME, CHROME_CANONICAL_NAME,
 # `fleet-ok` gates these alongside the servers -- a declared host the gate did
 # not walk would be a target whose drift nothing reports.
 DECLARED_HOSTS = ("search_duckduckgo.py", "search_github.py", "llm-router.py",
-                  "fetch.py")
+                  "fetch.py", "sd-router.py")
 
 # The sources a host takes WHOLE or not at all (G-c): the Chrome client and its
 # two decoders are one state machine whose blocks call one another, so a host
@@ -273,7 +274,8 @@ OAUTH_CORE = ("OAUTH_TOKEN_LIMIT", "OAUTH_BODY_LIMIT", "OAUTH_JWT_LIMIT",
 
 # The hosts of _mcp_httpfront.py (R-0072, ADR 0029): the server and handler class each takes members into.
 HTTPFRONT_HOSTS = {"mcp-proxy.py": ("_ProxyHttpServer", "_ProxyHttpHandler"),
-                   "llm-router.py": ("_RouterHttpServer", "_RouterHandler")}
+                   "llm-router.py": ("_RouterHttpServer", "_RouterHandler"),
+                   "sd-router.py": ("_SdHttpServer", "_SdHandler")}
 HTTPFRONT_SERVER = ("server_bind", "process_request", "handle_error")
 HTTPFRONT_HANDLER = ("parse_request", "handle_expect_100", "_single_header")
 HTTPFRONT_MODULE = ("_HTTP_STDLIB_REFUSAL_HEADERS", "_http_token_value",
@@ -312,6 +314,25 @@ HTTPFRONT_ADAPTATIONS = {
     ("llm-router.py", "_RouterHandler", "send_error"):
         "Anthropic envelope with _RT_STDLIB_REFUSAL's fixed text plus the generated "
         "_HTTP_STDLIB_REFUSAL_HEADERS (B21, D3)",
+    ("sd-router.py", "_SdHttpServer", "__init__"):
+        "takes (address, settings, scheduler) with the handler fixed; sizes conn_sem to "
+        "max_connections plus the control reserve (H8) and adds closing, loopback and "
+        "active/active_cond for the drain, all before the bind",
+    ("sd-router.py", "_SdHttpServer", "process_request_thread"):
+        "counts active under active_cond for the shutdown drain, then releases conn_sem "
+        "in the finally",
+    ("sd-router.py", "_SdHandler", "setup"):
+        "installs _HeaderDeadlineReader with the socket timeout as its cap and closes the "
+        "stdlib's rfile at once (P24)",
+    ("sd-router.py", "_SdHandler", "handle_one_request"):
+        "the request line and headers within _SD_HEADER_TIMEOUT_S in total (F8), and one "
+        "exchange per connection: close_connection forced in the finally",
+    ("sd-router.py", "_SdHandler", "log_message"):
+        "structure only (ADR 0011): an unhandled method as <other>, an unrouted path as "
+        "<unrouted>",
+    ("sd-router.py", "_SdHandler", "send_error"):
+        "OpenAI envelope through _refuse with _SD_STDLIB_REFUSAL's fixed text plus the "
+        "generated _HTTP_STDLIB_REFUSAL_HEADERS",
 }
 
 GA = "A. GATE: live regions match their canonical source"
@@ -2130,6 +2151,44 @@ def group_blocks(suite, blocks, lsp, paging, logmod):
         "the log file was created %04o, not 0600" % mode,
     ), detail=["path: %s" % log_path, "mode: %04o" % mode])
 
+    # M10 (CWE-59): a symlink planted at the log path must be refused -- an
+    # OSError, the way an unopenable log file already fails -- with its target
+    # neither appended to nor re-moded to 0600, and no handler left behind.
+    victim = os.path.join(log_dir, "victim.txt")
+    link = os.path.join(log_dir, "link.log")
+    for stale in (victim, link):
+        if os.path.lexists(stale):
+            os.unlink(stale)
+    with open(victim, "w", encoding="utf-8") as fh:
+        fh.write("untouched\n")
+    os.chmod(victim, 0o644)
+    os.symlink(victim, link)
+    problems, raised = [], None
+    saved_handlers, saved_level = root.handlers[:], root.level
+    try:
+        logmod._configure_logging(False, link)
+    except OSError as exc:
+        raised = type(exc).__name__
+    except Exception as exc:                           # noqa: BLE001 -- the point
+        problems.append("raised %s, not OSError" % type(exc).__name__)
+    finally:
+        added = [h for h in root.handlers if h not in saved_handlers]
+        for handler in added:
+            handler.close()
+        root.handlers[:] = saved_handlers
+        root.setLevel(saved_level)
+    with open(victim, "r", encoding="utf-8") as fh:
+        victim_text = fh.read()
+    victim_mode = stat.S_IMODE(os.stat(victim).st_mode)
+    problems += problem_if(raised is None and not problems,
+                           "a symlink at the log path was accepted")
+    problems += problem_if(victim_text != "untouched\n", "the symlink's target was written to")
+    problems += problem_if(victim_mode != 0o644,
+                           "the symlink's target was re-moded to %04o" % victim_mode)
+    problems += problem_if(bool(added), "a handler was installed through the symlink")
+    suite.record(GE, "log-file-symlink-refused", problems,
+                 detail=["link -> victim.txt; raised %s, victim mode %04o" % (raised, victim_mode)])
+
     # `_log_value` (R-0070, CWE-117): a peer-chosen method, id, tool name or
     # argument key on its way into a log line. Three properties, each pinned on
     # the canonical module once, for every host that carries the region.
@@ -2373,15 +2432,16 @@ def group_tabs(suite, mod):
     )
     # The declared hosts are outside the glob above. The two search scripts are
     # tabs throughout -- the fleet's tab hosts that are not servers -- and
-    # llm-router.py is a space host.
+    # llm-router.py and sd-router.py are space hosts.
     declared_styles = {name: mod.host_indent(Path(SCRIPTS, name).read_text(encoding="utf-8"))
                        for name in DECLARED_HOSTS}
     problems += problem_if(
         declared_styles != {"search_duckduckgo.py": "tab",
                             "search_github.py": "tab",
                             "llm-router.py": "space",
-                            "fetch.py": "tab"},
-        "expected both search scripts and fetch.py to be tab hosts and the router a space host, got %s"
+                            "fetch.py": "tab",
+                            "sd-router.py": "space"},
+        "expected both search scripts and fetch.py to be tab hosts and both routers space hosts, got %s"
         % declared_styles,
     )
     suite.record(GF, "host-indent-from-tokens", problems,
@@ -3987,6 +4047,65 @@ def group_httpfront_blocks(suite, mod):
                                % (got, want))
     suite.record(GE, "httpfront-refusal-headers", problems,
                  detail=["headers     : nosniff, no-store"])
+
+    # M11 (CWE-377): the ready file's temp name is unique, so a pre-planted
+    # `<path>.tmp` is neither removed nor reused, the ready file still lands
+    # atomically (0600, {"port", "pid"}), and a failed replace leaves no temp.
+    problems, detail = list(absent), []
+    if src is not None:
+        class ReadyRefused(Exception):
+            pass
+
+        ready_dir = H.repo_path(".claude", "tmp", "test_generated_region", "ready")
+        if os.path.isdir(ready_dir):
+            shutil.rmtree(ready_dir)
+        os.makedirs(ready_dir)
+        ready = os.path.join(ready_dir, "ready.json")
+        planted = ready + ".tmp"
+        with open(planted, "w", encoding="utf-8") as fh:
+            fh.write("planted\n")
+        try:
+            src._http_write_ready_file(ready, 4321, ReadyRefused)
+        except Exception as exc:  # noqa: BLE001 -- any raise is the finding
+            problems.append("the write raised %s: %s" % (type(exc).__name__, str(exc)[:200]))
+        try:
+            with open(planted, "r", encoding="utf-8") as fh:
+                kept = fh.read() == "planted\n"
+        except OSError:
+            kept = False
+        problems += problem_if(not kept, "the planted ready.json.tmp was removed or rewritten")
+        try:
+            with open(ready, "r", encoding="utf-8") as fh:
+                body = json.load(fh)
+            ready_mode = stat.S_IMODE(os.lstat(ready).st_mode)
+        except (OSError, ValueError) as exc:
+            body, ready_mode = None, None
+            problems.append("no readable ready file: %s" % type(exc).__name__)
+        problems += problem_if(body is not None and body != {"port": 4321, "pid": os.getpid()},
+                               "the ready file holds %r" % (body,))
+        problems += problem_if(ready_mode is not None and ready_mode != 0o600,
+                               "the ready file is %s, not 0600" % (
+                                   "%04o" % ready_mode if ready_mode is not None else None))
+        left = sorted(set(os.listdir(ready_dir)) - {"ready.json", "ready.json.tmp"})
+        problems += problem_if(left, "temp files left behind: %s" % left)
+        # A replace that fails (the path is a directory) must still clean its temp.
+        blocked = os.path.join(ready_dir, "blocked")
+        os.makedirs(blocked)
+        before = set(os.listdir(ready_dir))
+        try:
+            src._http_write_ready_file(blocked, 4321, ReadyRefused)
+            problems.append("a replace onto a directory was not refused")
+        except ReadyRefused:
+            pass
+        except Exception as exc:  # noqa: BLE001
+            problems.append("a failed replace raised %s, not the passed class"
+                            % type(exc).__name__)
+        stray = sorted(set(os.listdir(ready_dir)) - before)
+        problems += problem_if(stray, "a failed replace left temp files: %s" % stray)
+        detail.append("planted .tmp kept %s, ready mode %s, failed-replace strays %s"
+                      % (kept, "%04o" % ready_mode if ready_mode is not None else None, stray))
+        shutil.rmtree(ready_dir, ignore_errors=True)
+    suite.record(GE, "httpfront-ready-file-unique-tmp", problems, detail=detail)
 
     # The members, rendered INSIDE a class from the canonical text: zero-arg
     # super() only works there (R2), and a namespace with no host name in it
