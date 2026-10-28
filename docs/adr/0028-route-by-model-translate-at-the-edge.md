@@ -1431,3 +1431,28 @@ The codex image route (the ChatGPT backend's private images endpoints, reached t
 ### Tests
 
 Group S cases S2 (output_format guard, multipart refusal, byte-exact relay of png and absent) and S4 (the `detail` extraction and its scrubbing), the J42 pin on `IMAGE_EDIT_MULTIPART`, and one adjustment of T1 (a multipart edit on codex is now refused before it can be streamed). The llm_router suite stays at 456 cases.
+
+## Addendum (2026-10-28): Advertised image sizes: the declarative sizes and default_size route keys
+
+A client of an image route, and a model choosing the call's arguments, had no way to learn which resolutions a route is meant for, so it guessed. The guess matters on two of the three image kinds: an sd.cpp model is trained for a few specific resolutions and degrades away from them, and the codex backend (`gpt-image-2`) ignores `size` and picks the image size itself (the 2026-10-28 addendum), so the only honest statement there is `auto`.
+
+### Decisions
+
+- Two optional route keys, `sizes` and `default_size`, allowed on a `modality` image route only (kinds openai, sdcpp and codex); a chat route and the `default` route refuse either by path (`only allowed on a modality image route`).
+- `sizes` is a non-empty list of at most 32 unique strings (`_RT_SIZES_LIMIT`), each `auto` or `WIDTHxHEIGHT` matched whole against `[1-9][0-9]{1,4}x[1-9][0-9]{1,4}` (`_RT_SIZE_RE` through `fullmatch`, so a trailing newline is no size): two to five digits per side, no leading zero, a lower-case `x`. `default_size` is one string by the same grammar, a member of `sizes` when both are set, and allowed alone. A refusal names the key and the rule and never echoes the value (`_rt_check_sizes`, `_rt_size_ok`, `_rt_cfg_route`).
+- Both are advertised by `GET /v1/models` and `GET /v1/models/{id}`, after `context_window`, only when configured: the key is absent, not null, otherwise (`_rt_model_entry`). The `?modality` filter is unchanged.
+- Both are declarative only. Nothing reads them on the request path: a `size` outside `sizes` still reaches the upstream, and a request without `size` is not given `default_size`, so the image body stays the client's bytes, byte for byte, as the image-endpoints addendum requires. The request's own `size` keeps its existing checks (the shared vocabulary, and `max_pixels` on sdcpp).
+
+### Alternatives rejected
+
+- Enforcing the list (a 400 for an unlisted size). Rejected for the reason the 2026-10-28 addendum keeps `size` unrefused on codex: the one known client sends one size enum to every image route, and a refusal would break it for a difference in the result, not in correctness.
+- Injecting `default_size` into a request without `size`. Rejected: it would end the byte-exact relay of the image body, the property every image kind's tests pin, and the upstream already has a default of its own (sd-server's operator-set default, codex's own choice).
+- One free-form string or a WxH-only grammar. Rejected: a free-form value cannot be checked, and `auto` must be expressible because it is the accurate entry for codex.
+
+### Declared limits added
+
+- `sizes` and `default_size` are advertised only, never enforced and never injected; the list is the operator's statement and is not measured against the model, and whether a given client reads the two keys is unmeasured.
+
+### Tests
+
+Group U, three cases, run after T and before I and J: U1 the config rules in-process (accepted on each image kind, the cap, `default_size` alone; every malformed shape, a `default_size` outside `sizes`, a chat and the default route refused without echoing the value), U2 the models entry keys and their order under each `?modality` filter, U3 a live `openai` router relaying a size outside the list and a body with no size byte-identical to the peer and showing the keys over HTTP. The llm_router suite moved from 456 to 459 cases; the live count is declared once in `tests/run.py:SUITES`.

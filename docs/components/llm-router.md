@@ -11,8 +11,8 @@ sources:
   - tests/test_llm_router.py
   - tests/files/llm_router/README.md
 verified:
-  commit: 9c2823f
-  date: 2026-10-27
+  commit: e8fe011
+  date: 2026-10-28
 links:
   - 0028-route-by-model-translate-at-the-edge
   - mcp-proxy
@@ -113,7 +113,9 @@ same start time as whole epoch seconds, an integer), `"owned_by": "llm-router"`
 (fixed, never a backend name) and the route's `modality` (`chat` or `image`),
 then the route's advertised `max_input_tokens` and `max_tokens` and a
 `context_window` equal to `max_input_tokens` (each `null` when the route sets
-none); `display_name` is the route's own or else the key, and `created_at` is
+none), and after them, on an image route and only when the route configures
+them, `sizes` (a list) and `default_size` (a string), each key absent rather
+than `null` otherwise (see *Advertised sizes* under Image endpoints); `display_name` is the route's own or else the key, and `created_at` is
 the router's start time in UTC to the second, read from the same clock reading
 as `created` `Scripts/llm-router.py:_rt_model_entry`
 `Scripts/llm-router.py:_RouterHttpServer`. The `default` route has no name
@@ -453,7 +455,8 @@ other key is refused by name `Scripts/llm-router.py:_RT_TOP_KEYS`.
 **A route** — `backend` (a configured backend), `model` (the upstream
 model id, 1-256 characters, no control character), `options`, validated by
 the backend kind's `ROUTE_OPTIONS`, and the optional `display_name`, token
-limits, `vision` and `modality`; an unknown key or option is refused by name
+limits, `vision`, `modality` and, on an image route, `sizes` and
+`default_size`; an unknown key or option is refused by name
 `Scripts/llm-router.py:_rt_cfg_route` `Scripts/llm-router.py:_RT_ROUTE_KEYS`.
 
 | Key | Default | Rule |
@@ -465,6 +468,8 @@ limits, `vision` and `modality`; an unknown key or option is refused by name
 | `max_input_tokens`, `max_tokens` | none | integers from `Scripts/llm-router.py:_RT_TOKEN_LIMIT_MIN` to `Scripts/llm-router.py:_RT_TOKEN_LIMIT_MAX`; advertised by `GET /v1/models` (with `context_window`), never enforced |
 | `vision` | `true` | a JSON boolean (`0`, `1`, `"false"`, `null` are refused by path); `false` makes the router answer 400 to any request holding an image block, never strip it — see *Images* under Backends `Scripts/llm-router.py:RouteSpec`. Allowed on `default` too |
 | `modality` | `chat` | `chat` or `image` `Scripts/llm-router.py:_RT_MODALITIES`. An `image` route is served by the two image endpoints only and needs a kind that lists `image` in its adapter's `MODALITIES` (`openai`, `sdcpp` — which serves nothing else, so an `sdcpp` route without `"modality": "image"` is refused — and the experimental `codex`), a backend that is not the `openai-oauth` profile ("image generation is not available with Sign in with ChatGPT tokens; use an api_key backend"), and, for every kind but `sdcpp`, a `model` equal to the route key, because the body is forwarded byte for byte and the upstream reads the client's `model` (sd-server ignores `model`, so an `sdcpp` route may name any upstream model). The key is refused on `default`, checked on the config path and not on the route's name, so a typo can never send a prompt to an image model `Scripts/llm-router.py:_rt_cfg_route` |
+| `sizes` | none | an image route only (a chat route and `default` refuse it by path, "only allowed on a modality image route"): a non-empty list of at most `Scripts/llm-router.py:_RT_SIZES_LIMIT` (32) unique strings, each `auto` or `WIDTHxHEIGHT` with two to five digits per side and no leading zero, matched whole (`1024X1024`, `5x1024`, a padded or newline-terminated value are refused; the value is never echoed) `Scripts/llm-router.py:_rt_check_sizes` `Scripts/llm-router.py:_RT_SIZE_RE`. Advertised by `GET /v1/models` only, never enforced |
+| `default_size` | none | an image route only: one string by the same grammar `Scripts/llm-router.py:_rt_size_ok`, a member of `sizes` when both are set, allowed alone. Advertised by `GET /v1/models` only, never added to a request |
 
 | Kind | Option | Rule |
 |---|---|---|
@@ -901,6 +906,22 @@ before any upstream contact; the slot is released in the handler's `finally`
 waits and answers up to 64 MiB therefore cannot take every connection slot from
 chat.
 
+**Advertised sizes.** An image route may declare which resolutions it is meant
+for: `sizes`, a list of `auto` / `WxH` strings, and `default_size`, one such
+string (route table above) `Scripts/llm-router.py:_rt_cfg_route`. Both are
+declarative only. `GET /v1/models` and `GET /v1/models/{id}` list them after
+`context_window` when they are configured `Scripts/llm-router.py:_rt_model_entry`,
+and nothing else reads them: a request whose `size` is outside `sizes` still
+reaches the upstream, and a request with no `size` is not given `default_size`,
+because the body stays the client's bytes (the request's own `size` is still
+checked against the shared vocabulary and, on `sdcpp`, against `max_pixels`).
+The reason for the keys is that a client, or a model choosing the arguments,
+otherwise guesses a resolution: an sd.cpp model is trained for a few specific
+resolutions, and the codex backend picks the size itself, so `auto` is the
+honest entry there. Refusing an unlisted size was not done for the reason codex
+keeps `size` unrefused (above): it would break a client that sends one size
+enum to every image route.
+
 **Streamed image answers (kind `openai`).** With `"stream": true` (a JSON boolean,
 or the multipart text field `true`; `partial_images` 0-3 is the client's and goes
 through in the raw body) the router sends the same bytes upstream with `Accept:
@@ -1313,8 +1334,9 @@ a scripted auth peer `tests/test_llm_router.py:group_o`, the `upstream failed:`
 line `tests/test_llm_router.py:group_p`, the image endpoints
 `tests/test_llm_router.py:group_q`, the `sdcpp` kind
 `tests/test_llm_router.py:group_r`, the codex image routes
-`tests/test_llm_router.py:group_s` and the streamed image answers
-`tests/test_llm_router.py:group_t`. K-T run before I and
+`tests/test_llm_router.py:group_s`, the streamed image answers
+`tests/test_llm_router.py:group_t` and the advertised image sizes
+`tests/test_llm_router.py:group_u`. K-U run before I and
 J, because I sweeps every log the run collected and J compares start-of-run
 snapshots `tests/test_llm_router.py:GROUP_ORDER`. Its case count is declared
 once, per group, in `tests/run.py:SUITES`, and checked against the run; the
@@ -1407,6 +1429,19 @@ second `event:` or a foreign field, `completed` only after a real completion
 a 70 KiB line with a bare CR, a real completion still `end=message_stop`, and a
 comment-only trickle past `idle_timeout` a stall (T13)
 `tests/test_llm_router.py:gt_t13`.
+
+**Advertised image sizes.** Group U `tests/test_llm_router.py:group_u`
+`tests/test_llm_router.py:GU_IDS`: `sizes` and `default_size` accepted on an
+image route of each image kind (`openai`, `sdcpp`, `codex`) and landing on the
+route, absent as none, `default_size` alone, one entry and the 32-entry cap,
+while every malformed shape, a `default_size` outside `sizes`, a chat route and `default`
+are refused by path without echoing the value, the cap written in the test and
+not read from the module (U1) `tests/test_llm_router.py:gu_u1`; the models
+entry carrying the two keys after `context_window` only where configured, under
+every `?modality` filter (U2) `tests/test_llm_router.py:gu_u2`; and on a live
+`openai` router, a size outside the list and a body with no size both reaching
+the peer byte for byte, with the keys shown over HTTP on the list and the
+single-model path (U3) `tests/test_llm_router.py:gu_u3`.
 
 **Codex image routes (experimental).** Group S `tests/test_llm_router.py:group_s`
 `tests/test_llm_router.py:GS_IDS` drives a codex OAuth backend through the N
@@ -1641,6 +1676,11 @@ read before relying on one of them. In brief:
   name: renaming a backend loses reasoning continuity.
 - **Route `max_input_tokens` / `max_tokens` are advertised only,** never
   enforced, and whether Claude Code reads them is unmeasured.
+- **An image route's `sizes` and `default_size` are advertised only.** A size
+  outside the list reaches the upstream, which may honour it, refuse it or
+  (codex) ignore it, and `default_size` is never filled in; the list is the
+  operator's statement, not measured against the model, and whether a given
+  client reads the two keys is unmeasured.
 - **Effort is learned on mistral only;** `reasoning_effort_map` is a mistral
   option, and the Responses kinds learn no effort. Learned sampling and effort
   sets live as long as the process and are never written down.
