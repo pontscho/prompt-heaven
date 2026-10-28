@@ -28,7 +28,8 @@ reasoning as thinking blocks signed "lrs1.<backend>.". GET /v1/models and
 GET /v1/models/{id} list the config's route keys (with an optional route
 display_name and the route's optional advertised max_input_tokens / max_tokens,
 plus context_window) in the Anthropic model-list shape, never contacting a backend; each entry
-also carries the OpenAI model fields (object, created, owned_by) and the route's modality.
+also carries the OpenAI model fields (object, created, owned_by) and the route's modality; an image
+route's optional `sizes` and `default_size` are advertised there too, never enforced or injected.
 Every answer the client sees is Anthropic-shaped: a JSON body, an SSE stream
 that always closes its envelope, or the {"type":"error","error":{...}}
 envelope -- except on the image endpoints. A route with `"modality": "image"` (an openai
@@ -747,6 +748,8 @@ class RouteSpec(NamedTuple):
     max_tokens: Optional[int] = None         # advertised by GET /v1/models only; never enforced
     vision: bool = True         # False: a request holding any image block is refused 400, never stripped
     modality: str = "chat"      # "chat" (/v1/messages) | "image" (/v1/images/generations and /edits), D1
+    sizes: Optional[Tuple[str, ...]] = None  # image routes: advertised by GET /v1/models only, never enforced
+    default_size: Optional[str] = None       # image routes: advertised by GET /v1/models only, never injected
 
 
 class _RouterConfigBase(NamedTuple):    # from --config (routing + secrets)
@@ -1033,8 +1036,11 @@ _RT_BACKEND_KEYS = frozenset({"kind", "base_url", "allow_private", "allow_loopba
                               "idle_timeout", "allow_cleartext_api_key", "oauth", "identity",
                               "auth_base_url"})
 _RT_ROUTE_KEYS = frozenset({"backend", "model", "options", "display_name",
-                            "max_input_tokens", "max_tokens", "vision", "modality"})
+                            "max_input_tokens", "max_tokens", "vision", "modality",
+                            "sizes", "default_size"})
 _RT_MODALITIES = ("chat", "image")
+_RT_SIZES_LIMIT = 32                      # entries in an image route's advertised `sizes`
+_RT_SIZE_RE = re.compile(r"[1-9][0-9]{1,4}x[1-9][0-9]{1,4}")   # fullmatch; "auto" is the other spelling
 _RT_ROUTE_LIMIT_KEYS = ("max_input_tokens", "max_tokens")   # a route's optional advertised caps
 _RT_BACKEND_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")    # the _CHILD_NAME_RE shape
 _RT_AUTH_HEADERS = ("authorization", "x-api-key", "none")
@@ -1376,6 +1382,24 @@ def _rt_cfg_backend(name: str, entry: Any, token: str) -> BackendSpec:
         profile=profile, oauth=oauth, identity=identity, auth_base=auth_base)
 
 
+def _rt_size_ok(value: Any) -> bool:
+    """True for "auto" or a WIDTHxHEIGHT string (two 2-5 digit sides, no leading zero); fullmatch, so
+    a trailing newline is no size."""
+    return isinstance(value, str) and (value == "auto" or _RT_SIZE_RE.fullmatch(value) is not None)
+
+
+def _rt_check_sizes(value: Any, where: str) -> Tuple[str, ...]:
+    """A route's advertised `sizes`: a non-empty list of at most _RT_SIZES_LIMIT unique size strings.
+    The value is never echoed in the error."""
+    if not isinstance(value, list) or not value or len(value) > _RT_SIZES_LIMIT:
+        raise ConfigError(f"{where}: must be a non-empty list of at most {_RT_SIZES_LIMIT} size strings")
+    if not all(_rt_size_ok(item) for item in value):
+        raise ConfigError(f"{where}: every entry must be auto or WIDTHxHEIGHT (digits, no leading zero)")
+    if len(set(value)) != len(value):
+        raise ConfigError(f"{where}: entries must be unique")
+    return tuple(value)
+
+
 def _rt_cfg_route(name: str, entry: Any, backends: Mapping[str, BackendSpec],
                   where: Optional[str] = None) -> RouteSpec:
     """Validate one route (a routes.<name> entry, or the top-level default) into a RouteSpec.
@@ -1393,6 +1417,9 @@ def _rt_cfg_route(name: str, entry: Any, backends: Mapping[str, BackendSpec],
     only, needs a kind whose adapter lists it in MODALITIES (openai, sdcpp -- which serves nothing else --
     and the experimental codex), not
     the openai-oauth profile, and a route key equal to its model; the key is refused on the default route;
+    sizes (a non-empty list of at most _RT_SIZES_LIMIT unique "auto" / WxH strings) and default_size (one
+    such string, a member of sizes when both are set) are allowed on an image route only, advertised by
+    GET /v1/models and never enforced or injected;
     options are checked by the backend kind's validators and an unknown option is refused by name.
     """
     if where is None:
@@ -1454,10 +1481,24 @@ def _rt_cfg_route(name: str, entry: Any, backends: Mapping[str, BackendSpec],
             # The body is forwarded byte-for-byte (multipart included), so the upstream reads the
             # client's `model`: the route key must be the upstream model id (D4).
             raise ConfigError(f"{where}.model: an image route's model must equal its route key")
+    sizes: Optional[Tuple[str, ...]] = None
+    default_size: Optional[str] = None
+    for key in ("sizes", "default_size"):
+        if key in entry and modality != "image":
+            raise ConfigError(f"{where}.{key}: only allowed on a modality image route")
+    if "sizes" in entry:
+        sizes = _rt_check_sizes(entry["sizes"], f"{where}.sizes")
+    if "default_size" in entry:
+        default_size = entry["default_size"]
+        if not _rt_size_ok(default_size):
+            raise ConfigError(f"{where}.default_size: must be auto or WIDTHxHEIGHT (digits, no leading zero)")
+        if sizes is not None and default_size not in sizes:
+            raise ConfigError(f"{where}.default_size: must be one of {where}.sizes")
     options = adapter_cls.validate_options(raw, f"{where}.options")
     return RouteSpec(name=name, backend=backend, model=model, options=options,
                      display_name=display_name, max_input_tokens=limits["max_input_tokens"],
-                     max_tokens=limits["max_tokens"], vision=vision, modality=modality)
+                     max_tokens=limits["max_tokens"], vision=vision, modality=modality,
+                     sizes=sizes, default_size=default_size)
 
 
 _RT_TOKEN_HINT = "generate one with secrets.token_urlsafe(32)"
@@ -1851,12 +1892,18 @@ def _rt_model_entry(route: RouteSpec, created_at: str, created_epoch: int) -> di
     OpenAI fields follow (object, created, owned_by -- the fixed "llm-router", not a
     backend name -- and the route's modality), then the route's token limits, null when
     unset: Anthropic's max_input_tokens and max_tokens, plus the non-standard
-    context_window (= max_input_tokens) some clients read."""
-    return {"type": "model", "id": route.name, "display_name": route.display_name or route.name,
-            "created_at": created_at, "object": "model", "created": created_epoch,
-            "owned_by": "llm-router", "modality": route.modality,
-            "max_input_tokens": route.max_input_tokens,
-            "max_tokens": route.max_tokens, "context_window": route.max_input_tokens}
+    context_window (= max_input_tokens) some clients read. An image route's sizes (a list) and
+    default_size follow, each only when configured."""
+    entry = {"type": "model", "id": route.name, "display_name": route.display_name or route.name,
+             "created_at": created_at, "object": "model", "created": created_epoch,
+             "owned_by": "llm-router", "modality": route.modality,
+             "max_input_tokens": route.max_input_tokens,
+             "max_tokens": route.max_tokens, "context_window": route.max_input_tokens}
+    if route.sizes is not None:
+        entry["sizes"] = list(route.sizes)
+    if route.default_size is not None:
+        entry["default_size"] = route.default_size
+    return entry
 
 
 def _rt_models_list(cfg: RouterConfig, created_at: str, created_epoch: int, modality: str = "all") -> dict:
@@ -9470,6 +9517,9 @@ example config (chmod 600; token: python3 -c 'import secrets;print(secrets.token
   A route's optional "vision" (boolean, default true): false makes the router answer 400
   to any request holding an image block (messages, a tool_result's content, system), naming
   the path and the route, never the image -- an image is refused, not silently dropped.
+  An image route's optional "sizes" (a list of up to 32 unique strings, each "auto" or WIDTHxHEIGHT
+  such as "1024x1024") and "default_size" (one such string, in sizes when both are set) are only
+  advertised by GET /v1/models, never enforced and never added to a request; a chat route refuses them.
   A route's optional "modality" ("chat", the default, or "image"): an image route is served by
   POST /v1/images/generations and /v1/images/edits (OpenAI-shaped, multipart or JSON edits, no
   streaming yet; errors there are the OpenAI envelope) and refused 400 on /v1/messages, and a chat

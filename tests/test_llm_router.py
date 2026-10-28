@@ -21190,6 +21190,242 @@ def group_t(suite, fixture_root):
 
 
 # ---------------------------------------------------------------------------
+# Group U: advertised image sizes (`sizes` / `default_size` on an image route)
+# ---------------------------------------------------------------------------
+
+# Two optional, purely declarative route keys of a modality image route: `sizes` (a bounded list of unique
+# "auto" / WxH strings) and `default_size` (one such string, a member of `sizes` when both are set).  They
+# are advertised by GET /v1/models and by nothing else: the router never refuses a size outside the list
+# and never injects default_size (the 2026-10-28 addendum of ADR 0028 keeps size unrefused on the codex kind).
+GU = "U. image sizes"
+GU_CASES = (
+    "sizes config",                      # U1
+    "models entry",                      # U2
+    "declarative only, bodies intact",   # U3
+)
+GU_IDS = ("U1", "U2", "U3")
+GU_KEY = "tf-u-img"
+GU_SIZES = ["1024x1024", "1536x1024", "auto"]
+GU_BAD_SIZE = "tf-bad-size"
+GU_MAX_SIZES = 32                        # the cap on the list, written here, not read from the module
+
+
+def gu_backends():
+    return {
+        "oa": {"kind": "openai", "api_key": TF_KEY_OPENAI},
+        "cx": {"kind": "codex", "oauth": {}},
+        "sd": {"kind": "sdcpp", "base_url": "http://127.0.0.1:1234", "auth_header": "none",
+               "allow_private": True, "allow_loopback": True},
+    }
+
+
+def gu_u1(fixture_root, mod):
+    """U1: sizes and default_size load on an image route of every image kind (openai, sdcpp, codex) and
+    land on the RouteSpec; absent they are None; every malformed shape, a chat route and the default route
+    are refused naming the key and never echoing the value."""
+    if mod is None or not hasattr(mod, "load_config"):
+        return ["cannot import the router (load_config)"], []
+    box = new_sandbox(fixture_root, "u1")
+    counter = [0]
+
+    def write(mutate=None, backend="oa"):
+        cfg = {"auth_token": TF_ROUTER_TOKEN, "backends": gu_backends(),
+               "routes": {GU_KEY: {"backend": backend, "model": GU_KEY, "modality": "image"},
+                          "tf-u-chat": {"backend": "oa", "model": "gpt-5"}}}
+        if mutate is not None:
+            mutate(cfg)
+        counter[0] += 1
+        return write_config(box, cfg, filename="u1-%d.json" % counter[0])
+
+    def setk(**kw):
+        return lambda c: c["routes"][GU_KEY].update(kw)
+
+    problems = []
+    for backend in ("oa", "sd", "cx"):
+        cfg, more = ga_accepted(mod, write(setk(sizes=GU_SIZES, default_size="1536x1024"), backend),
+                                "sizes and default_size on kind of backend %s" % backend)
+        problems += more
+        if cfg is not None:
+            route = cfg.routes.get(GU_KEY)
+            if list(getattr(route, "sizes", None) or []) != GU_SIZES \
+                    or getattr(route, "default_size", None) != "1536x1024":
+                problems.append("backend %s: RouteSpec sizes/default_size are %r/%r" % (
+                    backend, getattr(route, "sizes", "<no field>"), getattr(route, "default_size", "<no field>")))
+    cfg, more = ga_accepted(mod, write(), "no sizes keys")
+    problems += more
+    if cfg is not None:
+        route = cfg.routes.get(GU_KEY)
+        if getattr(route, "sizes", "<no field>") is not None or getattr(route, "default_size", "<no field>") is not None:
+            problems.append("absent keys: sizes/default_size are %r/%r, expected None/None" % (
+                getattr(route, "sizes", "<no field>"), getattr(route, "default_size", "<no field>")))
+    for label, kw in (("default_size alone", {"default_size": "2048x2048"}),
+                      ("default_size auto alone", {"default_size": "auto"}),
+                      ("sizes of one", {"sizes": ["auto"]}),
+                      ("sizes at the cap", {"sizes": ["%dx%d" % (100 + i, 200 + i) for i in range(GU_MAX_SIZES)]}),
+                      ("five-digit sides", {"sizes": ["99999x10"]})):
+        problems += ga_accepted(mod, write(setk(**kw)), label)[1]
+    where = "routes.%s" % GU_KEY
+    for label, kw, needles in (
+            ("sizes not a list", {"sizes": "1024x1024"}, [where + ".sizes"]),
+            ("sizes an object", {"sizes": {"a": "1024x1024"}}, [where + ".sizes"]),
+            ("sizes empty", {"sizes": []}, [where + ".sizes"]),
+            ("sizes over the cap", {"sizes": ["%dx%d" % (100 + i, 200 + i) for i in range(GU_MAX_SIZES + 1)]},
+             [where + ".sizes"]),
+            ("sizes duplicate", {"sizes": ["1024x1024", "auto", "1024x1024"]}, [where + ".sizes", "unique"]),
+            ("sizes non-string", {"sizes": ["1024x1024", 512]}, [where + ".sizes"]),
+            ("sizes bool", {"sizes": [True]}, [where + ".sizes"]),
+            ("sizes bad grammar star", {"sizes": [GU_BAD_SIZE]}, [where + ".sizes"]),
+            ("sizes capital X", {"sizes": ["1024X1024"]}, [where + ".sizes"]),
+            ("sizes one-digit side", {"sizes": ["5x1024"]}, [where + ".sizes"]),
+            ("sizes six-digit side", {"sizes": ["100000x1024"]}, [where + ".sizes"]),
+            ("sizes leading zero", {"sizes": ["01024x1024"]}, [where + ".sizes"]),
+            ("sizes trailing newline", {"sizes": ["1024x1024\n"]}, [where + ".sizes"]),
+            ("sizes padded", {"sizes": [" 1024x1024"]}, [where + ".sizes"]),
+            ("sizes AUTO", {"sizes": ["AUTO"]}, [where + ".sizes"]),
+            ("default_size not a string", {"default_size": 1024}, [where + ".default_size"]),
+            ("default_size empty", {"default_size": ""}, [where + ".default_size"]),
+            ("default_size bad grammar", {"default_size": GU_BAD_SIZE}, [where + ".default_size"]),
+            ("default_size not in sizes", {"sizes": GU_SIZES, "default_size": "512x512"},
+             [where + ".default_size", "sizes"])):
+        problems += ga_refused(mod, write(setk(**kw)), needles, label, absent=(GU_BAD_SIZE,))
+    for key, value in (("sizes", GU_SIZES), ("default_size", "1024x1024")):
+        problems += ga_refused(mod, write(lambda c, k=key, v=value: c["routes"]["tf-u-chat"].__setitem__(k, v)),
+                               ["routes.tf-u-chat." + key, "image"], "%s on a chat route" % key)
+        problems += ga_refused(
+            mod, write(lambda c, k=key, v=value: c.__setitem__(
+                "default", {"backend": "oa", "model": "gpt-5", k: v})),
+            ["default." + key, "image"], "%s on the default route" % key)
+    return problems, ["accepted    : sizes + default_size on openai, sdcpp and codex image routes; absent -> None; "
+                      "default_size alone, one entry, %d entries" % GU_MAX_SIZES,
+                      "refused     : non-list, empty, over the cap, duplicate, non-string, bad grammar, "
+                      "default_size outside sizes, chat and default routes; the bad value never echoed"]
+
+
+def gu_u2(fixture_root, mod):
+    """U2: GET /v1/models' entry carries sizes (a list) and default_size (a string) only where configured,
+    after the pinned keys; ?modality filtering is unaffected."""
+    if mod is None or not hasattr(mod, "load_config") or not hasattr(mod, "_rt_models_list"):
+        return ["cannot import the router (load_config, _rt_models_list)"], []
+    box = new_sandbox(fixture_root, "u2")
+    cfg_obj = {"auth_token": TF_ROUTER_TOKEN, "backends": gu_backends(),
+               "routes": {"tf-u-both": {"backend": "oa", "model": "tf-u-both", "modality": "image",
+                                        "sizes": GU_SIZES, "default_size": "1024x1024"},
+                          "tf-u-only-sizes": {"backend": "sd", "model": "tf-u-only-sizes", "modality": "image",
+                                              "sizes": ["512x512"]},
+                          "tf-u-only-default": {"backend": "cx", "model": "tf-u-only-default",
+                                                "modality": "image", "default_size": "auto"},
+                          "tf-u-plain": {"backend": "oa", "model": "tf-u-plain", "modality": "image"},
+                          "tf-u-chat": {"backend": "oa", "model": "gpt-5"}}}
+    cfg, problems = ga_accepted(mod, write_config(box, cfg_obj, filename="u2.json"), "the U2 config")
+    if cfg is None:
+        return problems, []
+    base = ["type", "id", "display_name", "created_at", "object", "created", "owned_by", "modality",
+            "max_input_tokens", "max_tokens", "context_window"]
+    want = {"tf-u-both": (GU_SIZES, "1024x1024"), "tf-u-only-sizes": (["512x512"], None),
+            "tf-u-only-default": (None, "auto"), "tf-u-plain": (None, None), "tf-u-chat": (None, None)}
+    for query, ids in (("all", list(want)), ("image", [k for k in want if k != "tf-u-chat"]),
+                       ("chat", ["tf-u-chat"])):
+        listing = mod._rt_models_list(cfg, "2026-01-01T00:00:00Z", 1767225600, query)
+        got = [e["id"] for e in listing["data"]]
+        if got != ids:
+            problems.append("modality %s: ids %r, expected %r" % (query, got, ids))
+        for entry in listing["data"]:
+            sizes, default = want[entry["id"]]
+            expect = base + (["sizes"] if sizes is not None else []) + (["default_size"] if default is not None else [])
+            if list(entry) != expect:
+                problems.append("%s [%s]: keys %r, expected %r" % (query, entry["id"], list(entry), expect))
+                continue
+            if sizes is not None and (not isinstance(entry["sizes"], list) or entry["sizes"] != sizes):
+                problems.append("%s [%s]: sizes %r, expected the list %r" % (query, entry["id"], entry["sizes"], sizes))
+            if default is not None and entry["default_size"] != default:
+                problems.append("%s [%s]: default_size %r" % (query, entry["id"], entry["default_size"]))
+        try:
+            json.dumps(listing)
+        except (TypeError, ValueError):
+            problems.append("modality %s: the listing is not JSON-serialisable" % query)
+    return problems, ["entries     : sizes (list) and default_size (string) after context_window, only when "
+                      "configured",
+                      "filter      : ?modality=all|image|chat keeps the same entries"]
+
+
+def gu_u3(ctx):
+    """U3: on a live router a size outside `sizes` and a body with no size both reach the peer byte for
+    byte (nothing refused, default_size not injected), and GET /v1/models over HTTP shows the keys."""
+    client, peer = ctx["client"], ctx["peer"]
+    problems = []
+    outside = ('{ "model" : "%s",  "prompt":"tf u3", "size":"999x777" }' % GU_KEY).encode("utf-8")
+    none_at_all = ('{ "model" : "%s",  "prompt":"tf u3 none" }' % GU_KEY).encode("utf-8")
+    for label, body in (("size outside sizes", outside), ("no size, default_size set", none_at_all)):
+        before = len(peer.requests)
+        status, _h, answer = gq_post(client, GQ_GEN, body)
+        if status != 200:
+            problems += gq_expect(label, status, answer, 200)
+        if len(peer.requests) != before + 1:
+            problems.append("%s: the peer saw %d request(s), expected 1" % (label, len(peer.requests) - before))
+        elif peer.requests[-1]["body"] != body:
+            problems.append("%s: the body reached the peer altered" % label)
+    status, hdrs, body = gb_get(client, GB_MODELS_PATH + "?modality=image")
+    obj, bad = gb_json_200("GET /v1/models?modality=image", status, hdrs, body)
+    problems += bad
+    if obj is not None:
+        entry = next((e for e in obj["data"] if e.get("id") == GU_KEY), None)
+        if entry is None or entry.get("sizes") != GU_SIZES or entry.get("default_size") != "1024x1024":
+            problems.append("GET /v1/models: the entry does not advertise sizes/default_size: %r" % (entry,))
+    status, hdrs, body = gb_get(client, "/v1/models/" + GU_KEY)
+    entry, bad = gb_json_200("GET /v1/models/" + GU_KEY, status, hdrs, body)
+    problems += bad
+    if entry is not None and (entry.get("sizes") != GU_SIZES or entry.get("default_size") != "1024x1024"):
+        problems.append("GET /v1/models/{id}: sizes/default_size missing")
+    return problems, ["relay       : a size outside sizes and a body without size reach the peer byte-identical",
+                      "listing     : GET /v1/models and /v1/models/{id} advertise sizes and default_size"]
+
+
+def group_u(suite, fixture_root):
+    """U. advertised image sizes.  U1 and U2 run in-process on the loaded module; U3 starts one openai
+    api_key router in front of a scripted peer."""
+    results = {}
+    setup = "case did not run"
+    try:
+        mod = H.load_module_from_path("ph_llm_router_u", SERVER)
+    except Exception:  # noqa: BLE001 -- U1 and U2 then fail with the reason
+        mod = None
+    peer = ScriptedPeer(script=gq_script_default)
+    proc = None
+    try:
+        for cid, fn in zip(GU_CASES[:2], (gu_u1, gu_u2)):
+            try:
+                results[cid] = fn(fixture_root, mod)
+            except Exception as exc:  # noqa: BLE001 -- a broken case fails, never aborts the group
+                results[cid] = (["case raised %s: %s" % (type(exc).__name__, gi_redact(str(exc))[:200])], [])
+        sandbox = new_sandbox(fixture_root, "imgsizes")
+        cfg = gq_config(peer.url())
+        cfg["routes"][GU_KEY] = {"backend": "tfq", "model": GU_KEY, "modality": "image",
+                                 "sizes": GU_SIZES, "default_size": "1024x1024"}
+        proc = RouterProc(sandbox, write_config(sandbox, cfg), label="imgsizes")
+        port = proc.wait_ready()
+        with peer:
+            if port is None:
+                results[GU_CASES[2]] = (["the router did not start: %s" % gi_redact(
+                    proc.stderr_text().strip().splitlines()[-1] if proc.stderr_text().strip() else "(no stderr)")[:200]],
+                    [])
+            else:
+                try:
+                    results[GU_CASES[2]] = gu_u3({"client": proc.client(), "peer": peer})
+                except Exception as exc:  # noqa: BLE001
+                    results[GU_CASES[2]] = (["case raised %s: %s" % (type(exc).__name__,
+                                                                    gi_redact(str(exc))[:200])], [])
+    except Exception as exc:  # noqa: BLE001 -- a setup failure fails every case not yet run
+        setup = "the group setup raised %s: %s" % (type(exc).__name__, gi_redact(str(exc))[:200])
+    finally:
+        if proc is not None:
+            proc.close()
+        peer.close()
+    for cid, uid in zip(GU_CASES, GU_IDS):
+        problems, detail = results.get(cid, ([setup], []))
+        suite.record(GU, cid, problems, detail=["case        : " + uid] + list(detail))
+
+
+# ---------------------------------------------------------------------------
 # Group I: secret leak
 # ---------------------------------------------------------------------------
 
@@ -24973,7 +25209,7 @@ def group_j_hygiene(suite, fixture_root, pyc_before, tree_before):
 # and repo snapshots taken at the start, so both must run last.
 GROUP_ORDER = ("group_a", "group_b", "group_c", "group_d", "group_e",
                "group_f", "group_g", "group_h", "group_k", "group_l",
-               "group_m", "group_n", "group_o", "group_p", "group_q", "group_r", "group_s", "group_t",
+               "group_m", "group_n", "group_o", "group_p", "group_q", "group_r", "group_s", "group_t", "group_u",
                "group_i",
                "group_j")
 

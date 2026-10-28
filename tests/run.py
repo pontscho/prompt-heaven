@@ -948,7 +948,7 @@ SUITES = [
      95),
     # TYPED: a fixed case table (A 50, B 32, C 16, D 17, E 15, F 31, G 23,
     # H 6 x 4 kinds + H7 + H8-H9 = 27, I 16, J 44, K 29, L 20, M 23, N 42,
-    # O 18, P 4, Q 18, R 13, S 5, T 13 = 456), so a count that moves is the alarm, not noise.
+    # O 18, P 4, Q 18, R 13, S 5, T 13, U 3 = 459), so a count that moves is the alarm, not noise.
     ("llm_router", run_llm_router,
      "llm-router, the Anthropic Messages router: config refusals (0600, "
      "duplicate keys), bearer/Host/Origin/misplaced token, GET /v1/models, "
@@ -958,9 +958,9 @@ SUITES = [
      "token store, login and config write-back, timeouts and disconnects "
      "per kind, upstream failure log, image endpoints (openai, a local "
      "stable-diffusion.cpp sd-server, and the experimental codex ones), "
-     "streamed image answers (openai), "
+     "streamed image answers (openai), advertised image sizes, "
      "secret leaks, static rules, "
-     "hygiene", 456),
+     "hygiene", 459),
     # TYPED: a fixed case table (A 7, E 3), so a count that moves is the alarm.
     ("tshark_fields", run_tshark_fields,
      "mcp-tshark analyze's `fields` parameter, in-process with tshark "
