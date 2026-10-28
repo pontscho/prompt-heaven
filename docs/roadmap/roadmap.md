@@ -31,6 +31,7 @@ WIP now: 0 of 3. Archive: 77 closed items (68 done, 9 dropped).
 | later | R-0107 | idea  | bash address-space trampoline, only if bash's effective budget exceeds 8 GiB                        | yes   |
 | later | R-0108 | idea  | Close the exec-to-spawned window on macOS (T11a)                                                    | yes   |
 | later | R-0109 | idea  | Unix-socket transport for the runner proxy so the runner token cannot leak to a port squatter       | yes   |
+| later | R-0112 | idea  | Write a separate sd-router.py for stable-diffusion.cpp instead of growing the sdcpp kind            | yes   |
 | inbox | R-0063 | idea  | Harden --log-file open in the generated logging block (O_NOFOLLOW, owner check)                     | yes   |
 | inbox | R-0064 | idea  | mcp-proxy: per-session share of the global max-inflight budget                                      | yes   |
 | inbox | R-0065 | idea  | mcp-proxy: session table exhaustion holds slots for a full idle period                              | yes   |
@@ -336,6 +337,20 @@ Deferred item 14 of the Deferred to roadmap list in spec-sbx-restricted-runner, 
 ### Log
 
 - 2026-10-11 new->later: filed at close-out of spec-sbx-restricted-runner
+
+## R-0112 · Write a separate sd-router.py for stable-diffusion.cpp instead of growing the sdcpp kind
+
+state: idea
+horizon: later
+origin: user:2026-10-28:sd-router
+blocked_by: []
+tags: [images, llm-router, sd-cpp]
+
+User decision 2026-10-28: the sd integration inside llm-router stops roughly where it is, enough to call the sd-server; proper sd.cpp handling becomes its own file, sd-router.py, later. The router never generates masks and never decodes images (mask generation is a client or MCP-tool concern). Input measured live on the sd-server (flux-2-klein-9b-Q8_0, 2026-10-28, probe scripts in untracked .claude/tmp/sdmask/): /v1/images/edits with a mask but no init_image DAMAGES the upload (outside-mask error 48.6 of 255, gradient and shapes lost) because uploads go to ref_images; the working inpaint routes are /sdapi/v1/img2img (init_images, mask, denoising_strength 1.0), /sdcpp/v1/img_gen (async job, init_image, mask_image, strength) and /v1/images/edits with the init_image passed inside the prompt-embedded sd_cpp_extra_args block (all about 3-4 of 255 outside the mask; the residue is the VAE round trip, so pixel-exact preservation needs client-side compositing). White mask means regenerate. No native outpainting: the client pads image and mask. Open points for the design: which native routes to front, the sd_cpp_extra_args guards (the raw LoRA path, the LAN exposure of the unauthenticated sd-server), the interplay with the sizes and default_size route keys, and whether the sdcpp kind in llm-router is then removed or kept as a thin passthrough.
+
+### Log
+
+- 2026-10-28 new->later: raised by user 2026-10-28
 
 # inbox
 
