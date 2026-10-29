@@ -8,8 +8,8 @@ sources:
   - Scripts
   - Scripts/context-guard.sh
 verified:
-  commit: 2c3e9e5
-  date: 2026-10-16
+  commit: 026d993
+  date: 2026-10-29
 links:
   - overview
   - mcp-proxy
@@ -217,7 +217,7 @@ loop became thirteen in the first place.
 | `Scripts/mcp-lldb.py` | mcp-lldb | LLDB debugger integration |
 | `Scripts/mcp-context7.py` | mcp-context7 | Context7 documentation lookup |
 | `Scripts/mcp-wiki.py` | mcp-wiki | Wiki freshness / reindex / search / page reads over `docs/` |
-| `Scripts/mcp-inspect.py` | mcp-inspect | Read-only host/process/network inspection, file digests, syntax validation |
+| `Scripts/mcp-inspect.py` | mcp-inspect | Read-only host/process/network inspection, file digests, syntax validation, markdown outline (`md_outline`) |
 | `Scripts/mcp-webfetch.py` | mcp-webfetch | URL fetching (verified TLS by default, Chrome emulation opt-in) with HTML→Markdown extraction, disk cache |
 | `Scripts/mcp-jenkins.py` | mcp-jenkins | Jenkins CI: jobs, builds, console + stage logs, artifacts, queue, test reports |
 | `Scripts/mcp-postgres.py` | mcp-postgres | PostgreSQL over the native v3 wire protocol — stdlib only, no libpq |
@@ -970,6 +970,29 @@ second complaint at the last line of the file. The first points AT the defect on
 both bashes; the last demonstrably does not, so reporting the first is what keeps
 the answer stable across versions.
 
+### `md_outline` — the `wc -l; grep -n "^#"` pair as one call
+
+`md_outline` (`12eed32`) replaces the shell pair an agent reaches for before
+reading a long markdown file in parts: one call answers the `wc -l` line count
+and a `line | level | text` table of its ATX headers
+`Scripts/mcp-inspect.py:h_md_outline`, reached also as `outline`, `headers`,
+`toc`, `md` and `markdown` `Scripts/mcp-inspect.py:ALIASES`. The count is the
+newline count, exactly what `wc -l` prints, and a file without a final newline
+says so with the real last line number beside it. It is **more correct than the
+one-liner it replaces**, on purpose: a `#` line inside a ``` or ~~~ fence is not
+a header (a fence closes only on the same mark at least as long), and neither are
+`#tag`, a four-space indent or seven hashes — the CommonMark ATX shape, closing
+`#` run dropped `Scripts/mcp-inspect.py:_md_headers`. Setext headers, fences
+inside blockquotes or list items and HTML blocks are **not** handled, by
+declaration in that docstring, so a `#` line inside one still counts. Rows page
+with `max_level` (1-6), `limit` (default `Scripts/mcp-inspect.py:_MD_OUTLINE_LIMIT`,
+0 = no cap) and `offset`, and a `more:` line names the next offset; the file is
+read whole under the same 32 MiB `max_mb` ceiling as `validate`
+(`Scripts/mcp-inspect.py:_MD_OUTLINE_MAX_MB`), and a directory, a missing file
+or a NUL byte is refused. It is read-only and outside every generated region;
+`inspect_validate`'s group S pins it against a fixture that puts each trap on
+its own line `tests/test_inspect_validate.py:OUTLINE_EXPECT` ([[tests]]).
+
 ### mcp-git's passthrough slot, and the one name reserved in that file
 
 `args` is the raw passthrough slot — a list handed to git verbatim behind the
@@ -1366,7 +1389,15 @@ deviations repaired by named quirk rows), `mistral` (translated to and from
 chat completions), and `codex` and `openai`, which speak the OpenAI Responses
 API through one adapter `Scripts/llm-router.py:ResponsesAdapter` driven by a
 profile row `Scripts/llm-router.py:ResponsesProfile` — codex over a ChatGPT
-OAuth login, openai over an API key or OAuth. Routing and secrets live in one
+OAuth login, openai over an API key or OAuth — and `sdcpp`, a local
+stable-diffusion.cpp `sd-server` (or [[sd-router]] in front of one, then with a
+bearer `api_key`) that serves the image routes and nothing else
+`Scripts/llm-router.py:SdcppAdapter`; a sixth row, `anthropic`, is reserved and
+refused by the loader `Scripts/llm-router.py:_RT_KIND_TABLE`. A route whose
+`modality` is `image` is served by the OpenAI-shaped `/v1/images/generations`
+and `/v1/images/edits` endpoints instead of `/v1/messages` — on an openai
+API-key backend, an sdcpp backend or, experimentally, a codex one
+`Scripts/llm-router.py:_rt_cfg_route` `Scripts/llm-router.py:_RT_IMAGE_ENDPOINTS`. Routing and secrets live in one
 JSON config that must be a regular file owned by the user with mode `0600`,
 opened without following a symlink
 `Scripts/llm-router.py:_rt_read_config_file`; network settings are flags, and
@@ -1374,7 +1405,7 @@ there is no inline-config flag because argv is visible in `ps`. An OAuth backend
 is signed in by the `login` subcommand (browser or device flow)
 `Scripts/llm-router.py:_rt_login`, which writes its tokens back into that same
 config. Its HTTP front is generated from `Scripts/_mcp_httpfront.py`, shared
-with [[mcp-proxy]], plus the router's declared adaptations, and its generated
+with [[mcp-proxy]] and [[sd-router]], plus the router's declared adaptations, and its generated
 regions are the two logging regions (`_configure_logging`, and `_log_value` with
 its two bounds, which replaced the router's hand copy in R-0070), the OAuth core
 from `Scripts/_mcp_oauth.py` and the HTTP front from `Scripts/_mcp_httpfront.py`
