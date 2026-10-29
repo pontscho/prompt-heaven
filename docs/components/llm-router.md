@@ -1154,49 +1154,6 @@ to 1-8; a 404 has an empty body; every answer carries
 extra-args tag with a 400 (the router refuses any prompt holding the marker
 before it is sent).
 
-**Masks on `sdcpp`: measured live (2026-10-28), direct to the server, the router
-not involved.** One sd-server (`http://192.168.2.245:8082`, `flux-2-klein-9b-Q8_0`
-with a Qwen3-8B text encoder and the `flux2_ae` VAE, 4 steps, euler, seed 42; the
-build's commit was not recorded) was given a 512 x 512 source (a grey gradient, a
-red circle, a blue square), a one-channel mask white over the circle (radius 100)
-and the prompt "a green star". The figure is the mean absolute RGB error (0-255)
-against the source. The probe script and its images sit in an untracked scratch
-directory, so they are not durable evidence; re-run before relying on a number.
-
-| Case | Request | Outside the mask | Blue square | Verdict |
-|---|---|---|---|---|
-| A | `POST /v1/images/edits`, multipart `image[]` + `mask` (200, 3.0 s) | 48.6 (72.3 inside) | 103.3 | damaged: a flat khaki-grey, gradient and square lost, a faint green blob in the mask |
-| B | A without `mask` (control) | 34.5 | 128.7 | redrawn from scratch: the upload is only a loose reference |
-| C | `POST /sdapi/v1/img2img` JSON, `init_images[]` + `mask`, `denoising_strength` 1.0 | 3.3 | 3.9 | a correct inpaint (at 0.75: 3.5 outside, only a partial star); answer `{images: [raw base64], info, parameters}` |
-| D | A plus `<sd_cpp_extra_args>{"init_image": "<raw base64 PNG>", "strength": 1.0}</sd_cpp_extra_args>` in the prompt | 4.2 | 4.1 | a correct inpaint; the server strips the tag (`generation_info.prompt` "a green star", `strength` 1.0) |
-| E | `POST /sdcpp/v1/img_gen` (async: 202 `{id, poll_url, status}`, then `GET /sdcpp/v1/jobs/{id}`, image at `result.images[0].b64_json`), body `{prompt, init_image, mask_image, strength, width, height, batch_count}` in raw base64 | 4.1 | | as D |
-
-Measured: an `/edits` mask without an `init_image` does not preserve the upload.
-Inferred from a source read and not measured: the OpenAI edit route puts uploads
-in `ref_images` and never in `init_image` (`routes_openai.cpp`), so the init latent
-is zeros (`generate_init_latent`), and the 3-4 residual outside the mask is the VAE
-round trip, so pixel-exact preservation needs compositing by the client. Also read
-in the sd.cpp source and not run: white regenerates and black keeps; the mask is
-one channel; only dedicated 9-channel inpaint, FLUX Fill and Flex.2 checkpoints get
-real mask conditioning, every other model a latent blend; there is no native
-outpainting (the client pads image and mask, the new border white); and edit
-models (Kontext, Qwen-Image-Edit, FLUX.2 Klein) use reference images without a
-mask. The server answered in about 1.7-3 s per request on this build, direct; the
-2026-10-27 figures above went through the router and stay as measured then.
-
-**What this means for the router, and what it does not do.** The `sdcpp` edit
-path forwards the client's multipart byte for byte
-`Scripts/llm-router.py:SdcppAdapter`, so a `mask` part reaches sd-server and the
-result is case A; no router change was made. The two routes that inpaint
-correctly are both out of the router's reach: D needs the extra-args tag that the
-prompt rule refuses, and C and E are paths outside the fixed `IMAGE_PATHS`. By the
-user's decision the router will not generate masks and will not decode images
-(mask generation is the client's concern, or an MCP tool's), and its sd.cpp
-integration stops at roughly this state: a separate, future `sd-router.py` is to
-handle sd.cpp properly, with C, D and E above as its input. That file does not
-exist and is not planned for now. The decision record is the 2026-10-28 mask
-addendum of [[0028-route-by-model-translate-at-the-edge]].
-
 ## OAuth: the token store and the write-back
 
 **Where the tokens live.** A logged-in backend's `oauth` object holds the
@@ -1694,17 +1651,6 @@ read before relying on one of them. In brief:
 - **An sd-server has no authentication,** so the router's bearer protects only
   the router: the sd-server must be reachable through the router alone (see
   *Declared limits of `sdcpp`* above).
-- **A mask on an `sdcpp` edit is unsafe.** The edit's multipart is forwarded
-  byte for byte `Scripts/llm-router.py:SdcppAdapter`, so a `mask` part reaches
-  sd-server, and the answer does not preserve the upload outside the mask (case A
-  in *Image endpoints* above, measured 2026-10-28, direct to the server; the
-  zero-init-latent cause is inferred from the source, not measured). The router neither refuses nor rewrites the part. The measured
-  workaround, an `init_image` passed in the prompt's extra-args block (case D),
-  is refused by the router's prompt rule, so it works only against sd-server
-  directly, and so do the other two working routes (C, E). Generating a mask is a
-  client concern, not the router's: the router generates no mask and decodes no
-  image, by decision; a proper sd.cpp integration is left to a future, separate
-  `sd-router.py`.
 - **Two refusals on an image path stay Anthropic-shaped:** a header-defect 400
   and an unknown-path 404, both answered before the path is known.
 - **A stalled resolve is given up, not interrupted.** `getaddrinfo` cannot be
