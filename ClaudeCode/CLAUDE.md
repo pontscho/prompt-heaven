@@ -9,19 +9,6 @@
 
 **Your minions are not a fallback — they are your default mode.** Using them is wisdom, not laziness: they keep your context clean, they iterate in their own sandboxes, and they return clean reports anchored to `file:line` evidence.
 
-| Minion | When to use |
-|---|---|
-| `p:minion-explorer` | Multi-round codebase exploration, subsystem understanding, "where is X defined", "how does Y work" — INSTEAD of long Glob/Grep/Read chains |
-| `p:minion-runner` | Script/command run-fix-retry loops — INSTEAD of inline script iteration |
-| `p:minion-builder` | Build + test + fix cycles (cmake, make, ctest, npm test, cargo, forge) — INSTEAD of inline compile/test iteration |
-| `p:minion-watson` | Non-obvious bug/failure investigation — brilliant sidekick that traces root cause through source with the purity MCP (clangd/luals-backed). Diagnoses and STOPS |
-| `p:minion-bug-hunter` | A reported bug you want CLOSED, not merely explained (Quint) — reproduces it, employs `p:minion-watson` for the root cause, fixes only *contained* changes, and proves the fix red-to-green. Reports a diagnosis and touches nothing when the fix would cross an API, dependency, schema, module or data boundary |
-| `p:minion-inspector-plan` | Validate an implementation plan against the live codebase BEFORE coding (used by the `/p:feature-plan` validation loop) |
-| `p:minion-inspector-implementation` | Audit a completed implementation against the plan AFTER coding (used by the `/p:implement` validation loop) |
-| `p:minion-inspector-security-officer` | Security review (OWASP Top 10, CWE-mapped) — plan-mode BEFORE coding (after inspector-plan APPROVE) and code-mode AFTER coding (after inspector-implementation COMPLETE). Threat-surface triage first; full audit only when triage hits. |
-| `p:minion-web-explorer` | Single-shot external lookups: library docs, version checks, "how do people do X" |
-| `p:minion-deep-researcher` | Comprehensive web research with 10-15 parallel queries — multi-angle investigation for architectural decisions |
-
 **Decision heuristic — STOP and delegate when:**
 - About to run a build/test command → `p:minion-builder`'s job
 - About to issue more than ~3 read/search calls on the same topic → `p:minion-explorer`
@@ -32,6 +19,8 @@
 - You need external/web info → `p:minion-web-explorer` (quick) or `p:minion-deep-researcher` (deep)
 
 **Never run-fix-retry, explore-explore-explore, or self-validate directly here.**
+
+**STRICT RULE — size the test run in every minion brief.** Before briefing a builder/mason/bug-hunter, decide how much testing the change actually needs and write it into the brief explicitly. Default: build + lint + typecheck + ONLY the test files covering the touched code. A full suite run is the exception, not the closing ritual: request it only for cross-cutting changes (shared core, schema, config loading, build system) or before a release, and say so in the brief with the reason. Never write "run the full suite once at the end" by reflex: in ai-soul the full suite alone takes ~25 minutes and makes the operator wait for nothing. If a full run is needed, it is a separate, deliberate step after the minion has reported, not part of its loop.
 
 ## Before You Start Coding
 

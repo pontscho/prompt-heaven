@@ -1,5 +1,46 @@
 {
   "env": {
     "PYTHONDONTWRITEBYTECODE": "1"
+  },
+  "permissions": {
+    "allow": [
+      "Bash(python3:*)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:www.freecodecamp.org)",
+      "WebFetch(domain:workos.com)",
+      "WebFetch(domain:dev.to)",
+      "WebFetch(domain:medium.com)",
+      "WebFetch(domain:support.claude.com)",
+      "WebFetch(domain:www.npmjs.com)",
+      "WebFetch(domain:lancedb.com)",
+      "WebFetch(domain:hackernoon.com)",
+      "WebFetch(domain:gist.github.com)",
+      "WebFetch(domain:tensorblue.com)",
+      "WebFetch(domain:www.firecrawl.dev)",
+      "Bash(npm run build:*)",
+      "mcp__ai-soul__soul_info",
+      "mcp__ai-soul__memory_recall",
+      "mcp__ai-soul__memory_propose",
+      "mcp__ai-soul__memory_list_pending",
+      "mcp__ai-soul__memory_stats"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          { "type": "command", "command": "~/.claude/scripts/context-guard.sh" }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          { "type": "command", "command": "~/.claude/scripts/context-guard.sh" }
+        ]
+      }
+    ]
   }
 }
