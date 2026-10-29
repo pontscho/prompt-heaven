@@ -398,7 +398,7 @@ worked examples of both kinds, each loaded through `load_config`
 The `sdcpp` kind, a stable-diffusion.cpp `sd-server` that serves only the image
 endpoints (no chat; sd-server has no authentication, so a backend without an
 `api_key` sends no credential, and one with a key, for a bearer-checking front
-such as [[sd-router]], sends it as `Authorization: Bearer`):
+such as [[gpu-router]], sends it as `Authorization: Bearer`):
 
 ```json
 "backends": {
@@ -420,7 +420,7 @@ kind. Without one, `auth_header` resolves to `none`, and `authorization` or
 `backends.<n>.auth_header`. The key obeys every `api_key` rule below, the
 non-loopback `http://` refusal and the difference from `auth_token` included,
 and those run before the kind's own rule `Scripts/llm-router.py:_rt_cfg_backend`.
-A keyed `sdcpp` backend points at one [[sd-router]] model, with a `base_url` of
+A keyed `sdcpp` backend points at one [[gpu-router]] model, with a `base_url` of
 `http://<host>:<port>/m/<model>` and the sd-router token as its key.
 
 **Top level** — exactly `auth_token`, `backends`, `routes`, `default`; any
@@ -1066,7 +1066,7 @@ are never reached, because an image route is refused on `/v1/messages` first), o
 the same two endpoints, the same single `_rt_send`, the fixed
 `IMAGE_PATHS` and the OpenAI envelope. sd-server has no authentication, so a
 backend without an `api_key` sends no credential (`auth_header` `none`); a
-backend with one, an [[sd-router]] or another bearer-checking front, sends only
+backend with one, a [[gpu-router]] or another bearer-checking front, sends only
 `Authorization: Bearer <key>` (`auth_header` omitted or `authorization`; `none`
 or `x-api-key` beside a key is a config error). The client's `Authorization`,
 `x-api-key` and cookies are never forwarded `Scripts/llm-router.py:SdcppAdapter`. The body is the

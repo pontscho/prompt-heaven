@@ -208,7 +208,7 @@ CANONICAL_NAMES = (BROTLI_CANONICAL_NAME, CHROME_CANONICAL_NAME,
 # `fleet-ok` gates these alongside the servers -- a declared host the gate did
 # not walk would be a target whose drift nothing reports.
 DECLARED_HOSTS = ("search_duckduckgo.py", "search_github.py", "llm-router.py",
-                  "fetch.py", "sd-router.py")
+                  "fetch.py", "gpu-router.py")
 
 # The sources a host takes WHOLE or not at all (G-c): the Chrome client and its
 # two decoders are one state machine whose blocks call one another, so a host
@@ -275,7 +275,7 @@ OAUTH_CORE = ("OAUTH_TOKEN_LIMIT", "OAUTH_BODY_LIMIT", "OAUTH_JWT_LIMIT",
 # The hosts of _mcp_httpfront.py (R-0072, ADR 0029): the server and handler class each takes members into.
 HTTPFRONT_HOSTS = {"mcp-proxy.py": ("_ProxyHttpServer", "_ProxyHttpHandler"),
                    "llm-router.py": ("_RouterHttpServer", "_RouterHandler"),
-                   "sd-router.py": ("_SdHttpServer", "_SdHandler")}
+                   "gpu-router.py": ("_SdHttpServer", "_SdHandler")}
 HTTPFRONT_SERVER = ("server_bind", "process_request", "handle_error")
 HTTPFRONT_HANDLER = ("parse_request", "handle_expect_100", "_single_header")
 HTTPFRONT_MODULE = ("_HTTP_STDLIB_REFUSAL_HEADERS", "_http_token_value",
@@ -314,23 +314,23 @@ HTTPFRONT_ADAPTATIONS = {
     ("llm-router.py", "_RouterHandler", "send_error"):
         "Anthropic envelope with _RT_STDLIB_REFUSAL's fixed text plus the generated "
         "_HTTP_STDLIB_REFUSAL_HEADERS (B21, D3)",
-    ("sd-router.py", "_SdHttpServer", "__init__"):
+    ("gpu-router.py", "_SdHttpServer", "__init__"):
         "takes (address, settings, scheduler) with the handler fixed; sizes conn_sem to "
         "max_connections plus the control reserve (H8) and adds closing, loopback and "
         "active/active_cond for the drain, all before the bind",
-    ("sd-router.py", "_SdHttpServer", "process_request_thread"):
+    ("gpu-router.py", "_SdHttpServer", "process_request_thread"):
         "counts active under active_cond for the shutdown drain, then releases conn_sem "
         "in the finally",
-    ("sd-router.py", "_SdHandler", "setup"):
+    ("gpu-router.py", "_SdHandler", "setup"):
         "installs _HeaderDeadlineReader with the socket timeout as its cap and closes the "
         "stdlib's rfile at once (P24)",
-    ("sd-router.py", "_SdHandler", "handle_one_request"):
+    ("gpu-router.py", "_SdHandler", "handle_one_request"):
         "the request line and headers within _SD_HEADER_TIMEOUT_S in total (F8), and one "
         "exchange per connection: close_connection forced in the finally",
-    ("sd-router.py", "_SdHandler", "log_message"):
+    ("gpu-router.py", "_SdHandler", "log_message"):
         "structure only (ADR 0011): an unhandled method as <other>, an unrouted path as "
         "<unrouted>",
-    ("sd-router.py", "_SdHandler", "send_error"):
+    ("gpu-router.py", "_SdHandler", "send_error"):
         "OpenAI envelope through _refuse with _SD_STDLIB_REFUSAL's fixed text plus the "
         "generated _HTTP_STDLIB_REFUSAL_HEADERS",
 }
@@ -2432,7 +2432,7 @@ def group_tabs(suite, mod):
     )
     # The declared hosts are outside the glob above. The two search scripts are
     # tabs throughout -- the fleet's tab hosts that are not servers -- and
-    # llm-router.py and sd-router.py are space hosts.
+    # llm-router.py and gpu-router.py are space hosts.
     declared_styles = {name: mod.host_indent(Path(SCRIPTS, name).read_text(encoding="utf-8"))
                        for name in DECLARED_HOSTS}
     problems += problem_if(
@@ -2440,7 +2440,7 @@ def group_tabs(suite, mod):
                             "search_github.py": "tab",
                             "llm-router.py": "space",
                             "fetch.py": "tab",
-                            "sd-router.py": "space"},
+                            "gpu-router.py": "space"},
         "expected both search scripts and fetch.py to be tab hosts and both routers space hosts, got %s"
         % declared_styles,
     )

@@ -242,8 +242,8 @@ def run_llm_router(opts):
     return run_python_suite("test_llm_router", opts)
 
 
-def run_sd_router(opts):
-    return run_python_suite("test_sd_router", opts)
+def run_gpu_router(opts):
+    return run_python_suite("test_gpu_router", opts)
 
 
 def run_tshark_fields(opts):
@@ -969,8 +969,8 @@ SUITES = [
     # TYPED: a fixed case table (A 17, L 39, R 20, D 22, S 20, Q-sched 16,
     # Q-http 5, T 13, P 40, U 18, G 6, E2E 4 = 220), so a count that moves is
     # the alarm.
-    ("sd_router", run_sd_router,
-     "sd-router, the supervisor and proxy for stable-diffusion.cpp "
+    ("gpu_router", run_gpu_router,
+     "gpu-router, the supervisor and proxy for stable-diffusion.cpp "
      "sd-server: config refusals, one model loaded at a time with switch on "
      "demand, the bounded queue and scheduler, /v1/unload (queued and "
      "?force=1), crash retries and the DISABLED state, the kill ladder and "

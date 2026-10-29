@@ -21,7 +21,7 @@ are six backend kinds (the seventh name, anthropic, is reserved and refused):
   openai       the OpenAI Responses API on the platform endpoint, with an
                api_key or an OAuth (Sign in with ChatGPT) login;
   sdcpp        a stable-diffusion.cpp sd-server, image routes only (no chat; an
-               optional api_key goes as a bearer, e.g. to an sd-router in
+               optional api_key goes as a bearer, e.g. to a gpu-router in
                front): the image endpoints below, its answer rebuilt.
 codex and openai share one adapter driven by a profile row per wire dialect;
 they always stream upstream and aggregate for a non-stream client, and carry
@@ -1336,7 +1336,7 @@ def _rt_cfg_backend(name: str, entry: Any, token: str) -> BackendSpec:
             raise ConfigError(f"{where}.auth_header: {owner} uses authorization only")
         auth_header = "authorization"
     elif kind == "sdcpp" and api_key is not None:
-        # D-10: sd-server has no auth of its own; a keyed sdcpp backend is an sd-router (or another
+        # D-10: sd-server has no auth of its own; a keyed sdcpp backend is a gpu-router (or another
         # bearer-checking front), so the key travels only as `Authorization: Bearer`.  This branch
         # must precede the generic x-api-key default below; V14 and the auth_token rule above have
         # already run.  Without a key the chain falls through: auth_header none, and any other
@@ -5769,7 +5769,7 @@ class SdcppAdapter(Adapter):
     """kind sdcpp: a stable-diffusion.cpp sd-server behind the image endpoints (and nothing else).
 
     sd-server has no auth: without an api_key the backend sends no credential (auth_header none); with
-    one (an sd-router or another bearer-checking front, D-10) the key goes only as `Authorization: Bearer`
+    one (a gpu-router or another bearer-checking front, D-10) the key goes only as `Authorization: Bearer`
     (auth_header omitted or authorization; none or x-api-key with a key is a config error, and a key
     over a non-loopback http:// base_url stays refused by V14). No chat: MODALITIES is {image}. The client's
     bytes go to /v1/images/generations or /edits untouched, so the router's guards are the whole policy:
@@ -9561,7 +9561,7 @@ example config (chmod 600; token: python3 -c 'import secrets;print(secrets.token
   and any prompt holding "sd_cpp_extra_args" (sd-server's in-prompt native arguments, which would
   bypass those limits), and drops generation_info from the answer (a data list empty or longer
   than n is a 502). sd-server has no auth: without an api_key an sdcpp backend sends no
-  credential; with one (e.g. an sd-router in front) it sends `Authorization: Bearer <key>`
+  credential; with one (e.g. a gpu-router in front) it sends `Authorization: Bearer <key>`
   (auth_header omitted or authorization; none or x-api-key with a key is a config error).
   Keep a bare sd-server reachable only through the router. GET /v1/models lists every route with its modality
   (?modality=chat|image|all filters it); --max-image-requests caps image requests in flight.

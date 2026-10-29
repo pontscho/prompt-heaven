@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""tf_stub_sd -- the adversarial stub sd-server child for tests/test_sd_router.py.
+"""tf_stub_sd -- the adversarial stub sd-server child for tests/test_gpu_router.py.
 
 A fixture, not project code (tests/files/README.md: every symbol starts with
-``tf``).  Stdlib only, Python 3.9, run as ``__main__`` by the sd-router suite
+``tf``).  Stdlib only, Python 3.9, run as ``__main__`` by the gpu-router suite
 as a model's ``bin``; nothing imports it.  It stands in for stable-diffusion.cpp
 ``sd-server``: a loopback HTTP/1.1 server (``Connection: close`` on every
 answer) serving the four synchronous image routes with canned sd-shaped JSON.

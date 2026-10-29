@@ -3,7 +3,7 @@
 # requires-python = ">=3.9"
 # dependencies = []
 # ///
-"""sd-router: a supervisor and reverse proxy for stable-diffusion.cpp `sd-server`.
+"""gpu-router: a supervisor and reverse proxy for stable-diffusion.cpp `sd-server`.
 
 One router instance owns one GPU. Its JSON config declares models; per model it
 spawns an sd-server child from config data (argv list, never a shell), proxies
@@ -100,7 +100,7 @@ Exit codes
 ----------
   0  normal exit, including a signal-initiated shutdown (SIGTERM / SIGINT).
   2  a config or command-line refusal, or a startup failure (the listener cannot
-     bind, --log-file or --ready-file cannot be written): one `sd-router: <msg>`
+     bind, --log-file or --ready-file cannot be written): one `gpu-router: <msg>`
      line on stderr, no traceback.
 
 Declared limits (ADR 0034 carries the full list)
@@ -166,7 +166,7 @@ from typing import (
     Union,
 )
 
-log = logging.getLogger("sd-router")
+log = logging.getLogger("gpu-router")
 
 
 class ConfigError(Exception):
@@ -606,8 +606,8 @@ def load_config(path: str) -> Settings:
 
 
 def _sd_refuse(reason: str) -> NoReturn:
-    """The one refusal shape: one `sd-router: <reason>` stderr line, exit 2."""
-    print("sd-router: " + " ".join(str(reason).splitlines()), file=sys.stderr)
+    """The one refusal shape: one `gpu-router: <reason>` stderr line, exit 2."""
+    print("gpu-router: " + " ".join(str(reason).splitlines()), file=sys.stderr)
     sys.exit(2)
 
 
@@ -646,7 +646,7 @@ _SD_CONNECTIONS_RANGE = (1, 1024)
 
 def _sd_parser() -> argparse.ArgumentParser:
     parser = _SdArgumentParser(
-        prog="sd-router",
+        prog="gpu-router",
         description="Supervisor and proxy for stable-diffusion.cpp sd-server children "
                     "(localhost by default; no TLS).",
         allow_abbrev=False)
@@ -2546,7 +2546,7 @@ class Scheduler:
 # Host and Origin (decision of task-025; the closed table has no 403): checked
 # AFTER the bearer, so the bearer stays the first gate (plan Step 5 order), and
 # refused as 400 invalid_request -- a request whose Host does not name this
-# loopback listener, or that carries any Origin (sd-router configures no
+# loopback listener, or that carries any Origin (gpu-router configures no
 # allowed origin, so the allowlist llm-router keeps is empty here), is treated
 # as a malformed request. The stdlib's own refusals map into the closed table
 # too: 501 (an unknown method) is 405 method_not_allowed, every other one
@@ -2763,7 +2763,7 @@ class _SdHandler(BaseHTTPRequestHandler):
     owns only its socket; the scheduler thread never touches it."""
 
     protocol_version = "HTTP/1.1"
-    server_version = "sd-router"
+    server_version = "gpu-router"
     sys_version = ""
     # Applied by StreamRequestHandler.setup(): a connection that stalls in the
     # request line or headers is closed by the stdlib (CWE-400). parse_request
@@ -3189,7 +3189,7 @@ def _sd_models_entry(name: str, view: ModelView, created: int) -> Dict[str, Any]
     is not resident, else the ModelState name lower-cased. Never command, args, env,
     cwd, port or pid."""
     state = "disabled" if view.disabled and not _sd_is_resident(view) else view.state.name.lower()
-    return {"id": name, "object": "model", "created": created, "owned_by": "sd-router",
+    return {"id": name, "object": "model", "created": created, "owned_by": "gpu-router",
             "modality": "image", "state": state}
 
 
@@ -3467,7 +3467,7 @@ def _sd_settings(args: argparse.Namespace, cfg: Settings) -> Settings:
         max_connections=pick(args.max_connections, cfg.max_connections),
         body_limit=pick(args.body_limit, cfg.body_limit))
     if merged.allow_remote and not merged.insecure_cleartext:
-        raise ConfigError("--allow-remote needs --insecure-cleartext: sd-router has no TLS, the bearer "
+        raise ConfigError("--allow-remote needs --insecure-cleartext: gpu-router has no TLS, the bearer "
                           "token and images would cross the network in cleartext")
     if not merged.allow_remote and not _sd_is_loopback(merged.bind):
         raise ConfigError("--bind: a non-loopback address needs --allow-remote --insecure-cleartext")
@@ -3518,7 +3518,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     # serve_forever on its own thread: shutdown() blocks until serve_forever returns,
     # so it is never called from the serving thread.
     threading.Thread(target=srv.serve_forever, name="sd-serve", daemon=True).start()
-    log.info("sd-router listening: port=%d models=%d", srv.server_port, len(settings.models))
+    log.info("gpu-router listening: port=%d models=%d", srv.server_port, len(settings.models))
     _sd_wait_stop(stop_flag, threading.Event())
     _sd_shutdown(srv, scheduler, args.ready_file)
     sys.exit(0)
@@ -3527,7 +3527,7 @@ def main(argv: Optional[List[str]] = None) -> None:
 def _sd_shutdown(srv: _SdHttpServer, scheduler: Scheduler, ready_file: Optional[str]) -> None:
     """The ordered shutdown: closing -> scheduler (ladder, resident stop, registry sweep)
     -> drain -> close -> ready file -> flush. Every step is bounded."""
-    log.info("sd-router shutting down")
+    log.info("gpu-router shutting down")
     # 1. A request accepted from here on gets 503 shutting_down.
     srv.closing.set()
     # 2. Queued tickets are finished queue_closed, the running one is aborted (its
@@ -3547,7 +3547,7 @@ def _sd_shutdown(srv: _SdHttpServer, scheduler: Scheduler, ready_file: Optional[
     srv.server_close()
     if ready_file is not None:
         _http_remove_ready_file(ready_file, log)
-    log.info("sd-router stopped")
+    log.info("gpu-router stopped")
     for handler in logging.getLogger().handlers + log.handlers:
         try:
             handler.flush()

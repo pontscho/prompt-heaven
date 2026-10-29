@@ -42,7 +42,7 @@ links:
   - 0029-the-http-front-is-a-domain
   - 0027-the-proxy-relays-it-never-composes
   - mcp-skill
-  - sd-router
+  - gpu-router
   - 0034-sd-router-a-supervisor-and-proxy-for-sd-server
 ---
 
@@ -63,9 +63,9 @@ fetcher `Scripts/fetch.py` takes the same client and decoders and no search
 domain. The LLM router
 `Scripts/llm-router.py`, an HTTP server that is not an MCP server, takes the
 two logging regions, the OAuth client and the stdlib HTTP front it shares with
-`Scripts/mcp-proxy.py`. The sd-server supervisor `Scripts/sd-router.py`, the
+`Scripts/mcp-proxy.py`. The sd-server supervisor `Scripts/gpu-router.py`, the
 second HTTP server that is not an MCP server, takes the two logging regions and
-the same HTTP front ([[sd-router]]). They are targets because the generator **names them
+the same HTTP front ([[gpu-router]]). They are targets because the generator **names them
 by hand** `Scripts/amalgamate.py:DECLARED_HOSTS` — see "A host outside the glob"
 below — not because anything about them matches the server glob.
 
@@ -372,11 +372,11 @@ What differs between the hosts — `setup`, `handle_one_request`,
 `process_request_thread`, `send_error`, `log_message` and the constructors —
 stays hand-written and is declared row by row in
 `tests/test_generated_region.py:HTTPFRONT_ADAPTATIONS`, which group I reads.
-`Scripts/sd-router.py` joined as the source's third host after the lift; its
+`Scripts/gpu-router.py` joined as the source's third host after the lift; its
 six rows in that table are the server's constructor and
 `process_request_thread` and the handler's `setup`, `handle_one_request`,
-`log_message` and `send_error` `Scripts/sd-router.py:_SdHttpServer`
-`Scripts/sd-router.py:_SdHandler`
+`log_message` and `send_error` `Scripts/gpu-router.py:_SdHttpServer`
+`Scripts/gpu-router.py:_SdHandler`
 ([[0034-sd-router-a-supervisor-and-proxy-for-sd-server]]).
 The decision, the adaptation table, the policy seams and the declared limits
 are [[0029-the-http-front-is-a-domain]].
@@ -526,17 +526,17 @@ visible violation of the whole-or-nothing rule, not a presentation choice.
 | `MAX_INFLIGHT_REQUESTS` | `Scripts/_mcp_concurrency.py` | 12 | `Scripts/mcp-context7.py`, `Scripts/mcp-forge.py`, `Scripts/mcp-git.py`, `Scripts/mcp-inspect.py`, `Scripts/mcp-jenkins.py`, `Scripts/mcp-postgres.py`, `Scripts/mcp-sandbox.py`, `Scripts/mcp-search.py`, `Scripts/mcp-skill.py`, `Scripts/mcp-tshark.py`, `Scripts/mcp-webfetch.py`, `Scripts/mcp-wiki.py` |
 | `_did_you_mean` | `Scripts/_mcp_dispatch.py` | 19 | `Scripts/mcp-clangd.py`, `Scripts/mcp-context7.py`, `Scripts/mcp-cuda.py`, `Scripts/mcp-forge.py`, `Scripts/mcp-gdc.py`, `Scripts/mcp-git.py`, `Scripts/mcp-inspect.py`, `Scripts/mcp-jenkins.py`, `Scripts/mcp-lldb.py`, `Scripts/mcp-lua-lsp.py`, `Scripts/mcp-postgres.py`, `Scripts/mcp-proxy.py`, `Scripts/mcp-purity.py`, `Scripts/mcp-sandbox.py`, `Scripts/mcp-search.py`, `Scripts/mcp-skill.py`, `Scripts/mcp-tshark.py`, `Scripts/mcp-webfetch.py`, `Scripts/mcp-wiki.py` |
 | `_unknown_params_refusal` | `Scripts/_mcp_dispatch.py` | 11 | `Scripts/mcp-clangd.py`, `Scripts/mcp-context7.py`, `Scripts/mcp-cuda.py`, `Scripts/mcp-forge.py`, `Scripts/mcp-gdc.py`, `Scripts/mcp-jenkins.py`, `Scripts/mcp-lldb.py`, `Scripts/mcp-lua-lsp.py`, `Scripts/mcp-sandbox.py`, `Scripts/mcp-skill.py`, `Scripts/mcp-tshark.py` |
-| `_HTTP_STDLIB_REFUSAL_HEADERS` | `Scripts/_mcp_httpfront.py` | 3 | `Scripts/llm-router.py`, `Scripts/mcp-proxy.py`, `Scripts/sd-router.py` |
-| `_HeaderDeadlineReader` | `Scripts/_mcp_httpfront.py` | 3 | `Scripts/llm-router.py`, `Scripts/mcp-proxy.py`, `Scripts/sd-router.py` |
-| `_http_remove_ready_file` | `Scripts/_mcp_httpfront.py` | 3 | `Scripts/llm-router.py`, `Scripts/mcp-proxy.py`, `Scripts/sd-router.py` |
-| `_http_token_value` | `Scripts/_mcp_httpfront.py` | 3 | `Scripts/llm-router.py`, `Scripts/mcp-proxy.py`, `Scripts/sd-router.py` |
-| `_http_write_ready_file` | `Scripts/_mcp_httpfront.py` | 3 | `Scripts/llm-router.py`, `Scripts/mcp-proxy.py`, `Scripts/sd-router.py` |
-| `_single_header` | `Scripts/_mcp_httpfront.py` | 3 | `Scripts/llm-router.py`, `Scripts/mcp-proxy.py`, `Scripts/sd-router.py` |
-| `handle_error` | `Scripts/_mcp_httpfront.py` | 3 | `Scripts/llm-router.py`, `Scripts/mcp-proxy.py`, `Scripts/sd-router.py` |
-| `handle_expect_100` | `Scripts/_mcp_httpfront.py` | 3 | `Scripts/llm-router.py`, `Scripts/mcp-proxy.py`, `Scripts/sd-router.py` |
-| `parse_request` | `Scripts/_mcp_httpfront.py` | 3 | `Scripts/llm-router.py`, `Scripts/mcp-proxy.py`, `Scripts/sd-router.py` |
-| `process_request` | `Scripts/_mcp_httpfront.py` | 3 | `Scripts/llm-router.py`, `Scripts/mcp-proxy.py`, `Scripts/sd-router.py` |
-| `server_bind` | `Scripts/_mcp_httpfront.py` | 3 | `Scripts/llm-router.py`, `Scripts/mcp-proxy.py`, `Scripts/sd-router.py` |
+| `_HTTP_STDLIB_REFUSAL_HEADERS` | `Scripts/_mcp_httpfront.py` | 3 | `Scripts/gpu-router.py`, `Scripts/llm-router.py`, `Scripts/mcp-proxy.py` |
+| `_HeaderDeadlineReader` | `Scripts/_mcp_httpfront.py` | 3 | `Scripts/gpu-router.py`, `Scripts/llm-router.py`, `Scripts/mcp-proxy.py` |
+| `_http_remove_ready_file` | `Scripts/_mcp_httpfront.py` | 3 | `Scripts/gpu-router.py`, `Scripts/llm-router.py`, `Scripts/mcp-proxy.py` |
+| `_http_token_value` | `Scripts/_mcp_httpfront.py` | 3 | `Scripts/gpu-router.py`, `Scripts/llm-router.py`, `Scripts/mcp-proxy.py` |
+| `_http_write_ready_file` | `Scripts/_mcp_httpfront.py` | 3 | `Scripts/gpu-router.py`, `Scripts/llm-router.py`, `Scripts/mcp-proxy.py` |
+| `_single_header` | `Scripts/_mcp_httpfront.py` | 3 | `Scripts/gpu-router.py`, `Scripts/llm-router.py`, `Scripts/mcp-proxy.py` |
+| `handle_error` | `Scripts/_mcp_httpfront.py` | 3 | `Scripts/gpu-router.py`, `Scripts/llm-router.py`, `Scripts/mcp-proxy.py` |
+| `handle_expect_100` | `Scripts/_mcp_httpfront.py` | 3 | `Scripts/gpu-router.py`, `Scripts/llm-router.py`, `Scripts/mcp-proxy.py` |
+| `parse_request` | `Scripts/_mcp_httpfront.py` | 3 | `Scripts/gpu-router.py`, `Scripts/llm-router.py`, `Scripts/mcp-proxy.py` |
+| `process_request` | `Scripts/_mcp_httpfront.py` | 3 | `Scripts/gpu-router.py`, `Scripts/llm-router.py`, `Scripts/mcp-proxy.py` |
+| `server_bind` | `Scripts/_mcp_httpfront.py` | 3 | `Scripts/gpu-router.py`, `Scripts/llm-router.py`, `Scripts/mcp-proxy.py` |
 | `JSON_INT_LITERAL_LIMIT` | `Scripts/_mcp_json.py` | 19 | `Scripts/mcp-clangd.py`, `Scripts/mcp-context7.py`, `Scripts/mcp-cuda.py`, `Scripts/mcp-forge.py`, `Scripts/mcp-gdc.py`, `Scripts/mcp-git.py`, `Scripts/mcp-inspect.py`, `Scripts/mcp-jenkins.py`, `Scripts/mcp-lldb.py`, `Scripts/mcp-lua-lsp.py`, `Scripts/mcp-postgres.py`, `Scripts/mcp-proxy.py`, `Scripts/mcp-purity.py`, `Scripts/mcp-sandbox.py`, `Scripts/mcp-search.py`, `Scripts/mcp-skill.py`, `Scripts/mcp-tshark.py`, `Scripts/mcp-webfetch.py`, `Scripts/mcp-wiki.py` |
 | `_bool_param` | `Scripts/_mcp_json.py` | 11 | `Scripts/mcp-clangd.py`, `Scripts/mcp-cuda.py`, `Scripts/mcp-forge.py`, `Scripts/mcp-gdc.py`, `Scripts/mcp-inspect.py`, `Scripts/mcp-jenkins.py`, `Scripts/mcp-lldb.py`, `Scripts/mcp-lua-lsp.py`, `Scripts/mcp-postgres.py`, `Scripts/mcp-purity.py`, `Scripts/mcp-wiki.py` |
 | `_ensure_dict` | `Scripts/_mcp_json.py` | 10 | `Scripts/mcp-context7.py`, `Scripts/mcp-forge.py`, `Scripts/mcp-gdc.py`, `Scripts/mcp-git.py`, `Scripts/mcp-inspect.py`, `Scripts/mcp-lldb.py`, `Scripts/mcp-sandbox.py`, `Scripts/mcp-search.py`, `Scripts/mcp-skill.py`, `Scripts/mcp-webfetch.py` |
@@ -549,10 +549,10 @@ visible violation of the whole-or-nothing rule, not a presentation choice.
 | `_result` | `Scripts/_mcp_json.py` | 18 | `Scripts/mcp-clangd.py`, `Scripts/mcp-context7.py`, `Scripts/mcp-cuda.py`, `Scripts/mcp-forge.py`, `Scripts/mcp-gdc.py`, `Scripts/mcp-git.py`, `Scripts/mcp-inspect.py`, `Scripts/mcp-jenkins.py`, `Scripts/mcp-lldb.py`, `Scripts/mcp-lua-lsp.py`, `Scripts/mcp-postgres.py`, `Scripts/mcp-proxy.py`, `Scripts/mcp-purity.py`, `Scripts/mcp-sandbox.py`, `Scripts/mcp-search.py`, `Scripts/mcp-skill.py`, `Scripts/mcp-tshark.py`, `Scripts/mcp-wiki.py` |
 | `_strict_dumps` | `Scripts/_mcp_json.py` | 19 | `Scripts/mcp-clangd.py`, `Scripts/mcp-context7.py`, `Scripts/mcp-cuda.py`, `Scripts/mcp-forge.py`, `Scripts/mcp-gdc.py`, `Scripts/mcp-git.py`, `Scripts/mcp-inspect.py`, `Scripts/mcp-jenkins.py`, `Scripts/mcp-lldb.py`, `Scripts/mcp-lua-lsp.py`, `Scripts/mcp-postgres.py`, `Scripts/mcp-proxy.py`, `Scripts/mcp-purity.py`, `Scripts/mcp-sandbox.py`, `Scripts/mcp-search.py`, `Scripts/mcp-skill.py`, `Scripts/mcp-tshark.py`, `Scripts/mcp-webfetch.py`, `Scripts/mcp-wiki.py` |
 | `_strict_loads` | `Scripts/_mcp_json.py` | 19 | `Scripts/mcp-clangd.py`, `Scripts/mcp-context7.py`, `Scripts/mcp-cuda.py`, `Scripts/mcp-forge.py`, `Scripts/mcp-gdc.py`, `Scripts/mcp-git.py`, `Scripts/mcp-inspect.py`, `Scripts/mcp-jenkins.py`, `Scripts/mcp-lldb.py`, `Scripts/mcp-lua-lsp.py`, `Scripts/mcp-postgres.py`, `Scripts/mcp-proxy.py`, `Scripts/mcp-purity.py`, `Scripts/mcp-sandbox.py`, `Scripts/mcp-search.py`, `Scripts/mcp-skill.py`, `Scripts/mcp-tshark.py`, `Scripts/mcp-webfetch.py`, `Scripts/mcp-wiki.py` |
-| `_LOG_KEYS_SHOWN` | `Scripts/_mcp_logging.py` | 21 | `Scripts/llm-router.py`, `Scripts/mcp-clangd.py`, `Scripts/mcp-context7.py`, `Scripts/mcp-cuda.py`, `Scripts/mcp-forge.py`, `Scripts/mcp-gdc.py`, `Scripts/mcp-git.py`, `Scripts/mcp-inspect.py`, `Scripts/mcp-jenkins.py`, `Scripts/mcp-lldb.py`, `Scripts/mcp-lua-lsp.py`, `Scripts/mcp-postgres.py`, `Scripts/mcp-proxy.py`, `Scripts/mcp-purity.py`, `Scripts/mcp-sandbox.py`, `Scripts/mcp-search.py`, `Scripts/mcp-skill.py`, `Scripts/mcp-tshark.py`, `Scripts/mcp-webfetch.py`, `Scripts/mcp-wiki.py`, `Scripts/sd-router.py` |
-| `_LOG_VALUE_WIDTH` | `Scripts/_mcp_logging.py` | 21 | `Scripts/llm-router.py`, `Scripts/mcp-clangd.py`, `Scripts/mcp-context7.py`, `Scripts/mcp-cuda.py`, `Scripts/mcp-forge.py`, `Scripts/mcp-gdc.py`, `Scripts/mcp-git.py`, `Scripts/mcp-inspect.py`, `Scripts/mcp-jenkins.py`, `Scripts/mcp-lldb.py`, `Scripts/mcp-lua-lsp.py`, `Scripts/mcp-postgres.py`, `Scripts/mcp-proxy.py`, `Scripts/mcp-purity.py`, `Scripts/mcp-sandbox.py`, `Scripts/mcp-search.py`, `Scripts/mcp-skill.py`, `Scripts/mcp-tshark.py`, `Scripts/mcp-webfetch.py`, `Scripts/mcp-wiki.py`, `Scripts/sd-router.py` |
-| `_configure_logging` | `Scripts/_mcp_logging.py` | 21 | `Scripts/llm-router.py`, `Scripts/mcp-clangd.py`, `Scripts/mcp-context7.py`, `Scripts/mcp-cuda.py`, `Scripts/mcp-forge.py`, `Scripts/mcp-gdc.py`, `Scripts/mcp-git.py`, `Scripts/mcp-inspect.py`, `Scripts/mcp-jenkins.py`, `Scripts/mcp-lldb.py`, `Scripts/mcp-lua-lsp.py`, `Scripts/mcp-postgres.py`, `Scripts/mcp-proxy.py`, `Scripts/mcp-purity.py`, `Scripts/mcp-sandbox.py`, `Scripts/mcp-search.py`, `Scripts/mcp-skill.py`, `Scripts/mcp-tshark.py`, `Scripts/mcp-webfetch.py`, `Scripts/mcp-wiki.py`, `Scripts/sd-router.py` |
-| `_log_value` | `Scripts/_mcp_logging.py` | 21 | `Scripts/llm-router.py`, `Scripts/mcp-clangd.py`, `Scripts/mcp-context7.py`, `Scripts/mcp-cuda.py`, `Scripts/mcp-forge.py`, `Scripts/mcp-gdc.py`, `Scripts/mcp-git.py`, `Scripts/mcp-inspect.py`, `Scripts/mcp-jenkins.py`, `Scripts/mcp-lldb.py`, `Scripts/mcp-lua-lsp.py`, `Scripts/mcp-postgres.py`, `Scripts/mcp-proxy.py`, `Scripts/mcp-purity.py`, `Scripts/mcp-sandbox.py`, `Scripts/mcp-search.py`, `Scripts/mcp-skill.py`, `Scripts/mcp-tshark.py`, `Scripts/mcp-webfetch.py`, `Scripts/mcp-wiki.py`, `Scripts/sd-router.py` |
+| `_LOG_KEYS_SHOWN` | `Scripts/_mcp_logging.py` | 21 | `Scripts/gpu-router.py`, `Scripts/llm-router.py`, `Scripts/mcp-clangd.py`, `Scripts/mcp-context7.py`, `Scripts/mcp-cuda.py`, `Scripts/mcp-forge.py`, `Scripts/mcp-gdc.py`, `Scripts/mcp-git.py`, `Scripts/mcp-inspect.py`, `Scripts/mcp-jenkins.py`, `Scripts/mcp-lldb.py`, `Scripts/mcp-lua-lsp.py`, `Scripts/mcp-postgres.py`, `Scripts/mcp-proxy.py`, `Scripts/mcp-purity.py`, `Scripts/mcp-sandbox.py`, `Scripts/mcp-search.py`, `Scripts/mcp-skill.py`, `Scripts/mcp-tshark.py`, `Scripts/mcp-webfetch.py`, `Scripts/mcp-wiki.py` |
+| `_LOG_VALUE_WIDTH` | `Scripts/_mcp_logging.py` | 21 | `Scripts/gpu-router.py`, `Scripts/llm-router.py`, `Scripts/mcp-clangd.py`, `Scripts/mcp-context7.py`, `Scripts/mcp-cuda.py`, `Scripts/mcp-forge.py`, `Scripts/mcp-gdc.py`, `Scripts/mcp-git.py`, `Scripts/mcp-inspect.py`, `Scripts/mcp-jenkins.py`, `Scripts/mcp-lldb.py`, `Scripts/mcp-lua-lsp.py`, `Scripts/mcp-postgres.py`, `Scripts/mcp-proxy.py`, `Scripts/mcp-purity.py`, `Scripts/mcp-sandbox.py`, `Scripts/mcp-search.py`, `Scripts/mcp-skill.py`, `Scripts/mcp-tshark.py`, `Scripts/mcp-webfetch.py`, `Scripts/mcp-wiki.py` |
+| `_configure_logging` | `Scripts/_mcp_logging.py` | 21 | `Scripts/gpu-router.py`, `Scripts/llm-router.py`, `Scripts/mcp-clangd.py`, `Scripts/mcp-context7.py`, `Scripts/mcp-cuda.py`, `Scripts/mcp-forge.py`, `Scripts/mcp-gdc.py`, `Scripts/mcp-git.py`, `Scripts/mcp-inspect.py`, `Scripts/mcp-jenkins.py`, `Scripts/mcp-lldb.py`, `Scripts/mcp-lua-lsp.py`, `Scripts/mcp-postgres.py`, `Scripts/mcp-proxy.py`, `Scripts/mcp-purity.py`, `Scripts/mcp-sandbox.py`, `Scripts/mcp-search.py`, `Scripts/mcp-skill.py`, `Scripts/mcp-tshark.py`, `Scripts/mcp-webfetch.py`, `Scripts/mcp-wiki.py` |
+| `_log_value` | `Scripts/_mcp_logging.py` | 21 | `Scripts/gpu-router.py`, `Scripts/llm-router.py`, `Scripts/mcp-clangd.py`, `Scripts/mcp-context7.py`, `Scripts/mcp-cuda.py`, `Scripts/mcp-forge.py`, `Scripts/mcp-gdc.py`, `Scripts/mcp-git.py`, `Scripts/mcp-inspect.py`, `Scripts/mcp-jenkins.py`, `Scripts/mcp-lldb.py`, `Scripts/mcp-lua-lsp.py`, `Scripts/mcp-postgres.py`, `Scripts/mcp-proxy.py`, `Scripts/mcp-purity.py`, `Scripts/mcp-sandbox.py`, `Scripts/mcp-search.py`, `Scripts/mcp-skill.py`, `Scripts/mcp-tshark.py`, `Scripts/mcp-webfetch.py`, `Scripts/mcp-wiki.py` |
 | `_abs_path` | `Scripts/_mcp_lsp.py` | 4 | `Scripts/mcp-clangd.py`, `Scripts/mcp-cuda.py`, `Scripts/mcp-lua-lsp.py`, `Scripts/mcp-purity.py` |
 | `_abs_uri` | `Scripts/_mcp_lsp.py` | 4 | `Scripts/mcp-clangd.py`, `Scripts/mcp-cuda.py`, `Scripts/mcp-lua-lsp.py`, `Scripts/mcp-purity.py` |
 | `_notify` | `Scripts/_mcp_lsp.py` | 4 | `Scripts/mcp-clangd.py`, `Scripts/mcp-cuda.py`, `Scripts/mcp-lua-lsp.py`, `Scripts/mcp-purity.py` |
@@ -648,7 +648,7 @@ visible violation of the whole-or-nothing rule, not a presentation choice.
 | `all 25 blocks (whole source)` | `Scripts/_mcp_zstd.py` | 5 | `Scripts/fetch.py`, `Scripts/mcp-search.py`, `Scripts/mcp-webfetch.py`, `Scripts/search_duckduckgo.py`, `Scripts/search_github.py` |
 
 24 hosts scanned; 360 canonical blocks, of which 356 are generated into at least one host; generated into no host: `_ws_sync_close`, `_ws_sync_connect`, `_ws_sync_recv`, `_ws_sync_send`.
-<!-- END MEASURED: 34953f425dca -->
+<!-- END MEASURED: fa83f1df21b5 -->
 
 `DEFAULT_MAX_CHARS` is worth naming here because of the state its first hosts
 were found in when `0f05101` lifted it. `mcp-git.py`, `mcp-inspect.py` and
@@ -792,7 +792,7 @@ that the tab-indented servers are exactly `mcp-forge.py` and `mcp-webfetch.py`
 `tests/test_generated_region.py:group_tabs`, and — in the same case — that the
 two search scripts and `fetch.py` among the declared hosts
 `Scripts/amalgamate.py:DECLARED_HOSTS` are tab-indented, and `llm-router.py` and
-`sd-router.py` are space hosts. A block added to a source moves that set or
+`gpu-router.py` are space hosts. A block added to a source moves that set or
 fails there. The websocket source was written for the rule from the start: its tab
 host was the DDG search script, so every one of its blocks fits one call per
 physical line, the request built by appending rather than as one bracketed list,
@@ -877,19 +877,19 @@ style in `tests/test_generated_region.py:group_tabs`, and the file in `py_deps`'
 3.10+ API scope — no generator change. What the script does with the client is
 in [[scripts]].
 
-`Scripts/sd-router.py` is the fifth declared host, the second HTTP server run by
+`Scripts/gpu-router.py` is the fifth declared host, the second HTTP server run by
 path and a space host like the router. It carries eight regions: the two logging
 regions, `_configure_logging` and `_LOG_VALUE_WIDTH, _LOG_KEYS_SHOWN, _log_value`
 on one marker, and the HTTP front from `Scripts/_mcp_httpfront.py` in the same
 six regions the router and the proxy take, two of them inside its server and
-handler classes `Scripts/sd-router.py:_SdHttpServer`
-`Scripts/sd-router.py:_SdHandler`. It takes no strict-JSON or OAuth block. Its
+handler classes `Scripts/gpu-router.py:_SdHttpServer`
+`Scripts/gpu-router.py:_SdHandler`. It takes no strict-JSON or OAuth block. Its
 hand-written stdlib overrides are declared row by row beside the other two
 hosts' in `tests/test_generated_region.py:HTTPFRONT_ADAPTATIONS`. Adding it was
 the tuple entry in both spellings, its expected indent style in
 `tests/test_generated_region.py:group_tabs`, its classes in the adaptation
 table and the file in `py_deps`' 3.10+ API scope `tests/test_py_deps.py:NEW_39_SCOPE`
-([[sd-router]], [[0034-sd-router-a-supervisor-and-proxy-for-sd-server]]).
+([[gpu-router]], [[0034-sd-router-a-supervisor-and-proxy-for-sd-server]]).
 
 They are **not** in the `--census fleet` count, deliberately: that census is
 about the server fleet and says so in its first line, so its measured block above

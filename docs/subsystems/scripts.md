@@ -41,7 +41,7 @@ links:
   - 0026-speak-chrome-from-the-stdlib-verify-by-default
   - 0029-the-http-front-is-a-domain
   - 0030-point-at-the-near-miss-never-resolve-it
-  - sd-router
+  - gpu-router
   - 0034-sd-router-a-supervisor-and-proxy-for-sd-server
 ---
 
@@ -238,8 +238,8 @@ access rules, how to run it for ai-soul, how it is tested and its declared
 limits are [[mcp-proxy]]; why it relays and never composes is
 [[0027-the-proxy-relays-it-never-composes]]. Its HTTP front's identical pieces
 are generated from `Scripts/_mcp_httpfront.py` into it, into the LLM router's
-`Scripts/llm-router.py:_RouterHttpServer` and into sd-router's
-`Scripts/sd-router.py:_SdHttpServer`, each keeping declared adaptations
+`Scripts/llm-router.py:_RouterHttpServer` and into gpu-router's
+`Scripts/gpu-router.py:_SdHttpServer`, each keeping declared adaptations
 ([[0029-the-http-front-is-a-domain]]; see "LLM router" and "SD router" below).
 
 `Scripts/mcp-search.py` (`search_call`: web search over DDG lite and Bing, code
@@ -1390,7 +1390,7 @@ chat completions), and `codex` and `openai`, which speak the OpenAI Responses
 API through one adapter `Scripts/llm-router.py:ResponsesAdapter` driven by a
 profile row `Scripts/llm-router.py:ResponsesProfile` — codex over a ChatGPT
 OAuth login, openai over an API key or OAuth — and `sdcpp`, a local
-stable-diffusion.cpp `sd-server` (or [[sd-router]] in front of one, then with a
+stable-diffusion.cpp `sd-server` (or [[gpu-router]] in front of one, then with a
 bearer `api_key`) that serves the image routes and nothing else
 `Scripts/llm-router.py:SdcppAdapter`; a sixth row, `anthropic`, is reserved and
 refused by the loader `Scripts/llm-router.py:_RT_KIND_TABLE`. A route whose
@@ -1405,7 +1405,7 @@ there is no inline-config flag because argv is visible in `ps`. An OAuth backend
 is signed in by the `login` subcommand (browser or device flow)
 `Scripts/llm-router.py:_rt_login`, which writes its tokens back into that same
 config. Its HTTP front is generated from `Scripts/_mcp_httpfront.py`, shared
-with [[mcp-proxy]] and [[sd-router]], plus the router's declared adaptations, and its generated
+with [[mcp-proxy]] and [[gpu-router]], plus the router's declared adaptations, and its generated
 regions are the two logging regions (`_configure_logging`, and `_log_value` with
 its two bounds, which replaced the router's hand copy in R-0070), the OAuth core
 from `Scripts/_mcp_oauth.py` and the HTTP front from `Scripts/_mcp_httpfront.py`
@@ -1417,26 +1417,26 @@ are [[llm-router]]; why it routes by model and translates at the edge is
 
 ## SD router
 
-`Scripts/sd-router.py` is the second HTTP server here that is **not an MCP
+`Scripts/gpu-router.py` is the second HTTP server here that is **not an MCP
 server**: a stdlib-only supervisor and reverse proxy in front of
 stable-diffusion.cpp `sd-server` on a host with one GPU, run by path with
-`--config <file>` `Scripts/sd-router.py:_sd_parser`. Its 0600 JSON config
+`--config <file>` `Scripts/gpu-router.py:_sd_parser`. Its 0600 JSON config
 declares the models, each launched as an `sd-server` child from an argv list
-`Scripts/sd-router.py:load_config`; image requests are relayed byte-exact to
+`Scripts/gpu-router.py:load_config`; image requests are relayed byte-exact to
 the child for the model they name, in strict FIFO order with one request in
 flight, and a request for another model swaps the resident child out
-`Scripts/sd-router.py:Scheduler`. The supervisor kills a child's whole process
+`Scripts/gpu-router.py:Scheduler`. The supervisor kills a child's whole process
 group and verifies it gone before an unload answers
-`Scripts/sd-router.py:Supervisor`. Every route needs a bearer token, and the
-image routes are one allowlisted table `Scripts/sd-router.py:ROUTES`. Its
+`Scripts/gpu-router.py:Supervisor`. Every route needs a bearer token, and the
+image routes are one allowlisted table `Scripts/gpu-router.py:ROUTES`. Its
 intended client is the LLM router's `sdcpp` kind, which sends the router token
 as `Authorization: Bearer` `Scripts/llm-router.py:_rt_cfg_backend`. It is a
 hand-declared host of the generator `Scripts/amalgamate.py:DECLARED_HOSTS`:
-its HTTP front, `Scripts/sd-router.py:_SdHttpServer`, is generated from
+its HTTP front, `Scripts/gpu-router.py:_SdHttpServer`, is generated from
 `Scripts/_mcp_httpfront.py` with its declared adaptations, and its logging from
 `Scripts/_mcp_logging.py` ([[generated-regions]]). The config, the request
 pipeline, the scheduler and its state machine, unload, the closed error table,
-the `sd_router` suite and the declared limits are [[sd-router]]; the decision
+the `gpu_router` suite and the declared limits are [[gpu-router]]; the decision
 and the alternatives that lost are
 [[0034-sd-router-a-supervisor-and-proxy-for-sd-server]].
 

@@ -5,17 +5,17 @@ status: active
 title: sd-router -- a supervisor and reverse proxy for sd-server
 description: Decision to put one stdlib-only file, Scripts/sd-router.py, in front of stable-diffusion.cpp sd-server as a supervisor and reverse proxy -- one scheduler thread and one Condition, an allowlisted route table, strict FIFO with one request in flight on the single GPU, process-group kill with a verified exit before an unload answers, and a declared host of the generated HTTP front (ADR 0029, 0025) -- with the alternatives rejected, the measurements, the planner decisions D-1 to D-17 as an overrule list with their costs (D-11 and D-12 awaiting user sign-off), the twelve implementation deviations from the plan, the threat table, the llm-router sdcpp credential phase that supersedes ADR 0028's no-credential rule, the declared limits, and the code-mode security review (APPROVE, nine LOW) with its red-first fix round and that round's three deviations.
 sources:
-  - Scripts/sd-router.py
-  - Scripts/sd-router.py:Scheduler
-  - Scripts/sd-router.py:Supervisor
-  - Scripts/sd-router.py:decide
-  - Scripts/sd-router.py:ROUTES
-  - Scripts/sd-router.py:_sd_send
-  - Scripts/sd-router.py:_SdHandler
+  - Scripts/gpu-router.py
+  - Scripts/gpu-router.py:Scheduler
+  - Scripts/gpu-router.py:Supervisor
+  - Scripts/gpu-router.py:decide
+  - Scripts/gpu-router.py:ROUTES
+  - Scripts/gpu-router.py:_sd_send
+  - Scripts/gpu-router.py:_SdHandler
   - Scripts/llm-router.py:_rt_cfg_backend
   - Scripts/amalgamate.py:DECLARED_HOSTS
   - tests/test_generated_region.py:HTTPFRONT_ADAPTATIONS
-  - tests/test_sd_router.py
+  - tests/test_gpu_router.py
 verified:
   commit: 91ff40b
   date: 2026-10-28
@@ -30,7 +30,7 @@ links:
   - llm-router
   - mcp-proxy
   - generated-regions
-  - sd-router
+  - gpu-router
 ---
 
 # ADR 0034: sd-router -- a supervisor and reverse proxy for sd-server

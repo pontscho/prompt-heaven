@@ -18977,7 +18977,7 @@ def gr_config(peer_url):
 
 
 def gr_keyed_config(peer_url):
-    """gr_config plus two keyed sdcpp backends (the credential phase, D-10: sd-router takes a bearer):
+    """gr_config plus two keyed sdcpp backends (the credential phase, D-10: gpu-router takes a bearer):
     one with an api_key alone, one with auth_header authorization spelled out, each behind one route.
     A separate config so that the main R router still starts where a keyed sdcpp backend is refused."""
     cfg = gr_config(peer_url)
@@ -19092,7 +19092,7 @@ def group_r(suite, fixture_root):
                     lan_backend = cfg.backends.get("lan")
                     if getattr(lan_backend, "auth_header", None) != "none" or getattr(lan_backend, "api_key", 1) is not None:
                         problems.append("an sdcpp backend without auth_header is not forced to auth_header none, no key")
-                # V9 (credential phase, D-10): the backend may hold an api_key, sent as a bearer to sd-router
+                # V9 (credential phase, D-10): the backend may hold an api_key, sent as a bearer to gpu-router
                 # (auth_header omitted -> authorization).  The keyed cases sit on the loopback backend `sd` so
                 # that V14 (no key over a non-loopback http://) cannot answer for the auth_header rule.
                 for label, extra in (("an api_key alone", {"api_key": TF_KEY_PASS}),

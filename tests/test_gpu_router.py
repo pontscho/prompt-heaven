@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""`Scripts/sd-router.py` supervises one sd-server at a time and relays to it.
+"""`Scripts/gpu-router.py` supervises one sd-server at a time and relays to it.
 
 WHAT IS GATED
 -------------
-`Scripts/sd-router.py` is a loopback HTTP front that owns a set of
+`Scripts/gpu-router.py` is a loopback HTTP front that owns a set of
 stable-diffusion.cpp `sd-server` children, keeps at most ONE of them resident
 (a single GPU), swaps on demand in strict FIFO order, and relays each image
 request byte-exact to the resident child.  Everything it promises is
@@ -11,14 +11,14 @@ observable at its two edges: what the caller receives (the child's answer
 byte-for-byte, or an OpenAI-shaped refusal from the closed code table), and
 what the child receives (one request, recorded with its SHA-256 by the stub).
 This suite drives the router against the adversarial stub child
-`tests/files/sd_router/tf_stub_sd.py` (flags and `tf_*` functions in its
+`tests/files/gpu_router/tf_stub_sd.py` (flags and `tf_*` functions in its
 docstring), as a subprocess for the CLI / exit-code / ready-file / signal
 cases, and as a privately loaded module (in-process, constants and seams
 patched) for every case whose observable is one of the router's own windows.
 
 SANDBOX DISCIPLINE -- all fixtures (config files written mode 0600, stub state
 directories, the router's stderr) live under
-`.claude/tmp/test_sd_router/run-<unique>/`, one subdirectory per run so a
+`.claude/tmp/test_gpu_router/run-<unique>/`, one subdirectory per run so a
 concurrent instance's teardown cannot delete a live run's fixtures.  Removed in
 a `finally` unless --keep.  Every live router is closed SIGTERM -> SIGKILL in a
 `finally`; every stub child is checked and reaped through its `.pids` file
@@ -30,12 +30,12 @@ look".
 
 The case count is TYPED in run.py's SUITES table: this is a fixed case table,
 so a count that moves is the alarm.  The run is authoritative.  Every case
-fails RED while `Scripts/sd-router.py` (or the name it gates) is missing.
+fails RED while `Scripts/gpu-router.py` (or the name it gates) is missing.
 
 Usage:
-  python3 tests/test_sd_router.py
-  python3 tests/test_sd_router.py --brief
-  python3 tests/test_sd_router.py --keep
+  python3 tests/test_gpu_router.py
+  python3 tests/test_gpu_router.py --brief
+  python3 tests/test_gpu_router.py --keep
 Exit code 0 iff every non-informational case passes.
 
 Groups:
@@ -54,7 +54,7 @@ Groups:
   E2E      end to end     -- llm-router (kind sdcpp, a bearer key) -> the live router -> two
                              stub models: round trip, swap, forced unload, wrong key
 
-Fixture directory: tests/files/sd_router/ (the stub child only).
+Fixture directory: tests/files/gpu_router/ (the stub child only).
 """
 
 import ast
@@ -84,10 +84,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import _harness as H  # noqa: E402
 
-NAME = "sd_router"
+NAME = "gpu_router"
 
-SERVER = H.repo_path("Scripts", "sd-router.py")
-STUB = H.repo_path("tests", "files", "sd_router", "tf_stub_sd.py")
+SERVER = H.repo_path("Scripts", "gpu-router.py")
+STUB = H.repo_path("tests", "files", "gpu_router", "tf_stub_sd.py")
 STUB_DEFAULT_NAME = "tf_stub_sd"
 
 GL = "L. config"
@@ -103,7 +103,7 @@ GG = "G. front policy"
 GA = "A. static"
 GE = "E2E. end to end"
 
-FIXTURE_BASE = H.repo_path(".claude", "tmp", "test_sd_router")
+FIXTURE_BASE = H.repo_path(".claude", "tmp", "test_gpu_router")
 WRITES = []
 LOG_PATHS = []               # every router stderr and --log-file path, swept for sentinels
 
@@ -166,12 +166,12 @@ def write_file(path, text, mode=0o600):
     return path
 
 
-def write_config(sandbox, doc, mode=0o600, filename="sd-router.json"):
+def write_config(sandbox, doc, mode=0o600, filename="gpu-router.json"):
     """Write *doc* as JSON into *sandbox* with exactly *mode*; return its path.
 
     *doc* is written as given (no defaults are filled in), so a case that needs
     a missing or malformed key states it.  *sandbox* must lie under the run's
-    `.claude/tmp/test_sd_router/run-<unique>/` root.
+    `.claude/tmp/test_gpu_router/run-<unique>/` root.
     """
     return write_file(os.path.join(sandbox, filename),
                       json.dumps(doc, indent=2, sort_keys=True) + "\n", mode)
@@ -354,7 +354,7 @@ def router_argv(config_path, ready_path, *extra, server=None):
 
 
 class RouterProc:
-    """One live `sd-router.py` with a ready file and its stderr in a file.
+    """One live `gpu-router.py` with a ready file and its stderr in a file.
 
     Used only for CLI / exit-code / ready-file / signal cases, with real (small)
     config values: a subprocess cannot be monkeypatched.  *server* runs another
@@ -487,17 +487,17 @@ _LOADS = [0]
 
 
 def load_module(label="mod"):
-    """(module, why): a private copy of Scripts/sd-router.py, or (None, reason)
+    """(module, why): a private copy of Scripts/gpu-router.py, or (None, reason)
     when it is missing or fails to import -- a red case, never a crash."""
     _LOADS[0] += 1
     if not os.path.isfile(SERVER):
-        return None, "Scripts/sd-router.py does not exist"
+        return None, "Scripts/gpu-router.py does not exist"
     try:
-        return H.load_module_from_path("ph_sd_router_%s_%d" % (label, _LOADS[0]), SERVER), None
+        return H.load_module_from_path("ph_gpu_router_%s_%d" % (label, _LOADS[0]), SERVER), None
     except BaseException as exc:  # noqa: BLE001 -- a broken module is a finding, not a crash
         if isinstance(exc, KeyboardInterrupt):
             raise
-        return None, "Scripts/sd-router.py failed to import: %s" % type(exc).__name__
+        return None, "Scripts/gpu-router.py failed to import: %s" % type(exc).__name__
 
 
 def missing_names(mod, names):
@@ -737,7 +737,7 @@ def _l_cli_parsed(mod, label, argv):
     return [], ns
 
 
-def _l_config_file(sandbox, doc, mode=0o600, name="sd-router.json"):
+def _l_config_file(sandbox, doc, mode=0o600, name="gpu-router.json"):
     return write_config(sandbox, doc, mode=mode, filename=name)
 
 
@@ -1161,10 +1161,10 @@ def l29(mod, sandbox):
     hosts = _l_declared_hosts()
     if hosts is None:
         problems.append("Scripts/amalgamate.py has no DECLARED_HOSTS literal")
-    elif "sd-router.py" not in hosts:
-        problems.append("sd-router.py is not in amalgamate.py's DECLARED_HOSTS (H3)")
-    elif hosts[-1] != "sd-router.py":
-        problems.append("sd-router.py is not the LAST entry of DECLARED_HOSTS")
+    elif "gpu-router.py" not in hosts:
+        problems.append("gpu-router.py is not in amalgamate.py's DECLARED_HOSTS (H3)")
+    elif hosts[-1] != "gpu-router.py":
+        problems.append("gpu-router.py is not the LAST entry of DECLARED_HOSTS")
     rc, _out, err = H.run_process([sys.executable, "-B", L_AMALGAMATE, "--check"],
                                   timeout=L_AMALGAMATE_TIMEOUT_S, cwd=H.REPO_ROOT)
     if rc != 0:
@@ -1436,7 +1436,7 @@ def group_l(suite, fixture_root):
 # really spawned or signalled), or are pure (Budget).
 #
 # The contract this group pins (task-012..014 implement it; plan Step 3, D-1,
-# H2, H5, M3).  Every name below is module-level in Scripts/sd-router.py unit 4:
+# H2, H5, M3).  Every name below is module-level in Scripts/gpu-router.py unit 4:
 #
 #   _SD_RESTART_BUDGET = 5, _SD_RESTART_WINDOW_S = 600.0  (pinned by S11),
 #   _SD_STOP_GRACE_S, _SD_READY_TICK_S, _SD_PORT_TRIES = 3 (spawns per start,
@@ -2384,7 +2384,7 @@ def group_s(suite, fixture_root):
 # readers could read two ways is a 400, never a guess; ADR 0015).
 #
 # The contract this group pins (task-022 implements it; plan Step 5 unit 2,
-# Type Definitions).  Every name is module-level in Scripts/sd-router.py
+# Type Definitions).  Every name is module-level in Scripts/gpu-router.py
 # unit 2:
 #
 #   ROUTES: a READ-ONLY mapping (assignment raises TypeError), exactly
@@ -3008,7 +3008,7 @@ def group_r(suite, fixture_root):
 #
 # The contract this group pins (task-016 implements it; plan Step 4 unit 3,
 # Type Definitions, D-17, M2, final M2).  Every name is module-level in
-# Scripts/sd-router.py unit 3:
+# Scripts/gpu-router.py unit 3:
 #
 #   ModelState(enum.Enum): exactly STOPPED, STARTING, READY, STOPPING, DEAD.
 #     DISABLED is NOT a member: it is a per-model boolean flag.
@@ -3546,7 +3546,7 @@ def group_d(suite, fixture_root):
 # task-020 the scheduler thread; plan Section 5 "Lock / thread model",
 # "Cancellation, force, abort and deadline semantics", the state table,
 # FR-5, FR-10 M9, D-3, D-12, D-17, H6, H7, M1-M4).  Every name is module-level
-# in Scripts/sd-router.py and is looked up AT CALL TIME (tests patch it):
+# in Scripts/gpu-router.py and is looked up AT CALL TIME (tests patch it):
 #
 # Unit 5
 #   UpstreamError(kind): an Exception whose `.kind` is one of "connect", "eof",
@@ -4918,7 +4918,7 @@ def group_t(suite, fixture_root):
 # The contract these groups pin (task-024 unit 7 + generated regions, task-025
 # unit 8 do_POST and the error table, task-027 unit 9 main; plan Step 5, the
 # closed error table, D-11, D-13..D-15, H2, H8, S-L1..S-L3, S-M1, NFR-4).  Every
-# name is module-level in Scripts/sd-router.py:
+# name is module-level in Scripts/gpu-router.py:
 #
 # Unit 7 -- the front (task-024)
 #   _SdHttpServer(server_address, settings, scheduler): a ThreadingHTTPServer
@@ -6345,7 +6345,7 @@ def p39(mod, sandbox):
 
 def p40(mod, sandbox):
     """A config `bind` of 0.0.0.0 without allow_remote + insecure_cleartext is refused by
-    main() like the CLI form: exit 2, one `sd-router:` line, never ready, no socket."""
+    main() like the CLI form: exit 2, one `gpu-router:` line, never ready, no socket."""
     path = write_config(sandbox, base_config({"A": _p_entry(sandbox, "A")}, bind="0.0.0.0"))
     proc, ready = launch(path, [], label="p40")
     try:
@@ -6358,7 +6358,7 @@ def p40(mod, sandbox):
     if code != 2:
         problems.append("exit %r, expected 2" % (code,))
     lines = [ln for ln in proc.stderr_text().splitlines() if ln.strip()]
-    if len(lines) != 1 or not lines[0].startswith("sd-router: ") or "--insecure-cleartext" not in lines[0]:
+    if len(lines) != 1 or not lines[0].startswith("gpu-router: ") or "--insecure-cleartext" not in lines[0]:
         problems.append("stderr is not the one-line refusal: %r" % (lines[:3],))
     problems += _p_leaks("stderr", proc.stderr_text())
     return problems, ["config bind 0.0.0.0 alone: exit 2 with the one-line non-loopback refusal"]
@@ -6671,7 +6671,7 @@ def group_q_http(suite, fixture_root):
 #     ONE stop ladder and are all answered {"unloaded": true} (QH5).
 #   /v1/models (FR-6, Section 3).  200 {"object": "list", "data": [entry per
 #     configured model]}, each entry EXACTLY {"id", "object": "model",
-#     "created": <int>, "owned_by": "sd-router", "modality": "image", "state"}
+#     "created": <int>, "owned_by": "gpu-router", "modality": "image", "state"}
 #     with state "stopped" | "starting" | "ready" | "stopping" | "dead" |
 #     "disabled" ("disabled" when the flag is set and the model is not
 #     resident, else the ModelState name lower-cased), read from
@@ -6766,10 +6766,10 @@ def _u_models(label, resp):
         if set(entry) != U_ENTRY_KEYS:
             problems.append("%s: entry keys %r, expected exactly %r" % (label, sorted(entry), sorted(U_ENTRY_KEYS)))
         created = entry.get("created")
-        if (entry.get("object"), entry.get("owned_by"), entry.get("modality")) != ("model", "sd-router", "image") \
+        if (entry.get("object"), entry.get("owned_by"), entry.get("modality")) != ("model", "gpu-router", "image") \
                 or not isinstance(created, int) or isinstance(created, bool) or created < 0 \
                 or entry.get("state") not in U_STATES or not isinstance(entry.get("id"), str):
-            problems.append("%s: entry %r is not {object model, owned_by sd-router, modality image, "
+            problems.append("%s: entry %r is not {object model, owned_by gpu-router, modality image, "
                             "created int, state in %r}" % (label, entry.get("id"), U_STATES))
         if entry.get("id") in entries:
             problems.append("%s: model %r listed twice" % (label, entry.get("id")))
@@ -7449,7 +7449,7 @@ def group_u(suite, fixture_root):
 # HTTP front's members are generated from Scripts/_mcp_httpfront.py and are the
 # same in every host, so the policy they apply reaches them INJECTED by the host
 # -- never as a host global read inside a generated member.  G1-G4 are AST rules
-# over Scripts/sd-router.py, G5 checks the same wiring on a privately loaded
+# over Scripts/gpu-router.py, G5 checks the same wiring on a privately loaded
 # module (constants patched, a real listener bound on 127.0.0.1:0), G6 is the
 # planted control: a small clean front passes all four rules and a deliberately
 # wrong one fails each of them, so a rule that went blind is a red case.
@@ -7508,9 +7508,9 @@ G_NAMES = ("_SdHttpServer", "_SdHandler", "_sd_cfg_token", "ConfigError", "log",
 
 
 def _g_read_source():
-    """(text, why): Scripts/sd-router.py's text, or (None, reason)."""
+    """(text, why): Scripts/gpu-router.py's text, or (None, reason)."""
     if not os.path.isfile(SERVER):
-        return None, "Scripts/sd-router.py does not exist"
+        return None, "Scripts/gpu-router.py does not exist"
     with open(SERVER, "r", encoding="utf-8") as fh:
         return fh.read(), None
 
@@ -7740,7 +7740,7 @@ def rule_g_logger(source):
 
 def _g_rule_case(rule, scope):
     def case(text):
-        return rule(text), ["scope       : Scripts/sd-router.py: %s" % scope]
+        return rule(text), ["scope       : Scripts/gpu-router.py: %s" % scope]
     return case
 
 
@@ -7922,19 +7922,19 @@ def group_g(suite, fixture_root):
 
 
 # ---------------------------------------------------------------------------
-# Group E2E -- llm-router (kind sdcpp) -> sd-router -> the stub child
+# Group E2E -- llm-router (kind sdcpp) -> gpu-router -> the stub child
 # ---------------------------------------------------------------------------
-# Three kinds of real process per case and nothing in-process: Scripts/sd-router.py
+# Three kinds of real process per case and nothing in-process: Scripts/gpu-router.py
 # as a subprocess (`launch`, --debug), Scripts/llm-router.py on the same
 # command line (`launch(..., server=LLM_SERVER)`, --debug) and the stub children
-# the sd-router spawns.  The client speaks raw HTTP/1.1 to llm-router's
+# the gpu-router spawns.  The client speaks raw HTTP/1.1 to llm-router's
 # /v1/images/generations with llm-router's own bearer (`Connection: close`).
 # Every live router is closed SIGTERM -> SIGKILL in a `finally`, llm-router
 # first; the stubs are reaped through `_q_live`.
 #
 # The contract these cases pin (task-039; plan Step 8, D-10, D-11, FR-11, SC-6):
 #   llm-router (task-038).  A backend of kind sdcpp whose base_url is
-#     http://127.0.0.1:<sd-router port>/m/<model>, with allow_private,
+#     http://127.0.0.1:<gpu-router port>/m/<model>, with allow_private,
 #     allow_loopback, an api_key of >= 32 characters and auth_header
 #     authorization, is ACCEPTED, and every upstream request carries
 #     `Authorization: Bearer <api_key>` to base_path + /v1/images/generations.
@@ -7945,22 +7945,22 @@ def group_g(suite, fixture_root):
 #     stored.  An upstream 401 reaches the client as 502 and an upstream 503
 #     that is not model_not_loaded / model_loading as 529 (_UPSTREAM_STATUS),
 #     both with the fixed text "backend <n> answered <status>".
-#   sd-router.  The bearer is checked first, then the /m/<x> prefix alone
+#   gpu-router.  The bearer is checked first, then the /m/<x> prefix alone
 #     selects the model (D-11): the body's `model` is llm-router's route key and
 #     is never sniffed -- E1 names the route "B" while it points at /m/A, so a
 #     router that sniffed the body would start B.  The bearer is never
 #     forwarded: the stub's recorded header names hold no `authorization`.  A
 #     swap stops A's whole group before B serves (single GPU); a forced unload
-#     on the sd-router control route aborts the request llm-router waits on, and
+#     on the gpu-router control route aborts the request llm-router waits on, and
 #     answers {"unloaded": true} only with A's group gone (SC-2, SC-3).  A
 #     wrong key is refused before any child starts.
-#   SC-6.  Neither key (the sd-router token, which is llm-router's api_key, and
+#   SC-6.  Neither key (the gpu-router token, which is llm-router's api_key, and
 #     llm-router's own auth_token) appears in either router's stderr at --debug,
 #     in a stub's environment or argv (--dump-env), or in a client answer.
 # If llm-router refuses the config -- the credential phase absent: exit 2 with
 # the refusal naming `api_key` -- the case is INFO and skipped, so the
-# sd-router phases stay shippable alone.  Any other llm-router start failure,
-# and an sd-router that does not exit 0 on SIGTERM, is a FAIL.
+# gpu-router phases stay shippable alone.  Any other llm-router start failure,
+# and a gpu-router that does not exit 0 on SIGTERM, is a FAIL.
 
 GE_CASES = (
     "E1 round trip, prefix wins",
@@ -7971,7 +7971,7 @@ GE_CASES = (
 
 LLM_SERVER = H.repo_path("Scripts", "llm-router.py")
 E_LLM_TOKEN = "tf-e2e-llm-token-SENTINEL-" + secrets.token_hex(16)    # llm-router's own auth_token
-E_WRONG_KEY = "tf-e2e-wrong-key-SENTINEL-" + secrets.token_hex(16)    # an api_key sd-router never accepts
+E_WRONG_KEY = "tf-e2e-wrong-key-SENTINEL-" + secrets.token_hex(16)    # an api_key gpu-router never accepts
 E_SECRETS = (TF_TOKEN, E_LLM_TOKEN, E_WRONG_KEY)
 E_UPSTREAM_401 = 502         # llm-router's _UPSTREAM_STATUS[401]
 E_UPSTREAM_503 = 529         # llm-router's _UPSTREAM_STATUS[503] (not model_not_loaded / model_loading)
@@ -7984,7 +7984,7 @@ class _ESkip(Exception):
 
 def _e_llm_config(sandbox, sd_port, routes, key=TF_TOKEN):
     """A 0600 llm-router config: one sdcpp backend per route of *routes* ({route key:
-    sd-router model}), each at http://127.0.0.1:<sd_port>/m/<model> with *key* as a bearer."""
+    gpu-router model}), each at http://127.0.0.1:<sd_port>/m/<model> with *key* as a bearer."""
     backends, table = {}, {}
     for index, (route, model) in enumerate(sorted(routes.items())):
         backend = "sd%d" % index
@@ -8003,7 +8003,7 @@ def _e_secret_in(text):
 def _e_sweep(sandbox, world, models, names):
     """SC-6: no key in either router's stderr or in a stub's env dump (argv + env)."""
     problems = []
-    for label, proc in (("the sd-router stderr", world.sd), ("the llm-router stderr", world.llm)):
+    for label, proc in (("the gpu-router stderr", world.sd), ("the llm-router stderr", world.llm)):
         if proc is not None and _e_secret_in(proc.stderr_text()):
             problems.append("%s carries a key" % label)
     for name in models:
@@ -8019,10 +8019,10 @@ def _e_sweep(sandbox, world, models, names):
 
 @contextlib.contextmanager
 def _e_world(sandbox, models, routes, names, key=TF_TOKEN):
-    """sd-router over *models*, then llm-router over *routes* pointing at it; both at --debug.
+    """gpu-router over *models*, then llm-router over *routes* pointing at it; both at --debug.
 
     Raises _ESkip when llm-router refuses the keyed sdcpp backends.  On exit both
-    are closed (llm-router first), the sd-router exit code checked and the SC-6
+    are closed (llm-router first), the gpu-router exit code checked and the SC-6
     sweep run; problems in world.problems."""
     world = types.SimpleNamespace(sd=None, llm=None, problems=[])
     try:
@@ -8042,7 +8042,7 @@ def _e_world(sandbox, models, routes, names, key=TF_TOKEN):
         if world.llm is not None:
             world.llm.close()
         if world.sd is not None and world.sd.close() != 0:
-            world.problems.append("sd-router did not exit 0 on SIGTERM (exit %r)" % world.sd.proc.returncode)
+            world.problems.append("gpu-router did not exit 0 on SIGTERM (exit %r)" % world.sd.proc.returncode)
         world.problems += _e_sweep(sandbox, world, models, names)
 
 
@@ -8095,7 +8095,7 @@ def _e_refused(label, resp, status, upstream):
     if _e_secret_in(resp.raw.decode("latin-1")):
         return ["%s: the client's answer carries a key" % label]
     if resp.status != status:
-        return ["%s: llm-router answered %s, expected %d (sd-router's %d)" % (label, resp.describe(), status, upstream)]
+        return ["%s: llm-router answered %s, expected %d (gpu-router's %d)" % (label, resp.describe(), status, upstream)]
     doc = resp.json()
     err = doc.get("error") if isinstance(doc, dict) else None
     message = err.get("message") if isinstance(err, dict) else None
@@ -8167,8 +8167,8 @@ def e3(mod, sandbox, names, optional):
                                 % alive)
             problems += _e_refused("the aborted request", r_client, E_UPSTREAM_503, 503)
             problems += _e_reached("the aborted request", sandbox, "A", body)
-    return problems + w.problems, ["a force on sd-router's control route ended A's group; llm-router "
-                                   "relayed sd-router's 503 unload_forced as 529"]
+    return problems + w.problems, ["a force on gpu-router's control route ended A's group; llm-router "
+                                   "relayed gpu-router's 503 unload_forced as 529"]
 
 
 @_q_live
@@ -8181,7 +8181,7 @@ def e4(mod, sandbox, names, optional):
         problems = _e_refused("the wrong key", _e_post(w, body), E_UPSTREAM_401, 401)
         if read_starts(sandbox, "A") or _q_sends(sandbox, "A"):
             problems.append("a request with a wrong key started or reached the child")
-    return problems + w.problems, ["llm-router's api_key is not the sd-router token: 401 upstream, 502 "
+    return problems + w.problems, ["llm-router's api_key is not the gpu-router token: 401 upstream, 502 "
                                    "to the client, no child started, no key echoed"]
 
 
@@ -8207,7 +8207,7 @@ def group_e2e(suite, fixture_root):
 
 
 # ---------------------------------------------------------------------------
-# Group A -- static AST over Scripts/sd-router.py
+# Group A -- static AST over Scripts/gpu-router.py
 # ---------------------------------------------------------------------------
 # One read and one parse of the router; every case is an AST walk (well under
 # 2 s each), RED while the file is missing or does not parse.  A unit is the
@@ -8381,10 +8381,10 @@ def _a_context():
     try:
         tree = ast.parse(text)
     except SyntaxError as exc:
-        return None, "Scripts/sd-router.py does not parse: line %s" % exc.lineno
+        return None, "Scripts/gpu-router.py does not parse: line %s" % exc.lineno
     units = _a_units(text)
     if not all(unit in units for unit in range(1, 10)):
-        return None, "Scripts/sd-router.py lacks a `# ---- unit N ----` header for units 1-9"
+        return None, "Scripts/gpu-router.py lacks a `# ---- unit N ----` header for units 1-9"
     return types.SimpleNamespace(text=text, tree=tree, units=units, owners=_a_owner_map(tree)), None
 
 
@@ -8576,7 +8576,7 @@ def a8(ctx):
             ast.parse(text, filename=rel, feature_version=(3, 9))
         except SyntaxError as exc:
             problems.append("%s does not parse as Python 3.9: line %s" % (rel, exc.lineno))
-    return problems, ["parsed      : Scripts/sd-router.py, tests/files/sd_router/tf_stub_sd.py at (3, 9)"]
+    return problems, ["parsed      : Scripts/gpu-router.py, tests/files/gpu_router/tf_stub_sd.py at (3, 9)"]
 
 
 def _a_dict_keys(value):
@@ -8932,7 +8932,7 @@ GROUP_ORDER = ("group_l", "group_r", "group_d", "group_s", "group_q_sched",
 def run(opts=None):
     opts = opts or H.Options()
     suite = H.Suite(NAME,
-                    title="sd-router supervises one sd-server at a time and relays to it: "
+                    title="gpu-router supervises one sd-server at a time and relays to it: "
                           "config, supervisor, scheduler, retries, proxy and unload "
                           "against an adversarial stub child",
                     opts=opts, mode="grouped", cid_width=30)
