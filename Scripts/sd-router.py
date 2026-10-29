@@ -31,9 +31,19 @@ Config grammar (one 0600 JSON file owned by you, read through --config)
         "request_timeout": 600            optional; seconds, (1, 7200]
       }
     },
-    "body_limit": 33554432,               optional; overrides --body-limit; 1 KiB..1 GiB
+    "bind": "127.0.0.1",                  optional; an IP literal or hostname, as --bind
+    "port": 0,                            optional; 0..65535, 0 = ephemeral, as --port
+    "allow_remote": false,                optional; a real bool, as --allow-remote
+    "insecure_cleartext": false,          optional; a real bool, as --insecure-cleartext
+    "max_connections": 8,                 optional; 1..1024, as --max-connections
+    "body_limit": 33554432,               optional; 1 KiB..1 GiB, as --body-limit
     "response_limit": 67108864            optional; the buffered answer cap; 1..1 GiB
   }
+  Precedence for bind, port, allow_remote, insecure_cleartext, max_connections and
+  body_limit: an explicit command-line flag, then the config key, then the built-in
+  default. The listener rules (a non-loopback bind needs allow_remote AND
+  insecure_cleartext) run on the merged result. response_limit is config-only;
+  --ready-file, --log-file and --debug are command-line only.
   Duplicate keys and unknown keys are refused; a refusal names the key and the
   rule, never the value. A NUL in command, args, env or cwd is refused. {port} and {host} are substituted by an explicit
   replace (never str.format: sd args may hold braces).
@@ -259,7 +269,10 @@ _SD_PLACEHOLDERS = ("{port}", "{host}")
 # live child answering on the substituted port) is the real safety mechanism.
 _SD_PORT_HOST_FLAGS = ("--port", "-p", "--listen-port", "--listen-ip", "--host")
 
-_SD_TOP_KEYS = ("token", "models", "body_limit", "response_limit")
+_SD_TOP_KEYS = ("token", "models", "bind", "port", "allow_remote", "insecure_cleartext",
+                "max_connections", "body_limit", "response_limit")
+_SD_DEFAULT_BIND = "127.0.0.1"
+_SD_DEFAULT_PORT = 0
 _SD_MODEL_KEYS = ("command", "args", "env", "cwd", "start_timeout", "stop_grace", "retries",
                   "request_timeout")
 # key -> (default, low, high): the range is (low, high], low exclusive, high inclusive.
@@ -305,11 +318,17 @@ class Settings:
     body_limit: int = _SD_DEFAULT_BODY_LIMIT
     max_connections: int = _SD_DEFAULT_MAX_CONNECTIONS
     response_limit: int = _SD_DEFAULT_RESPONSE_LIMIT
+    # The listener: from the config (or its default); _sd_settings lets an explicit flag win.
+    bind: str = _SD_DEFAULT_BIND
+    port: int = _SD_DEFAULT_PORT
+    allow_remote: bool = False
+    insecure_cleartext: bool = False
 
     def __repr__(self) -> str:
-        return ("Settings(token=<redacted>, models=[%s], body_limit=%r, max_connections=%r, "
-                "response_limit=%r)"
-                % (", ".join(repr(name) for name in self.models), self.body_limit,
+        return ("Settings(token=<redacted>, models=[%s], bind=%r, port=%r, allow_remote=%r, "
+                "insecure_cleartext=%r, body_limit=%r, max_connections=%r, response_limit=%r)"
+                % (", ".join(repr(name) for name in self.models), self.bind, self.port,
+                   self.allow_remote, self.insecure_cleartext, self.body_limit,
                    self.max_connections, self.response_limit))
 
     __str__ = __repr__
@@ -356,6 +375,20 @@ def _sd_cfg_int_range(value: Any, where: str, low: int, high: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
         raise ConfigError(f"{where}: must be an integer in {low}..{high}")
     return value
+
+
+def _sd_cfg_bool(value: Any, where: str) -> bool:
+    """A real bool (never 0/1, a string or null)."""
+    if not isinstance(value, bool):
+        raise ConfigError(f"{where}: must be a boolean (true or false)")
+    return value
+
+
+def _sd_cfg_bind(value: Any, where: str) -> str:
+    """`bind`: a non-empty string without a NUL (an IP literal or hostname, as --bind takes)."""
+    if not isinstance(value, str) or not value:
+        raise ConfigError(f"{where}: must be a non-empty string (an address to listen on)")
+    return _sd_cfg_no_nul(value, where)
 
 
 def _sd_cfg_no_nul(value: str, where: str) -> str:
@@ -481,8 +514,21 @@ def parse_config(raw: object, where: str = "config") -> Settings:
     if "response_limit" in raw:
         response_limit = _sd_cfg_int_range(raw["response_limit"], f"{where}: response_limit",
                                            1, _SD_RESPONSE_LIMIT_MAX)
+    bind = _sd_cfg_bind(raw["bind"], f"{where}: bind") if "bind" in raw else _SD_DEFAULT_BIND
+    port = _SD_DEFAULT_PORT
+    if "port" in raw:
+        port = _sd_cfg_int_range(raw["port"], f"{where}: port", *_SD_PORT_RANGE)
+    allow_remote = _sd_cfg_bool(raw["allow_remote"], f"{where}: allow_remote") \
+        if "allow_remote" in raw else False
+    insecure_cleartext = _sd_cfg_bool(raw["insecure_cleartext"], f"{where}: insecure_cleartext") \
+        if "insecure_cleartext" in raw else False
+    max_connections = _SD_DEFAULT_MAX_CONNECTIONS
+    if "max_connections" in raw:
+        max_connections = _sd_cfg_int_range(raw["max_connections"], f"{where}: max_connections",
+                                            *_SD_CONNECTIONS_RANGE)
     return Settings(token=token, models=types.MappingProxyType(models), body_limit=body_limit,
-                    max_connections=_SD_DEFAULT_MAX_CONNECTIONS, response_limit=response_limit)
+                    max_connections=max_connections, response_limit=response_limit, bind=bind,
+                    port=port, allow_remote=allow_remote, insecure_cleartext=insecure_cleartext)
 
 
 def render_args(spec: ModelSpec, host: str, port: int) -> List[str]:
@@ -607,38 +653,41 @@ def _sd_parser() -> argparse.ArgumentParser:
     # No --config-json: argv is visible in ps and every config carries the bearer token.
     parser.add_argument("--config", required=True,
                         help="Path to the JSON config (must be owned by you, mode 0600)")
-    parser.add_argument("--bind", default="127.0.0.1",
-                        help="Address to listen on (default 127.0.0.1); non-loopback needs "
-                             "--allow-remote --insecure-cleartext")
-    parser.add_argument("--port", type=_sd_cli_int(*_SD_PORT_RANGE), default=0,
-                        help="TCP port (default 0 = ephemeral)")
-    parser.add_argument("--allow-remote", action="store_true",
-                        help="Allow a non-loopback --bind; refused without --insecure-cleartext")
-    parser.add_argument("--insecure-cleartext", action="store_true",
-                        help="Acknowledge that the bearer token and images travel unencrypted")
+    # The five listener options and --body-limit default to None (absent): an explicit flag
+    # beats the config key, which beats the built-in default (_sd_settings resolves it).
+    parser.add_argument("--bind", default=None,
+                        help="Address to listen on (default: the config `bind`, else "
+                             f"{_SD_DEFAULT_BIND}); non-loopback needs --allow-remote "
+                             f"--insecure-cleartext (flags or config keys)")
+    parser.add_argument("--port", type=_sd_cli_int(*_SD_PORT_RANGE), default=None,
+                        help=f"TCP port (default: the config `port`, else {_SD_DEFAULT_PORT} = ephemeral)")
+    parser.add_argument("--allow-remote", action="store_const", const=True, default=None,
+                        help="Allow a non-loopback --bind (default: the config `allow_remote`, else "
+                             "off); refused without --insecure-cleartext")
+    parser.add_argument("--insecure-cleartext", action="store_const", const=True, default=None,
+                        help="Acknowledge that the bearer token and images travel unencrypted "
+                             "(default: the config `insecure_cleartext`, else off)")
     parser.add_argument("--ready-file", default=None,
                         help="Written 0600 after bind: {\"port\": N, \"pid\": P}; removed on shutdown")
-    parser.add_argument("--body-limit", type=_sd_cli_int(*_SD_BODY_LIMIT_RANGE),
-                        default=_SD_DEFAULT_BODY_LIMIT,
+    parser.add_argument("--body-limit", type=_sd_cli_int(*_SD_BODY_LIMIT_RANGE), default=None,
                         help=f"Largest accepted request body in bytes, {_SD_BODY_LIMIT_RANGE[0]}-"
-                             f"{_SD_BODY_LIMIT_RANGE[1]} (default {_SD_DEFAULT_BODY_LIMIT})")
-    parser.add_argument("--max-connections", type=_sd_cli_int(*_SD_CONNECTIONS_RANGE),
-                        default=_SD_DEFAULT_MAX_CONNECTIONS,
+                             f"{_SD_BODY_LIMIT_RANGE[1]} (default: the config `body_limit`, else "
+                             f"{_SD_DEFAULT_BODY_LIMIT})")
+    parser.add_argument("--max-connections", type=_sd_cli_int(*_SD_CONNECTIONS_RANGE), default=None,
                         help=f"Concurrent TCP connections, {_SD_CONNECTIONS_RANGE[0]}-"
-                             f"{_SD_CONNECTIONS_RANGE[1]} (default {_SD_DEFAULT_MAX_CONNECTIONS})")
+                             f"{_SD_CONNECTIONS_RANGE[1]} (default: the config `max_connections`, "
+                             f"else {_SD_DEFAULT_MAX_CONNECTIONS})")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging to stderr")
     parser.add_argument("--log-file", default=None, help="Log to file, mode 0600 (implies --debug)")
     return parser
 
 
 def _sd_parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
-    """Parse the command line. Every refusal is one stderr line and exit 2 (D-13: --allow-remote
-    without --insecure-cleartext is refused here; the WARNING/INFO lines are main()'s)."""
+    """Parse the command line. Every refusal is one stderr line and exit 2. Absent listener
+    options stay None; D-13 (--allow-remote needs --insecure-cleartext) runs in _sd_settings
+    on the CLI + config result, since either side may carry an acknowledgement."""
     parser = _sd_parser()
     args = parser.parse_args(argv)
-    if args.allow_remote and not args.insecure_cleartext:
-        parser.error("--allow-remote needs --insecure-cleartext: sd-router has no TLS, the bearer "
-                     "token and images would cross the network in cleartext")
     if args.ready_file is not None and not args.ready_file:
         parser.error("--ready-file: must not be empty")
     return args
@@ -3401,12 +3450,28 @@ def _sd_wait_stop(flag: _SdStopFlag, tick: threading.Event) -> None:
 
 
 def _sd_settings(args: argparse.Namespace, cfg: Settings) -> Settings:
-    """The config's Settings plus the CLI's limits: --max-connections always; --body-limit
-    unless the config carries its own body_limit (the config overrides the flag). A
-    config body_limit equal to the default is indistinguishable from an absent one, so
-    the flag applies then (declared)."""
-    body_limit = cfg.body_limit if cfg.body_limit != _SD_DEFAULT_BODY_LIMIT else args.body_limit
-    return dataclasses.replace(cfg, body_limit=body_limit, max_connections=args.max_connections)
+    """The final Settings: for bind, port, allow_remote, insecure_cleartext, max_connections
+    and body_limit an explicit flag (not None) beats the config key, which beats the built-in
+    default (cfg already holds config-or-default). The rules on the MERGED listener run here
+    (D-13 and the loopback check), so a config `bind` is refused exactly like --bind; a
+    refusal is a ConfigError that main turns into the one-line exit 2."""
+    def pick(flag: Any, configured: Any) -> Any:
+        return configured if flag is None else flag
+
+    merged = dataclasses.replace(
+        cfg,
+        bind=pick(args.bind, cfg.bind),
+        port=pick(args.port, cfg.port),
+        allow_remote=pick(args.allow_remote, cfg.allow_remote),
+        insecure_cleartext=pick(args.insecure_cleartext, cfg.insecure_cleartext),
+        max_connections=pick(args.max_connections, cfg.max_connections),
+        body_limit=pick(args.body_limit, cfg.body_limit))
+    if merged.allow_remote and not merged.insecure_cleartext:
+        raise ConfigError("--allow-remote needs --insecure-cleartext: sd-router has no TLS, the bearer "
+                          "token and images would cross the network in cleartext")
+    if not merged.allow_remote and not _sd_is_loopback(merged.bind):
+        raise ConfigError("--bind: a non-loopback address needs --allow-remote --insecure-cleartext")
+    return merged
 
 
 def main(argv: Optional[List[str]] = None) -> None:
@@ -3421,14 +3486,12 @@ def main(argv: Optional[List[str]] = None) -> None:
         settings = _sd_settings(args, load_config(args.config))
     except ConfigError as exc:
         _sd_refuse(str(exc))
-    if not args.allow_remote and not _sd_is_loopback(args.bind):
-        _sd_refuse("--bind: a non-loopback address needs --allow-remote --insecure-cleartext")
 
     supervisor = Supervisor()
     scheduler = Scheduler(settings, supervisor)
     # Bind first: nothing else has started, so a refusal has nothing to stop.
     try:
-        srv = _SdHttpServer((args.bind, args.port), settings, scheduler)
+        srv = _SdHttpServer((settings.bind, settings.port), settings, scheduler)
     except OSError as exc:                       # EADDRINUSE, EADDRNOTAVAIL, EACCES ...
         _sd_refuse(f"--bind/--port: cannot listen ({exc.strerror or type(exc).__name__})")
 
@@ -3440,7 +3503,7 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     # Fixed text, no values (S-M1, D-13).
     log.info(_SD_TRUST_LINE)
-    if args.allow_remote and args.insecure_cleartext:
+    if settings.allow_remote and settings.insecure_cleartext:
         log.warning(_SD_CLEARTEXT_LINE)
 
     scheduler.start()

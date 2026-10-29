@@ -966,8 +966,8 @@ SUITES = [
      "streamed image answers (openai), advertised image sizes, "
      "secret leaks, static rules, "
      "hygiene", 460),
-    # TYPED: a fixed case table (A 17, L 32, R 20, D 22, S 20, Q-sched 16,
-    # Q-http 5, T 13, P 38, U 18, G 6, E2E 4 = 211), so a count that moves is
+    # TYPED: a fixed case table (A 17, L 39, R 20, D 22, S 20, Q-sched 16,
+    # Q-http 5, T 13, P 40, U 18, G 6, E2E 4 = 220), so a count that moves is
     # the alarm.
     ("sd_router", run_sd_router,
      "sd-router, the supervisor and proxy for stable-diffusion.cpp "
@@ -976,7 +976,7 @@ SUITES = [
      "?force=1), crash retries and the DISABLED state, the kill ladder and "
      "process-group sweep, byte-exact relay through stub children, "
      "OpenAI-shaped refusals, bearer auth, structure-only logs, static "
-     "rules, end-to-end through llm-router", 211),
+     "rules, end-to-end through llm-router", 220),
     # TYPED: a fixed case table (A 7, E 3), so a count that moves is the alarm.
     ("tshark_fields", run_tshark_fields,
      "mcp-tshark analyze's `fields` parameter, in-process with tshark "

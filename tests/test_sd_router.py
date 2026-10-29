@@ -610,6 +610,13 @@ GL_CASES = (
     "L30 NUL in a model entry refused",
     "L31 body/response_limit ranges",
     "L32 body_limit precedence (G4)",
+    "L33 listener keys accepted",
+    "L34 listener key types refused",
+    "L35 listener key ranges refused",
+    "L36 unknown key lists the keys",
+    "L37 CLI beats config (six)",
+    "L38 config used without a flag",
+    "L39 config bind needs the acks",
 )
 
 L_NAMES_CONFIG = ("ConfigError", "ModelSpec", "Settings", "parse_config", "load_config",
@@ -1041,13 +1048,29 @@ def l25(mod, sandbox):
     path = _l_config_file(sandbox, _l_doc(sandbox))
     problems, ns = _l_cli_parsed(mod, "defaults", ["--config", path])
     if ns is not None:
-        for attr, want in (("bind", L_DEFAULT_BIND), ("body_limit", L_DEFAULT_BODY_LIMIT),
-                           ("max_connections", L_DEFAULT_MAX_CONNECTIONS)):
-            got = getattr(ns, attr, None)
-            if got != want:
-                problems.append("parser default %s is %r, expected %r" % (attr, got, want))
-        if getattr(ns, "allow_remote", None) or getattr(ns, "insecure_cleartext", None):
-            problems.append("parser: --allow-remote / --insecure-cleartext default to set")
+        # An absent flag is None, so the merge can tell it from an explicit one.
+        for attr in ("bind", "port", "body_limit", "max_connections", "allow_remote",
+                     "insecure_cleartext"):
+            if not hasattr(ns, attr) or getattr(ns, attr) is not None:
+                problems.append("parser default %s is %r, expected None (absent)"
+                                % (attr, getattr(ns, attr, "<missing>")))
+        if callable(getattr(mod, "_sd_settings", None)):
+            cfg_path = _l_config_file(sandbox, _l_doc(sandbox), name="l25-eff.json")
+            found, cfg = _l_accepted(mod, "load_config", mod.load_config, (cfg_path,))
+            problems += found
+            if cfg is not None:
+                try:
+                    eff = mod._sd_settings(ns, cfg)
+                except Exception as exc:  # noqa: BLE001
+                    problems.append("_sd_settings raised %s on the defaults" % type(exc).__name__)
+                else:
+                    for attr, want in (("bind", L_DEFAULT_BIND), ("port", 0),
+                                       ("body_limit", L_DEFAULT_BODY_LIMIT),
+                                       ("max_connections", L_DEFAULT_MAX_CONNECTIONS),
+                                       ("allow_remote", False), ("insecure_cleartext", False)):
+                        got = getattr(eff, attr, "<missing>")
+                        if got != want or type(got) is not type(want):
+                            problems.append("effective default %s is %r, expected %r" % (attr, got, want))
     found, settings = _l_accepted(mod, "Settings defaults", *_l_parse(mod, _l_doc(sandbox)))
     problems += found
     if settings is not None:
@@ -1066,13 +1089,39 @@ def l25(mod, sandbox):
     return problems, ["--body-limit 32 MiB, --max-connections 8, response_limit 64 MiB (D-14, D-6)"]
 
 
+def _l_merge(mod, sandbox, top, argv, name):
+    """("ok", Settings) | ("refused", message): a config with the *top* keys merged with
+    the CLI *argv* through _sd_parse_args + load_config + _sd_settings (the real order)."""
+    doc = _l_doc(sandbox)
+    doc.update(top)
+    path = _l_config_file(sandbox, doc, name=name)
+    found, ns = _l_cli_parsed(mod, name, ["--config", path] + list(argv))
+    if found:
+        return "refused", "; ".join(found)
+    kind, cfg = _l_attempt(mod, mod.load_config, path)
+    if kind != "ok":
+        return kind, cfg
+    return _l_attempt(mod, mod._sd_settings, ns, cfg)
+
+
 def l26(mod, sandbox):
-    path = _l_config_file(sandbox, _l_doc(sandbox))
-    problems = _l_cli_refused(mod, "--allow-remote alone",
-                              ["--config", path, "--bind", "10.0.0.1", "--allow-remote"])
-    problems += _l_cli_refused(mod, "--allow-remote alone, default bind",
-                               ["--config", path, "--allow-remote"])
-    return problems, ["--allow-remote needs --insecure-cleartext (D-13): exit 2, one line"]
+    """D-13: --allow-remote needs --insecure-cleartext.  Since the listener options may
+    come from the config the rule runs on the MERGED result (the final refusal is a
+    ConfigError that main turns into exit 2, one line), not at argparse time."""
+    problems = []
+    for label, top, argv in (
+            ("--allow-remote alone", {}, ["--bind", "10.0.0.1", "--allow-remote"]),
+            ("--allow-remote alone, default bind", {}, ["--allow-remote"]),
+            ("config allow_remote alone", {"allow_remote": True, "bind": "10.0.0.1"}, []),
+            ("flag allow_remote, config insecure_cleartext false",
+             {"insecure_cleartext": False}, ["--bind", "10.0.0.1", "--allow-remote"])):
+        kind, val = _l_merge(mod, sandbox, top, argv, "l26-%d.json" % len(label))
+        if kind != "refused":
+            problems.append("%s: %s, expected a refusal" % (label, kind))
+        elif "--insecure-cleartext" not in val or "\n" in val:
+            problems.append("%s: the refusal does not name --insecure-cleartext on one line" % label)
+    return problems, ["--allow-remote needs --insecure-cleartext (D-13), checked on the merged "
+                      "CLI + config result: ConfigError, one line"]
 
 
 def l27(mod, sandbox):
@@ -1162,36 +1211,197 @@ def l31(mod, sandbox):
 
 
 def l32(mod, sandbox):
-    """G4 pinned as the code behaves: a config body_limit that differs from the 32 MiB
-    default wins over --body-limit; one equal to the default lets the flag win."""
+    """G4, CHANGED: the precedence is explicit CLI flag > config key > built-in default.
+    (It used to pin the opposite for body_limit: a config value other than the 32 MiB
+    default beat --body-limit, one equal to the default let the flag win.)"""
     problems = []
     if not callable(getattr(mod, "_sd_settings", None)):
         return ["the module defines no _sd_settings"], []
     flag = 4 * 1024 * 1024
     cfg_own = 2 * 1024 * 1024
-    rows = (("config 2 MiB, flag 4 MiB", {"body_limit": cfg_own}, cfg_own),
-            ("config = default, flag 4 MiB", {"body_limit": L_DEFAULT_BODY_LIMIT}, flag),
-            ("config absent, flag 4 MiB", {}, flag))
-    for index, (label, top, want) in enumerate(rows):
-        doc = _l_doc(sandbox)
-        doc.update(top)
-        path = _l_config_file(sandbox, doc, name="g4-%d.json" % index)
-        found, ns = _l_cli_parsed(mod, label, ["--config", path, "--body-limit", str(flag)])
-        problems += found
-        found, cfg = _l_accepted(mod, label, mod.load_config, (path,))
-        problems += found
-        if ns is None or cfg is None:
+    rows = (("config 2 MiB, flag 4 MiB", {"body_limit": cfg_own}, ["--body-limit", str(flag)], flag),
+            ("config = default, flag 4 MiB", {"body_limit": L_DEFAULT_BODY_LIMIT},
+             ["--body-limit", str(flag)], flag),
+            ("config absent, flag 4 MiB", {}, ["--body-limit", str(flag)], flag),
+            ("config 2 MiB, no flag", {"body_limit": cfg_own}, [], cfg_own),
+            ("config absent, no flag", {}, [], L_DEFAULT_BODY_LIMIT),
+            ("config 2 MiB, flag = default", {"body_limit": cfg_own},
+             ["--body-limit", str(L_DEFAULT_BODY_LIMIT)], L_DEFAULT_BODY_LIMIT))
+    for index, (label, top, argv, want) in enumerate(rows):
+        kind, val = _l_merge(mod, sandbox, top, argv, "g4-%d.json" % index)
+        if kind != "ok":
+            problems.append("%s: %s (%s)" % (label, kind, str(val)[:120]))
+        elif val.body_limit != want:
+            problems.append("%s: body_limit %r, expected %r" % (label, val.body_limit, want))
+    return problems, ["explicit --body-limit beats the config body_limit (also when it equals the "
+                      "default); the config applies without the flag"]
+
+
+def _l_top(mod, sandbox, top):
+    return _l_attempt(mod, mod.parse_config, _l_raw(dict(_l_doc(sandbox), **top)))
+
+
+def l33(mod, sandbox):
+    """The five new optional top-level keys are accepted and carried by Settings."""
+    problems = []
+    top = {"bind": "10.1.2.3", "port": 8123, "allow_remote": True, "insecure_cleartext": True,
+           "max_connections": 16}
+    kind, val = _l_top(mod, sandbox, top)
+    if kind != "ok":
+        return ["all five keys: %s (%s)" % (kind, str(val)[:160])], []
+    for key, want in top.items():
+        got = getattr(val, key, "<missing>")
+        if got != want or type(got) is not type(want):
+            problems.append("Settings.%s is %r, expected %r" % (key, got, want))
+    for label, extra in (("port 0", {"port": 0}), ("port 65535", {"port": 65535}),
+                         ("max_connections 1", {"max_connections": 1}),
+                         ("max_connections 1024", {"max_connections": 1024}),
+                         ("bind ::1", {"bind": "::1"}), ("bind hostname", {"bind": "sd.example.test"}),
+                         ("both bools false", {"allow_remote": False, "insecure_cleartext": False})):
+        problems += _l_accepted(mod, label, mod.parse_config, (_l_raw(dict(_l_doc(sandbox), **extra)),))[0]
+    kind, val = _l_top(mod, sandbox, {})
+    if kind == "ok":
+        for key, want in (("bind", L_DEFAULT_BIND), ("port", 0), ("allow_remote", False),
+                          ("insecure_cleartext", False), ("max_connections", L_DEFAULT_MAX_CONNECTIONS)):
+            if getattr(val, key, "<missing>") != want:
+                problems.append("absent key: Settings.%s is %r, expected %r" % (key, getattr(val, key, "<missing>"), want))
+    kind, val = _l_top(mod, sandbox, top)
+    text = repr(val) + str(val)
+    for key in top:
+        if key + "=" not in text:
+            problems.append("repr(Settings) does not show %s" % key)
+    if TF_TOKEN in text:
+        problems.append("repr(Settings) carries the token")
+    return problems, ["bind, port, allow_remote, insecure_cleartext and max_connections accepted, "
+                      "defaulted when absent, shown in repr"]
+
+
+def l34(mod, sandbox):
+    """A wrong type per key is refused naming the key, never the value."""
+    problems = []
+    sentinel = L_UNKNOWN_VALUE
+    rows = (("bind", (5, True, None, ["10.0.0.1"], 1.5)),
+            ("port", ("8080", True, False, 1.5, None, [8080], sentinel)),
+            ("allow_remote", (1, 0, "true", None, [True], sentinel)),
+            ("insecure_cleartext", (1, 0, "true", None, [True], sentinel)),
+            ("max_connections", ("8", True, False, 2.5, None, sentinel)))
+    for key, bad in rows:
+        for value in bad:
+            problems += _l_refused(mod, "%s=%r" % (key, value if value != sentinel else "<sentinel>"),
+                                   mod.parse_config, (_l_raw(dict(_l_doc(sandbox), **{key: value})),),
+                                   needles=(key,), absent=(sentinel, TF_TOKEN))
+    return problems, ["bind must be a string, port/max_connections a real int (never a bool), "
+                      "allow_remote/insecure_cleartext a real bool (never 0/1)"]
+
+
+def l35(mod, sandbox):
+    """Ranges (as --port / --max-connections) and string hygiene; no value echoed."""
+    problems = []
+    for key, bad in (("port", (-1, 65536, 10 ** 9)), ("max_connections", (0, -1, 1025, 10 ** 9)),
+                     ("bind", ("", "10.0.0.1\0", "\0"))):
+        for value in bad:
+            problems += _l_refused(mod, "%s=%r" % (key, value), mod.parse_config,
+                                   (_l_raw(dict(_l_doc(sandbox), **{key: value})),),
+                                   needles=(key,), absent=(TF_TOKEN, "10.0.0.1"))
+    return problems, ["port 0..65535, max_connections 1..1024, bind a non-empty string without a NUL"]
+
+
+def l36(mod, sandbox):
+    doc = _l_doc(sandbox)
+    doc["tf_unknown_top"] = L_UNKNOWN_VALUE
+    needles = ("tf_unknown_top", "bind", "port", "allow_remote", "insecure_cleartext", "max_connections",
+               "body_limit", "response_limit")
+    problems = _l_refused(mod, "unknown top-level key", mod.parse_config, (_l_raw(doc),),
+                          needles=needles, absent=(L_UNKNOWN_VALUE, TF_TOKEN))
+    return problems, ["the unknown-key refusal lists the allowed keys, the new five included"]
+
+
+def l37(mod, sandbox):
+    """An explicit CLI flag beats the config key, for each of the six."""
+    problems = []
+    if not callable(getattr(mod, "_sd_settings", None)):
+        return ["the module defines no _sd_settings"], []
+    rows = (
+        ("bind", {"bind": "127.0.0.2"}, ["--bind", "127.0.0.3"], "bind", "127.0.0.3"),
+        ("port 0 beats config 5", {"port": 5}, ["--port", "0"], "port", 0),
+        ("port 7000 beats config 5", {"port": 5}, ["--port", "7000"], "port", 7000),
+        ("max_connections", {"max_connections": 4}, ["--max-connections", "9"], "max_connections", 9),
+        ("body_limit", {"body_limit": 2048}, ["--body-limit", "4096"], "body_limit", 4096),
+        ("allow_remote", {"allow_remote": False, "insecure_cleartext": True, "bind": "10.0.0.1"},
+         ["--allow-remote"], "allow_remote", True),
+        ("insecure_cleartext", {"allow_remote": True, "insecure_cleartext": False, "bind": "10.0.0.1"},
+         ["--insecure-cleartext"], "insecure_cleartext", True),
+    )
+    for index, (label, top, argv, attr, want) in enumerate(rows):
+        kind, val = _l_merge(mod, sandbox, top, argv, "l37-%d.json" % index)
+        if kind != "ok":
+            problems.append("%s: %s (%s)" % (label, kind, str(val)[:120]))
             continue
-        got = mod._sd_settings(ns, cfg).body_limit
-        if got != want:
-            problems.append("%s: body_limit %r, expected %r" % (label, got, want))
-    return problems, ["a config body_limit other than the default wins over the flag; equal to "
-                      "the default (or absent) the flag applies (declared, G4)"]
+        got = getattr(val, attr, "<missing>")
+        if got != want or type(got) is not type(want):
+            problems.append("%s: %s is %r, expected %r" % (label, attr, got, want))
+    return problems, ["flag > config for bind, port (0 included), max_connections, body_limit, "
+                      "allow_remote and insecure_cleartext"]
+
+
+def l38(mod, sandbox):
+    """With no flag the config key applies; with neither the built-in default."""
+    problems = []
+    if not callable(getattr(mod, "_sd_settings", None)):
+        return ["the module defines no _sd_settings"], []
+    top = {"bind": "10.4.5.6", "port": 8456, "allow_remote": True, "insecure_cleartext": True,
+           "max_connections": 3, "body_limit": 4096}
+    kind, val = _l_merge(mod, sandbox, top, [], "l38-a.json")
+    if kind != "ok":
+        return ["config only: %s (%s)" % (kind, str(val)[:120])], []
+    for key, want in top.items():
+        got = getattr(val, key, "<missing>")
+        if got != want or type(got) is not type(want):
+            problems.append("config only: %s is %r, expected %r" % (key, got, want))
+    kind, val = _l_merge(mod, sandbox, {"port": 8456}, ["--bind", "127.0.0.1"], "l38-b.json")
+    if kind != "ok" or (val.port, val.bind, val.max_connections) != (8456, "127.0.0.1", L_DEFAULT_MAX_CONNECTIONS):
+        problems.append("mixed (config port, flag bind, default max_connections): %s %r" % (kind, val))
+    helptext = mod._sd_parser().format_help()
+    for needle in ("127.0.0.1", "config"):
+        if needle not in helptext:
+            problems.append("--help does not mention %r" % needle)
+    return problems, ["config values apply when no flag is given, built-in defaults last; --help "
+                      "states the precedence"]
+
+
+def l39(mod, sandbox):
+    """A non-loopback bind from the config is refused exactly like the CLI form."""
+    problems = []
+    if not callable(getattr(mod, "_sd_settings", None)):
+        return ["the module defines no _sd_settings"], []
+    kind_cli, msg_cli = _l_merge(mod, sandbox, {}, ["--bind", "0.0.0.0"], "l39-cli.json")
+    kind_cfg, msg_cfg = _l_merge(mod, sandbox, {"bind": "0.0.0.0"}, [], "l39-cfg.json")
+    for label, kind in (("CLI", kind_cli), ("config", kind_cfg)):
+        if kind != "refused":
+            problems.append("%s bind 0.0.0.0 without the acknowledgements: %s, expected a refusal" % (label, kind))
+    if kind_cli == kind_cfg == "refused":
+        if msg_cli != msg_cfg:
+            problems.append("the config refusal differs from the CLI one (%r vs %r)" % (msg_cfg[:100], msg_cli[:100]))
+        if "--allow-remote" not in msg_cfg or "--insecure-cleartext" not in msg_cfg or "\n" in msg_cfg:
+            problems.append("the refusal does not name both acknowledgements on one line")
+    kind, _msg = _l_merge(mod, sandbox, {"bind": "0.0.0.0", "allow_remote": True}, [], "l39-half.json")
+    if kind != "refused":
+        problems.append("config bind + allow_remote without insecure_cleartext: %s, expected a refusal" % kind)
+    kind, val = _l_merge(mod, sandbox, {"bind": "0.0.0.0", "allow_remote": True, "insecure_cleartext": True},
+                         [], "l39-full.json")
+    if kind != "ok" or val.bind != "0.0.0.0":
+        problems.append("config bind + both acknowledgements: %s, expected accepted" % kind)
+    kind, val = _l_merge(mod, sandbox, {"bind": "0.0.0.0"}, ["--bind", "127.0.0.1"], "l39-flag.json")
+    if kind != "ok":
+        problems.append("config bind 0.0.0.0 overridden by a loopback --bind: %s, expected accepted" % kind)
+    return problems, ["bind in the config without allow_remote + insecure_cleartext: the same refusal "
+                      "text as --bind; with both it is accepted; a loopback flag overrides it"]
 
 
 GL_FUNCS = (l1, l2, l3, l4, l5, l6, l7, l8, l9, l10, l11, l12, l13, l14, l15, l16, l17, l18,
-            l19, l20, l21, l22, l23, l24, l25, l26, l27, l28, l29, l30, l31, l32)
-GL_CLI = frozenset(("L23", "L25", "L26", "L27", "L28", "L32"))
+            l19, l20, l21, l22, l23, l24, l25, l26, l27, l28, l29, l30, l31, l32,
+            l33, l34, l35, l36, l37, l38, l39)
+GL_CLI = frozenset(("L23", "L25", "L26", "L27", "L28", "L32", "L37", "L38", "L39"))
 
 
 def group_l(suite, fixture_root):
@@ -4860,6 +5070,8 @@ GP_CASES = (
     "P36 folded Content-Type out: 502",
     "P37 relayed answer is nosniff",
     "P38 signal handler: a flag only",
+    "P39 config port, CLI --port wins",
+    "P40 config bind without acks: exit 2",
 )
 
 GQH_CASES = (
@@ -6109,9 +6321,52 @@ def p38(mod, sandbox):
     return problems, ["the handler stores a flag; the main loop left %.2fs after it ran" % took]
 
 
+def p39(mod, sandbox):
+    """The listener keys travel through main(): a config `port` is used when no flag
+    names one, and the harness's explicit `--port 0` beats it (None-default proof)."""
+    path = write_config(sandbox, base_config({"A": _p_entry(sandbox, "A")}, port=5, max_connections=3,
+                                             bind="127.0.0.1"))
+    proc, ready = launch(path, [], label="p39")
+    try:
+        if ready is None:
+            return [_p_not_ready(proc)], []
+        port = ready.get("port")
+    finally:
+        code = proc.close()
+    problems = []
+    if port == 5:
+        problems.append("the config port 5 won over the explicit --port 0")
+    if code != 0:
+        problems.append("SIGTERM: exit %r, expected 0" % (code,))
+    problems += _p_leaks("stderr", proc.stderr_text())
+    return problems, ["config port 5 + bind + max_connections, explicit --port 0: ready on an "
+                      "ephemeral port"]
+
+
+def p40(mod, sandbox):
+    """A config `bind` of 0.0.0.0 without allow_remote + insecure_cleartext is refused by
+    main() like the CLI form: exit 2, one `sd-router:` line, never ready, no socket."""
+    path = write_config(sandbox, base_config({"A": _p_entry(sandbox, "A")}, bind="0.0.0.0"))
+    proc, ready = launch(path, [], label="p40")
+    try:
+        code = proc.wait_exit()
+    finally:
+        proc.close()
+    problems = []
+    if ready is not None:
+        problems.append("the router became ready on a non-loopback config bind")
+    if code != 2:
+        problems.append("exit %r, expected 2" % (code,))
+    lines = [ln for ln in proc.stderr_text().splitlines() if ln.strip()]
+    if len(lines) != 1 or not lines[0].startswith("sd-router: ") or "--insecure-cleartext" not in lines[0]:
+        problems.append("stderr is not the one-line refusal: %r" % (lines[:3],))
+    problems += _p_leaks("stderr", proc.stderr_text())
+    return problems, ["config bind 0.0.0.0 alone: exit 2 with the one-line non-loopback refusal"]
+
+
 GP_FUNCS = (p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p13, p14, p15, p16, p17, p18, p19,
             p20, p21, p22, p23, p24, p25, p26, p27, p28, p29, p30, p31, p32, p33, p34, p35, p36,
-            p37, p38)
+            p37, p38, p39, p40)
 
 
 # -- Q-http ---------------------------------------------------------------------------
