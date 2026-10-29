@@ -238,6 +238,7 @@ The `tf` prefix is kept on every file name.
 
 ```
 gpu_router/ tf_stub_sd.py   the adversarial stub sd-server child for tests/test_gpu_router.py
+gpu_router/ tf_stub_llm.py  the adversarial stub inferNO-style LLM child for tests/test_gpu_router.py
 ```
 
 A stdlib-only (Python 3.9) loopback HTTP/1.1 stand-in for stable-diffusion.cpp
@@ -253,6 +254,17 @@ run directory: the evidence behind the byte-exact relay rows. It never prints
 a request body, a header value or an environment value. Every symbol inside
 carries the `tf` prefix, and its routes, state files and flags are documented
 in its own docstring.
+
+`tf_stub_llm.py` is the second stub: one inferNO-style process that serves three
+model ids on one loopback port (`GET /v1/models`, `GET /health`, and
+`POST /v1/chat/completions`, `/v1/messages`, `/v1/embeddings`, `/v1/rerank` with
+canned JSON or an SSE stream). It does not listen while it "loads"
+(`--start-delay`), can answer 404 on `/v1/models` after the bind
+(`--ready-404-for`), stalls, streams slowly, drops a stream or adds response
+headers on command. Its `.events.jsonl` ledger records `start` (pid), `request`
+(body SHA, header names, the two `anthropic-*` values), `client_gone` and
+`closed_by_peer`. Same rules as the sd stub: metadata only, no body or secret on
+any output, every symbol prefixed `tf`.
 
 ## Notes on the toolchain
 

@@ -3,16 +3,17 @@
 
 WHAT IS GATED
 -------------
-`Scripts/gpu-router.py` is a loopback HTTP front that owns a set of
-stable-diffusion.cpp `sd-server` children, keeps at most ONE of them resident
-(a single GPU), swaps on demand in strict FIFO order, and relays each image
-request byte-exact to the resident child.  Everything it promises is
+`Scripts/gpu-router.py` is a loopback HTTP front that owns a set of apps (one
+child process each, serving one or more model ids: stable-diffusion.cpp
+`sd-server` of kind sd, an inferNO-style LLM engine of kind llm), keeps at most
+ONE of them resident (a single GPU), swaps on demand in strict FIFO order, and
+relays each request byte-exact to the resident child.  Everything it promises is
 observable at its two edges: what the caller receives (the child's answer
 byte-for-byte, or an OpenAI-shaped refusal from the closed code table), and
 what the child receives (one request, recorded with its SHA-256 by the stub).
-This suite drives the router against the adversarial stub child
-`tests/files/gpu_router/tf_stub_sd.py` (flags and `tf_*` functions in its
-docstring), as a subprocess for the CLI / exit-code / ready-file / signal
+This suite drives the router against the adversarial stub children
+`tests/files/gpu_router/tf_stub_sd.py` and `tf_stub_llm.py` (flags and `tf_*`
+functions in their docstrings), as a subprocess for the CLI / exit-code / ready-file / signal
 cases, and as a privately loaded module (in-process, constants and seams
 patched) for every case whose observable is one of the router's own windows.
 
@@ -52,9 +53,13 @@ Groups:
   G        front policy   -- the injected front policy pin (ADR 0029)
   A        static         -- AST over the router source
   E2E      end to end     -- llm-router (kind sdcpp, a bearer key) -> the live router -> two
-                             stub models: round trip, swap, forced unload, wrong key
+                             stub models: round trip, swap, forced unload, wrong key;
+                             chat / image / embedding requests interleaved across the two
+                             app kinds in strict FIFO (E5)
 
-Fixture directory: tests/files/gpu_router/ (the stub child only).
+Fixture directory: tests/files/gpu_router/ (the two stub children: tf_stub_sd.py, the
+sd-server stand-in, and tf_stub_llm.py, the inferNO-style LLM stand-in -- one process
+serving several model ids).
 """
 
 import ast
@@ -89,6 +94,8 @@ NAME = "gpu_router"
 SERVER = H.repo_path("Scripts", "gpu-router.py")
 STUB = H.repo_path("tests", "files", "gpu_router", "tf_stub_sd.py")
 STUB_DEFAULT_NAME = "tf_stub_sd"
+STUB_LLM = H.repo_path("tests", "files", "gpu_router", "tf_stub_llm.py")
+STUB_LLM_DEFAULT_NAME = "tf_stub_llm"
 
 GL = "L. config"
 GS = "S. supervisor"
@@ -188,6 +195,27 @@ def stub_model(state_dir, name, *flags, **keys):
         "command": sys.executable,
         "args": ["-B", STUB, STUB_HOST_FLAG, "{host}", STUB_PORT_FLAG, "{port}",
                  "--state-dir", state_dir, "--name", name] + [str(f) for f in flags],
+    }
+    entry.update(keys)
+    return entry
+
+
+# The inferNO trio the LLM stub serves: one process, three model ids.
+LLM_IDS = ("Qwen3.8-Flash-Next", "bge-m3", "bge-reranker-v2-m3")
+
+
+def llm_model(state_dir, name, *flags, **keys):
+    """A config app entry of kind llm that runs the LLM stub (tf_stub_llm.py): one process
+    serving the ids in `model_ids` (default LLM_IDS), `--name <name>` its state-file prefix.
+
+    Extra app keys (`start_timeout`, `request_timeout`, `child_port`, ...) come from **keys.
+    """
+    entry = {
+        "command": sys.executable,
+        "args": ["-B", STUB_LLM, STUB_HOST_FLAG, "{host}", STUB_PORT_FLAG, "{port}",
+                 "--state-dir", state_dir, "--name", name] + [str(f) for f in flags],
+        "kind": "llm",
+        "model_ids": list(LLM_IDS),
     }
     entry.update(keys)
     return entry
@@ -617,6 +645,12 @@ GL_CASES = (
     "L37 CLI beats config (six)",
     "L38 config used without a flag",
     "L39 config bind needs the acks",
+    "L40 kind and per-kind defaults",
+    "L41 model_ids, index, collisions",
+    "L42 ready_path / ready_status",
+    "L43 deadlines, per-kind caps",
+    "L44 child_port, listener clash",
+    "L45 new keys listed, in repr",
 )
 
 L_NAMES_CONFIG = ("ConfigError", "ModelSpec", "Settings", "parse_config", "load_config",
@@ -1398,10 +1432,262 @@ def l39(mod, sandbox):
                       "text as --bind; with both it is accepted; a loopback flag overrides it"]
 
 
+# -- stage 2a: apps (kind, model ids, readiness, deadlines, a fixed child port) --------------
+# An app is a `models` entry: ONE child process that may serve several model ids.  `kind`
+# is "sd" (the default; every existing config is unchanged) or "llm".  The per-kind
+# differences live in one table (_SD_KIND_DEFAULTS); the new keys are listed in
+# _SD_MODEL_KEYS, so a key the tuple lacks is a refused config.
+
+L_SD_REQUEST_CAP = 7200
+L_LLM_REQUEST_CAP = 604800        # the llm request_timeout ceiling (the sd one stays 7200)
+L_LLM_DEADLINE_CAP = 604800       # head_timeout / idle_timeout ceiling
+L_NEW_MODEL_KEYS = ("kind", "model_ids", "ready_path", "ready_status", "head_timeout", "idle_timeout",
+                    "child_port")
+
+
+def _l_llm_doc(sandbox, **keys):
+    """A VALID config: one llm app "q" serving the inferNO trio (+ *keys* overrides)."""
+    return base_config({"q": llm_model(sandbox, "q", **keys)})
+
+
+def _l_two_apps(sandbox, a_keys=None, q_keys=None, **top):
+    """A sd app "a" and an llm app "q" (+ per-app overrides, + top-level keys)."""
+    return base_config({"a": stub_model(sandbox, "a", **(a_keys or {})),
+                        "q": llm_model(sandbox, "q", **(q_keys or {}))}, **top)
+
+
+def _l_same(label, got, want):
+    if got != want or type(got) is not type(want):
+        return ["%s is %r, expected %r" % (label, got, want)]
+    return []
+
+
+def l40(mod, sandbox):
+    problems = []
+    found, settings = _l_accepted(mod, "plain sd app", *_l_parse(mod, _l_doc(sandbox)))
+    problems += found
+    if settings is not None:
+        spec = settings.models["m1"]
+        for attr, want in (("kind", "sd"), ("model_ids", ()), ("ready_path", "/"), ("ready_status", None),
+                           ("head_timeout", None), ("idle_timeout", None), ("child_port", None),
+                           ("request_timeout", 600.0), ("start_timeout", 120.0)):
+            problems += _l_same("sd default %s" % attr, getattr(spec, attr, "<absent>"), want)
+    found, settings = _l_accepted(mod, "plain llm app", *_l_parse(mod, _l_llm_doc(sandbox)))
+    problems += found
+    if settings is not None:
+        spec = settings.models["q"]
+        for attr, want in (("kind", "llm"), ("model_ids", LLM_IDS), ("ready_path", "/v1/models"),
+                           ("ready_status", 200), ("head_timeout", 1800.0), ("idle_timeout", 1800.0),
+                           ("request_timeout", 86400.0), ("start_timeout", 120.0), ("child_port", None)):
+            problems += _l_same("llm default %s" % attr, getattr(spec, attr, "<absent>"), want)
+    for bad in ("LLM", "", "rawllm", "image", None, 5, True, ["llm"], L_UNKNOWN_VALUE):
+        problems += _l_refused(mod, "kind=%r" % (bad if bad != L_UNKNOWN_VALUE else "<sentinel>"),
+                               *_l_parse(mod, _l_doc(sandbox, kind=bad)), needles=("kind",),
+                               absent=(L_UNKNOWN_VALUE, TF_TOKEN))
+    entry = llm_model(sandbox, "q")
+    del entry["model_ids"]
+    problems += _l_refused(mod, "llm without model_ids", *_l_parse(mod, base_config({"q": entry})),
+                           needles=("model_ids",))
+    problems += _l_refused(mod, "llm with empty model_ids", *_l_parse(mod, _l_llm_doc(sandbox, model_ids=[])),
+                           needles=("model_ids",))
+    found, settings = _l_accepted(mod, "sd with model_ids", *_l_parse(mod, _l_doc(sandbox, model_ids=["alias-a"])))
+    problems += found
+    if settings is not None:
+        problems += _l_same("sd model_ids", getattr(settings.models["m1"], "model_ids", None), ("alias-a",))
+    return problems, ["kind sd by default (no key changes an existing config), llm with its own defaults "
+                      "(ready_path /v1/models, 200, head/idle 1800, request 86400); a bad kind is refused "
+                      "by key; an llm app needs model_ids"]
+
+
+def l41(mod, sandbox):
+    problems = []
+    for label, ids in (("a string", "bge-m3"), ("an object", {"a": 1}), ("a number", 5), ("null", None),
+                       ("a non-string element", ["bge-m3", 5]), ("an empty id", ["bge-m3", ""]),
+                       ("a space", ["bge m3"]), ("a slash", ["a/b"]), ("a 65-character id", ["x" * 65]),
+                       ("a NUL", ["bge\0m3"]), ("a duplicate", ["bge-m3", "x", "bge-m3"]),
+                       ("a sentinel id with a slash", [L_UNKNOWN_VALUE + "/x"])):
+        problems += _l_refused(mod, "model_ids: %s" % label, *_l_parse(mod, _l_llm_doc(sandbox, model_ids=ids)),
+                               needles=("model_ids",), absent=(L_UNKNOWN_VALUE, TF_TOKEN))
+    found, settings = _l_accepted(mod, "dotted ids", *_l_parse(mod, _l_llm_doc(sandbox)))
+    problems += found
+    # an id may equal its OWN app's name (it is one entry in the index)
+    found, _own = _l_accepted(mod, "id equal to its own app name",
+                              *_l_parse(mod, _l_llm_doc(sandbox, model_ids=["q", "bge-m3"])))
+    problems += found
+    # shared by two apps, or equal to ANOTHER app's name: refused, naming the key, by rule only
+    shared = _l_two_apps(sandbox, {"model_ids": ["bge-m3"]}, {})
+    problems += _l_refused(mod, "an id shared by two apps", *_l_parse(mod, shared), needles=("model_ids",),
+                           absent=(TF_TOKEN,))
+    clash = _l_two_apps(sandbox, {}, {"model_ids": ["a", "bge-m3"]})
+    problems += _l_refused(mod, "an id equal to another app's name", *_l_parse(mod, clash),
+                           needles=("model_ids",), absent=(TF_TOKEN,))
+    found, settings = _l_accepted(mod, "two apps, disjoint ids", *_l_parse(mod, _l_two_apps(sandbox)))
+    problems += found
+    if settings is not None:
+        index = getattr(settings, "model_index", None)
+        want = {"a": "a", "q": "q"}
+        want.update({i: "q" for i in LLM_IDS})
+        if not isinstance(index, types.MappingProxyType) and not hasattr(index, "get"):
+            problems.append("Settings.model_index is %r, expected a read-only mapping" % (index,))
+        elif dict(index) != want:
+            problems.append("Settings.model_index is %r, expected %r" % (dict(index), want))
+        else:
+            try:
+                index["x"] = "a"
+                problems.append("Settings.model_index accepted an assignment: it must be read-only")
+            except TypeError:
+                pass
+    return problems, ["ids are 1-64 [A-Za-z0-9._~-] strings, distinct in the app, shared by no two apps and "
+                      "equal to no other app's name; Settings.model_index maps every id and every app name "
+                      "to its app (read-only)"]
+
+
+def l42(mod, sandbox):
+    problems = []
+    for label, path in (("no leading slash", "v1/models"), ("empty", ""), ("a query", "/a?x=1"),
+                        ("a fragment", "/a#f"), ("a control character", "/a\nb"), ("a space", "/a b"),
+                        ("a NUL", "/a\0b"), ("a number", 5), ("null", None), ("too long", "/" + "a" * 300),
+                        ("a sentinel with a query", "/" + L_UNKNOWN_VALUE + "?x")):
+        problems += _l_refused(mod, "ready_path: %s" % label, *_l_parse(mod, _l_llm_doc(sandbox, ready_path=path)),
+                               needles=("ready_path",), absent=(L_UNKNOWN_VALUE, TF_TOKEN))
+    for path in ("/", "/health", "/v1/models", "/a/b-c_d.e~f"):
+        found, settings = _l_accepted(mod, "ready_path %r" % path,
+                                      *_l_parse(mod, _l_llm_doc(sandbox, ready_path=path)))
+        problems += found
+        if settings is not None:
+            problems += _l_same("ready_path", getattr(settings.models["q"], "ready_path", None), path)
+    for bad in (99, 600, 0, -200, True, False, 200.5, "200", None, [200]):
+        problems += _l_refused(mod, "ready_status=%r" % (bad,), *_l_parse(mod, _l_llm_doc(sandbox, ready_status=bad)),
+                               needles=("ready_status",), absent=(TF_TOKEN,))
+    for good in (100, 200, 204, 404, 599):
+        found, settings = _l_accepted(mod, "ready_status %d" % good,
+                                      *_l_parse(mod, _l_llm_doc(sandbox, ready_status=good)))
+        problems += found
+        if settings is not None:
+            problems += _l_same("ready_status", getattr(settings.models["q"], "ready_status", None), good)
+    found, settings = _l_accepted(mod, "sd app with ready_path / ready_status",
+                                  *_l_parse(mod, _l_doc(sandbox, ready_path="/health", ready_status=200)))
+    problems += found
+    if settings is not None:
+        spec = settings.models["m1"]
+        problems += _l_same("sd ready_path", getattr(spec, "ready_path", None), "/health")
+        problems += _l_same("sd ready_status", getattr(spec, "ready_status", None), 200)
+    return problems, ["ready_path starts with /, holds no query, fragment, space or control character; "
+                      "ready_status is an int in 100..599 (never a bool); sd keeps / and 'anything but 503'"]
+
+
+def l43(mod, sandbox):
+    problems = []
+    # sd: the existing cap and the existing default are untouched
+    problems += _l_bounds(mod, sandbox, "request_timeout", (0, 7200.5, 604800, True, "600"), (1.5, 600, L_SD_REQUEST_CAP))
+    for key in ("head_timeout", "idle_timeout"):
+        problems += _l_refused(mod, "sd app with %s" % key, *_l_parse(mod, _l_doc(sandbox, **{key: 10})),
+                               needles=(key,), absent=(TF_TOKEN,))
+    # llm: its own ceilings; request_timeout may exceed the sd cap
+    for key, cap in (("request_timeout", L_LLM_REQUEST_CAP), ("head_timeout", L_LLM_DEADLINE_CAP),
+                     ("idle_timeout", L_LLM_DEADLINE_CAP)):
+        for bad in (0, -1, cap + 1, True, False, "5", None, [5]):
+            problems += _l_refused(mod, "llm %s=%r" % (key, bad), *_l_parse(mod, _l_llm_doc(sandbox, **{key: bad})),
+                                   needles=(key,), absent=(TF_TOKEN,))
+        for good in (0.5, 5, 86400, cap):
+            if key == "request_timeout" and good <= 1:
+                continue
+            found, settings = _l_accepted(mod, "llm %s=%r" % (key, good),
+                                          *_l_parse(mod, _l_llm_doc(sandbox, **{key: good})))
+            problems += found
+            if settings is not None:
+                problems += _l_same("llm %s" % key, getattr(settings.models["q"], key, None), float(good))
+    problems += _l_bounds_llm_start(mod, sandbox)
+    return problems, ["sd request_timeout stays (1, 7200] and head/idle are refused on sd; llm request_timeout, "
+                      "head_timeout and idle_timeout are numbers of seconds in their own ceilings "
+                      "(request (1, 604800], head/idle (0, 604800]), never a bool or a string"]
+
+
+def _l_bounds_llm_start(mod, sandbox):
+    problems = []
+    for bad in (0, 3600.5, True, "120"):
+        problems += _l_refused(mod, "llm start_timeout=%r" % (bad,),
+                               *_l_parse(mod, _l_llm_doc(sandbox, start_timeout=bad)),
+                               needles=("start_timeout",), absent=(TF_TOKEN,))
+    found, settings = _l_accepted(mod, "llm start_timeout 3600",
+                                  *_l_parse(mod, _l_llm_doc(sandbox, start_timeout=3600)))
+    return problems + found
+
+
+def l44(mod, sandbox):
+    problems = []
+    for bad in (0, -1, 65536, 10 ** 9, True, False, "8080", 1.5, None):
+        problems += _l_refused(mod, "child_port=%r" % (bad,), *_l_parse(mod, _l_llm_doc(sandbox, child_port=bad)),
+                               needles=("child_port",), absent=(TF_TOKEN,))
+    for good in (1, 18081, 65535):
+        found, settings = _l_accepted(mod, "child_port %d" % good,
+                                      *_l_parse(mod, _l_llm_doc(sandbox, child_port=good)))
+        problems += found
+        if settings is not None:
+            problems += _l_same("child_port", getattr(settings.models["q"], "child_port", None), good)
+    # equal to the config listener port, or to another app's child_port: refused
+    problems += _l_refused(mod, "child_port = the config port",
+                           *_l_parse(mod, _l_two_apps(sandbox, None, {"child_port": 8123}, port=8123)),
+                           needles=("child_port",), absent=(TF_TOKEN,))
+    problems += _l_refused(mod, "two apps on one child_port",
+                           *_l_parse(mod, _l_two_apps(sandbox, {"child_port": 18090}, {"child_port": 18090})),
+                           needles=("child_port",), absent=(TF_TOKEN,))
+    found, _ok = _l_accepted(mod, "two apps, two child_port values",
+                             *_l_parse(mod, _l_two_apps(sandbox, {"child_port": 18090}, {"child_port": 18091},
+                                                        port=8123)))
+    problems += found
+    # the listener port may also come from --port: the merged result is checked too
+    path = _l_config_file(sandbox, _l_llm_doc(sandbox, child_port=18095), name="l44.json")
+    for label, argv, refused in (("--port = child_port", ["--port", "18095"], True),
+                                 ("--port elsewhere", ["--port", "18096"], False)):
+        kind, ns_or = _l_cli_parsed(mod, label, ["--config", path] + argv)[0:2]
+        if kind:
+            problems += kind
+            continue
+        found, cfg = _l_accepted(mod, "load_config", mod.load_config, (path,))
+        problems += found
+        if cfg is None:
+            continue
+        outcome, val = _l_attempt(mod, mod._sd_settings, ns_or, cfg)
+        if refused and (outcome != "refused" or "child_port" not in val or "\n" in val):
+            problems.append("%s: %s (%s), expected a one-line refusal naming child_port"
+                            % (label, outcome, str(val)[:100]))
+        if not refused and outcome != "ok":
+            problems.append("%s: %s (%s), expected accepted" % (label, outcome, str(val)[:100]))
+    return problems, ["child_port is an int in 1..65535 (never a bool), unequal to the listener port (config "
+                      "or --port) and to another app's child_port"]
+
+
+def l45(mod, sandbox):
+    problems = []
+    doc = _l_doc(sandbox, tf_unknown_model=L_UNKNOWN_VALUE)
+    problems += _l_refused(mod, "unknown app key", *_l_parse(mod, doc),
+                           needles=("tf_unknown_model",) + L_NEW_MODEL_KEYS, absent=(L_UNKNOWN_VALUE, TF_TOKEN))
+    doc = _l_two_apps(sandbox, {"env": {"SD_SECRET": L_ENV_VALUE}}, {"child_port": 18099, "ready_path": "/health"})
+    found, settings = _l_accepted(mod, "two apps", *_l_parse(mod, doc))
+    problems += found
+    if settings is not None:
+        spec_text = repr(settings.models["q"]) + str(settings.models["q"])
+        for key in L_NEW_MODEL_KEYS:
+            if key + "=" not in spec_text:
+                problems.append("repr(ModelSpec) does not show %s" % key)
+        text = repr(settings) + str(settings) + repr(settings.models["a"])
+        for needle in (TF_TOKEN, L_ENV_VALUE):
+            if needle in text + spec_text:
+                problems.append("a repr carries a secret (token or env value)")
+        if "model_index=" not in text:
+            problems.append("repr(Settings) does not show model_index")
+        for name in ("bge-m3", "Qwen3.8-Flash-Next"):
+            if name not in text:
+                problems.append("repr(Settings) does not list the id %s" % name)
+    return problems, ["the refusal lists the seven new app keys; repr(ModelSpec) shows them and "
+                      "repr(Settings) shows model_index (ids and names), never the token or an env value"]
+
+
 GL_FUNCS = (l1, l2, l3, l4, l5, l6, l7, l8, l9, l10, l11, l12, l13, l14, l15, l16, l17, l18,
             l19, l20, l21, l22, l23, l24, l25, l26, l27, l28, l29, l30, l31, l32,
-            l33, l34, l35, l36, l37, l38, l39)
-GL_CLI = frozenset(("L23", "L25", "L26", "L27", "L28", "L32", "L37", "L38", "L39"))
+            l33, l34, l35, l36, l37, l38, l39, l40, l41, l42, l43, l44, l45)
+GL_CLI = frozenset(("L23", "L25", "L26", "L27", "L28", "L32", "L37", "L38", "L39", "L44"))
 
 
 def group_l(suite, fixture_root):
@@ -1521,6 +1807,8 @@ GS_CASES = (
     "S18 registry drop, sweep skips",
     "S19 wait branch by platform",
     "S20 early-reaped leader: grace",
+    "S21 probe path and status",
+    "S22 fixed child_port, one spawn",
 )
 
 S_NAMES_SUP = ("ModelSpec", "parse_config", "render_args", "Supervisor", "_signal_group",
@@ -2346,8 +2634,74 @@ def s20(mod, sandbox):
                       "emptied group: unregistered at the reap, never signalled again"]
 
 
+def _s_llm_spec(mod, state_dir, name, *flags, **keys):
+    """A ModelSpec of kind llm for the LLM stub, through the real loader."""
+    doc = base_config({name: llm_model(state_dir, name, *flags, **keys)})
+    return mod.parse_config(_l_raw(doc)).models[name]
+
+
+@_s_live
+def s21(mod, sup, sandbox, names):
+    """Step 9: the probe is GET <ready_path>; ready_status None means anything but 503, a number
+    means exactly that status (the llm default is 200 of /v1/models)."""
+    window = 1.5
+    problems, took = [], {}
+    cases = (("s21a", "the llm default (200 of /v1/models)", {}, True),
+             ("s21b", "ready_path /health", {"ready_path": "/health"}, False),
+             ("s21c", "ready_status 404", {"ready_status": 404}, False))
+    for name, label, keys, waits in cases:
+        names.append(name)
+        spec = _s_llm_spec(mod, sandbox, name, "--ready-404-for", str(window), stop_grace=2.0, **keys)
+        child = sup.start(spec)
+        t0 = time.monotonic()
+        ready = sup.wait_ready(child, t0 + 10.0, threading.Event())
+        took[name] = time.monotonic() - t0
+        if ready is not True:
+            problems.append("%s: wait_ready returned %r, expected True" % (label, ready))
+        elif waits and took[name] < window * 0.95:
+            problems.append("%s: ready after %.2fs, inside the %.1fs 404 window: only a 200 is ready"
+                            % (label, took[name], window))
+        elif not waits and took[name] >= window * 0.9:
+            problems.append("%s: ready after %.2fs: the probe did not use the configured path / status"
+                            % (label, took[name]))
+        problems += _s_stopped(mod, sup, child, "stop " + name)[0]
+    return problems, ["llm default waits out the 404 window (%.2fs); ready_path=/health (%.2fs) and "
+                      "ready_status=404 (%.2fs) are ready at once" % (took.get("s21a", 0), took.get("s21b", 0),
+                                                                      took.get("s21c", 0))]
+
+
+@_s_live
+def s22(mod, sup, sandbox, names):
+    """Step 9: a fixed child_port is used as is (no port pick, no collision retry): an early exit
+    is ONE spawn and a failed start."""
+    problems = []
+
+    def boom():
+        raise AssertionError("_sd_free_port was called for an app with a child_port")
+
+    port, other = free_port(), free_port()
+    with patched(mod, [("_sd_free_port", boom)]):
+        problems_a, child = _s_ready(sup, _s_llm_spec(mod, sandbox, "s22a", child_port=port, stop_grace=2.0), names)
+        problems += problems_a
+        if child is not None:
+            if child.port != port:
+                problems.append("the child listens on %r, expected the configured child_port %d" % (child.port, port))
+            problems += _s_stopped(mod, sup, child, "stop")[0]
+        names.append("s22b")
+        spec = _s_llm_spec(mod, sandbox, "s22b", "--crash-on-start", child_port=other, stop_grace=2.0)
+        outcome, child, took = _s_launch(sup, spec, 10.0)
+        if outcome != "failed" or child is not None:
+            problems.append("a child that exits at once launched (%r, %r), expected ('failed', None)"
+                            % (outcome, child))
+        if len(read_starts(sandbox, "s22b")) != 1:
+            problems.append("a fixed port spawned %d time(s), expected 1: the collision retry is for "
+                            "picked ports" % len(read_starts(sandbox, "s22b")))
+    return problems, ["child_port: no port pick, the child on the configured port; an early exit is one "
+                      "spawn and 'failed'"]
+
+
 GS_FUNCS = (s1, s2, s3, s4, s5, s6, s7, s8, s9, s10, s11, s12, s13, s14, s15, s16, s17,
-            s18, s19, s20)
+            s18, s19, s20, s21, s22)
 GS_BUDGET = frozenset(("S11", "S12", "S13"))
 
 
@@ -2389,9 +2743,14 @@ def group_s(suite, fixture_root):
 #
 #   ROUTES: a READ-ONLY mapping (assignment raises TypeError), exactly
 #     {"/v1/images/generations": "openai", "/v1/images/edits": "openai",
-#      "/sdapi/v1/txt2img": "sdapi", "/sdapi/v1/img2img": "sdapi"}.
-#     The kind decides the model source: "openai" may fall back to the body
-#     `model`, "sdapi" takes the /m/<model>/ prefix only.  /v1/models and
+#      "/sdapi/v1/txt2img": "sdapi", "/sdapi/v1/img2img": "sdapi",
+#      "/v1/chat/completions": "chat", "/v1/messages": "chat",
+#      "/v1/embeddings": "embed", "/v1/rerank": "embed"}   (stage 2a, Step 8).
+#     The kind token decides the model source: every token but "sdapi" may fall
+#     back to the body `model`, "sdapi" takes the /m/<model>/ prefix only; it
+#     also decides which app kind serves the route (_sd_kind_accepts) and the
+#     body cap (_SD_KIND_BODY_CAPS).  *models* of _sd_route_head / route_request
+#     is Settings.model_index at runtime (model ids and app names).  /v1/models and
 #     /v1/unload are control routes the handler dispatches BEFORE routing:
 #     route_request answers them route_not_found like any other path.
 #   Target(NamedTuple): model, upstream_path, via -- via is "prefix" or
@@ -2462,14 +2821,22 @@ GR_CASES = (
     "R18 multipart part cap",
     "R19 multipart window bound",
     "R20 closed codes, head agrees",
+    "R21 llm routes: tokens, caps",
+    "R22 llm routes: ids, kind check",
+    "R23 refusal wording is neutral",
 )
 
 R_NAMES = ("ROUTES", "Target", "RouteError", "SniffError", "route_request", "sniff_model",
            "_sd_route_head", "_SD_SNIFF_LIMIT", "_SD_SNIFF_PART_CAP", "_SD_ERROR_STATUS")
 R_ROUTES = {"/v1/images/generations": "openai", "/v1/images/edits": "openai",
-            "/sdapi/v1/txt2img": "sdapi", "/sdapi/v1/img2img": "sdapi"}
-R_OPENAI = ("/v1/images/generations", "/v1/images/edits")
+            "/sdapi/v1/txt2img": "sdapi", "/sdapi/v1/img2img": "sdapi",
+            "/v1/chat/completions": "chat", "/v1/messages": "chat",
+            "/v1/embeddings": "embed", "/v1/rerank": "embed"}
+R_IMAGES = ("/v1/images/generations", "/v1/images/edits")     # the image routes that body-sniff
+R_LLM = ("/v1/chat/completions", "/v1/messages", "/v1/embeddings", "/v1/rerank")
+R_OPENAI = R_IMAGES + R_LLM      # every route that may take the body `model` (all but "sdapi")
 R_SDAPI = ("/sdapi/v1/txt2img", "/sdapi/v1/img2img")
+R_CAPS = {"chat": 16 * 1024 * 1024, "embed": 4 * 1024 * 1024}      # Step 8 (owner-unconfirmed)
 R_CODES = {"route_not_found": 404, "method_not_allowed": 405, "invalid_request": 400,
            "model_required": 400, "model_unknown": 404}
 R_LIMIT = 64 * 1024
@@ -2590,7 +2957,7 @@ def r1(mod):
     for code, status in R_CODES.items():
         if mod._SD_ERROR_STATUS.get(code) != status:
             problems.append("closed table: %s -> %r, expected %d" % (code, mod._SD_ERROR_STATUS.get(code), status))
-    return problems, ["four routes, two kinds, read-only; 64 KiB / 64 parts"]
+    return problems, ["eight routes, four kind tokens, read-only; 64 KiB / 64 parts"]
 
 
 def r2(mod):
@@ -2982,7 +3349,105 @@ def r20(mod):
                       "_sd_route_head agrees"]
 
 
-GR_FUNCS = (r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15, r16, r17, r18, r19, r20)
+R_INDEX = types.MappingProxyType({"A": "A", "L": "L", "Qwen3.8-Flash-Next": "L", "bge-m3": "L",
+                                  "bge-reranker-v2-m3": "L"})      # model id (or app name) -> app
+
+
+def r21(mod):
+    """Step 8: the four inferNO POST routes are ROUTES entries with their kind tokens, mirrored in
+    _SD_ROUTE_MEDIA (JSON only); the body caps are a table keyed by KIND TOKENS (never a path,
+    so gate A10 is unchanged) and the effective cap is min(table cap, body_limit)."""
+    problems = []
+    for path in R_LLM:
+        if mod.ROUTES.get(path) != R_ROUTES[path]:
+            problems.append("ROUTES[%r] is %r, expected %r" % (path, mod.ROUTES.get(path), R_ROUTES[path]))
+        if tuple(mod._SD_ROUTE_MEDIA.get(path) or ()) != (R_JSON,):
+            problems.append("_SD_ROUTE_MEDIA[%r] is %r, expected ('application/json',)"
+                            % (path, mod._SD_ROUTE_MEDIA.get(path)))
+    if set(mod._SD_ROUTE_MEDIA) != set(mod.ROUTES):
+        problems.append("_SD_ROUTE_MEDIA and ROUTES carry different keys")
+    caps = getattr(mod, "_SD_KIND_BODY_CAPS", None)
+    if not isinstance(caps, types.MappingProxyType) or dict(caps) != R_CAPS:
+        problems.append("_SD_KIND_BODY_CAPS is %r, expected the read-only table %r" % (caps, R_CAPS))
+    elif any(key.startswith("/") for key in caps) or not set(caps) <= set(mod.ROUTES.values()):
+        problems.append("_SD_KIND_BODY_CAPS must be keyed by ROUTES kind tokens, not by paths")
+    body_limit = 32 * 1024 * 1024
+    for path in R_LLM:
+        cap = R_CAPS[R_ROUTES[path]]
+        for limit, want in ((body_limit, cap), (cap + 5, cap), (1024, 1024), (cap, cap)):
+            got = mod._sd_body_cap(path, limit)
+            if got != want:
+                problems.append("_sd_body_cap(%s, %d) is %r, expected %d" % (path, limit, got, want))
+    for path in R_IMAGES + R_SDAPI:
+        for limit in (body_limit, 1024, 1 << 30):
+            if mod._sd_body_cap(path, limit) != limit:
+                problems.append("_sd_body_cap(%s, %d) must stay the body limit: image routes have no cap" % (path, limit))
+    return problems, ["chat/messages 16 MiB, embeddings/rerank 4 MiB by kind token; min(cap, body_limit); "
+                      "image routes keep body_limit"]
+
+
+def r22(mod):
+    """Step 8: the model index resolves ids AND app names at the edge; /m/<id> or /m/<app> pick the
+    app, the body model picks it without a prefix; a kind only accepts its own route tokens."""
+    problems = []
+    for path in R_LLM:
+        for who in ("L", "bge-m3", "Qwen3.8-Flash-Next", "bge-reranker-v2-m3"):
+            client = "".join(["/m/", who, path])
+            problems += _r_target(mod, "POST %s" % client, mod.route_request("POST", client, R_JSON, b"\xff", R_INDEX),
+                                  who, path, "prefix")
+        body = _r_json({"model": "bge-m3", "input": "x"})
+        problems += _r_target(mod, "POST %s (body bge-m3)" % path,
+                              mod.route_request("POST", path, R_JSON, body, R_INDEX), "bge-m3", path, "body")
+        problems += _r_refused(mod, "POST %s (no model)" % path,
+                               mod.route_request("POST", path, R_JSON, _r_json({"input": "x"}), R_INDEX),
+                               "model_required")
+        problems += _r_refused(mod, "POST %s (unknown model)" % path,
+                               mod.route_request("POST", path, R_JSON, _r_json({"model": R_SENTINEL}), R_INDEX),
+                               "model_unknown")
+        problems += _r_refused(mod, "POST /m/nosuch%s" % path,
+                               mod.route_request("POST", "/m/nosuch" + path, R_JSON, b"{}", R_INDEX),
+                               "model_unknown")
+        problems += _r_refused(mod, "GET %s" % path, mod.route_request("GET", path, R_JSON, b"", R_INDEX),
+                               "method_not_allowed")
+        problems += _r_refused(mod, "POST %s?x=1" % path,
+                               mod.route_request("POST", path + "?x=1", R_JSON, body, R_INDEX), "invalid_request")
+    # the kind check: a pure helper over a kind name and a ROUTES path
+    accepts = getattr(mod, "_sd_kind_accepts", None)
+    if not callable(accepts):
+        return problems + ["_sd_kind_accepts(kind, upstream) is missing"], []
+    for kind, paths, want in (("llm", R_LLM, True), ("llm", R_IMAGES + R_SDAPI, False),
+                              ("sd", R_LLM, False), ("sd", R_IMAGES + R_SDAPI, True)):
+        for path in paths:
+            if accepts(kind, path) is not want:
+                problems.append("_sd_kind_accepts(%r, %r) is not %r" % (kind, path, want))
+    if accepts("nosuch", R_LLM[0]) is not False or accepts("sd", "/nope") is not False:
+        problems.append("_sd_kind_accepts must be False for an unknown kind or an unrouted path")
+    return problems, ["ids and app names resolve through the index; prefix wins; llm routes sniff the JSON "
+                      "model; sd accepts image tokens only, llm chat/embed only"]
+
+
+def r23(mod):
+    """Step 8: the refusal wording names no image: a chat route shares the texts."""
+    problems = []
+    for path in R_LLM:
+        for label, got in (("wrong method", mod.route_request("GET", path, R_JSON, b"", R_INDEX)),
+                           ("query", mod.route_request("POST", path + "?x=1", R_JSON, b"", R_INDEX))):
+            if not isinstance(got, mod.RouteError):
+                problems.append("%s %s: not a RouteError" % (label, path))
+            elif "image" in got.message.lower():
+                problems.append("%s %s: the message %r names an image" % (label, path, got.message))
+    text = mod._SD_ERROR_TEXT.get("queue_full", "")
+    if "image" in text.lower() or "queue" not in text.lower():
+        problems.append("queue_full text %r must be neutral (no image) and still name the queue" % text)
+    for code, status in (("method_not_allowed", 405), ("invalid_request", 400)):
+        if mod._SD_ERROR_STATUS.get(code) != status:
+            problems.append("the closed table changed: %s -> %r" % (code, mod._SD_ERROR_STATUS.get(code)))
+    return problems, ["\"a route takes POST only\" / \"a route takes no query string\" / \"too many requests "
+                      "queued\": codes and statuses unchanged"]
+
+
+GR_FUNCS = (r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15, r16, r17, r18, r19, r20,
+            r21, r22, r23)
 
 
 def group_r(suite, fixture_root):
@@ -3695,6 +4160,8 @@ GT_CASES = (
     "T11 retry stays at the head",
     "T12 start fails in the retry",
     "T13 Popen ValueError -> DEAD",
+    "T14 squatter never sees a request",
+    "T15 llm timeout aborts, no kill",
 )
 
 Q_NAMES = ("Scheduler", "Ticket", "TicketResult", "UpstreamError", "_sd_send", "_SD_SCHED_TICK_S",
@@ -4870,7 +5337,108 @@ def t13(mod, sandbox, names, optional):
                                    "charge, model_start_failed; the next request is not blocked"]
 
 
-GT_FUNCS = (t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11, t12, t13)
+@_q_live
+def t14(mod, sandbox, names, optional):
+    """Step 9 (R4): a foreign listener on the picked port answers the probe while OUR child is
+    already dead: the request is NOT sent to it.  The supervisor is made to report "ready" for a
+    child that exited (the race the probe cannot close); the pre-send liveness check must."""
+    optional.append("L")
+    problems, posts = [], []
+    done = threading.Event()
+    squat = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    squat.bind((LOOPBACK, 0))
+    squat.listen(8)
+    squat.settimeout(0.1)
+    port = squat.getsockname()[1]
+    answer = b'{"object": "list", "data": []}'
+
+    def serve():
+        while not done.is_set():
+            try:
+                conn, _addr = squat.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            with conn:
+                conn.settimeout(1.0)
+                try:
+                    data = conn.recv(65536)
+                except OSError:
+                    data = b""
+                if data.startswith(b"POST"):
+                    posts.append(1)
+                try:
+                    conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n"
+                                 b"Connection: close\r\n\r\n%s" % (len(answer), answer))
+                except OSError:
+                    pass
+
+    thread = threading.Thread(target=serve, name="tf-squatter", daemon=True)
+    thread.start()
+
+    class DeadReady(mod.Supervisor):
+        def launch(self, spec, deadline, stop):
+            child = self.start(spec)      # told to bind the squatted port: it exits (bind failed)
+            try:
+                child.proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                pass
+            return "ready", child
+
+    body = _q_body("t14")
+    try:
+        with _q_world(mod, {"L": _p_llm_entry(sandbox, "L")}, supervisor=DeadReady(),
+                      patches=(("_sd_free_port", lambda: port),)) as w:
+            ticket = w.request("L", body, path="/v1/embeddings")
+            problems += _q_code("the request", ticket, "model_crashed")
+            w.release(ticket)
+            if w.crashes("L") != 2:
+                problems.append("%d crash(es) charged, expected 2 (one per dead child)" % w.crashes("L"))
+    finally:
+        done.set()
+        thread.join(2.0)
+        squat.close()
+    if posts:
+        problems.append("the squatter received %d POST(s): a request was forwarded to a foreign listener" % len(posts))
+    if _q_sends(sandbox, "L"):
+        problems.append("the stub recorded a request: it was not the dead child")
+    if len(read_starts(sandbox, "L")) != 2:
+        problems.append("L started %d times, expected 2 (the original and one retry)" % len(read_starts(sandbox, "L")))
+    return problems + w.problems, ["a child that died after 'ready' never got the request: no POST reached the "
+                                   "squatter, 502 model_crashed after the retry"]
+
+
+@_q_live
+def t15(mod, sandbox, names, optional):
+    """Step 10: an llm app's request_timeout is a no-kill abort: 504 upstream_timeout, the SAME child
+    stays READY, no crash is charged, nothing is re-sent (an sd app still kills: T5)."""
+    names.append("L")
+    problems = []
+    entry = _p_llm_entry(sandbox, "L", "--answer-delay", "6", request_timeout=1.5, retries=1)
+    with _q_world(mod, {"L": entry}) as w:
+        ticket = w.request("L", _q_body("t15"), path="/v1/embeddings")
+        problems += _q_code("the timed-out request", ticket, "upstream_timeout", timeout=2 * WAIT_CEILING_S)
+        w.release(ticket)
+        pids = read_starts(sandbox, "L")
+        with w.sched.cond:
+            child = w.sched.child
+        if w.state("L") != "READY":
+            problems.append("L is %s after its request timed out, expected READY (no kill)" % w.state("L"))
+        if w.crashes("L"):
+            problems.append("the timeout charged %d crash(es), expected none" % w.crashes("L"))
+        if len(pids) != 1 or child is None or child.pid != pids[0] or child.proc.poll() is not None:
+            problems.append("the child is not the one that was started and is still running: starts %r" % (pids,))
+        if pids and not pid_alive(pids[0]):
+            problems.append("the llm child (pid %d) is gone after a request timeout" % pids[0])
+        if len(_q_sends(sandbox, "L")) != 1 or ticket.attempts != 1:
+            problems.append("the timed-out request was re-sent (%d at the stub, attempts %r)"
+                            % (len(_q_sends(sandbox, "L")), ticket.attempts))
+    return problems + w.problems, ["request_timeout on an llm app: 504 upstream_timeout, same pid READY, no "
+                                   "charge, no re-send"]
+
+
+GT_FUNCS = (t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11, t12, t13, t14, t15)
 
 
 def _q_group(suite, fixture_root, group, cases, funcs, label):
@@ -5072,6 +5640,9 @@ GP_CASES = (
     "P38 signal handler: a flag only",
     "P39 config port, CLI --port wins",
     "P40 config bind without acks: exit 2",
+    "P41 llm routes reach the llm app",
+    "P42 per-kind body caps, 411 first",
+    "P43 anthropic headers, chat only",
 )
 
 GQH_CASES = (
@@ -6364,9 +6935,142 @@ def p40(mod, sandbox):
     return problems, ["config bind 0.0.0.0 alone: exit 2 with the one-line non-loopback refusal"]
 
 
+def _p_sized(model, size, tag):
+    """A JSON body of EXACTLY *size* bytes naming *model*; *tag* makes it unique."""
+    doc = {"model": model, "pad": ""}
+    room = size - len(json.dumps(doc, sort_keys=True)) - len(tag)
+    doc["pad"] = tag + "x" * room
+    body = json.dumps(doc, sort_keys=True).encode("utf-8")
+    if len(body) != size:
+        raise AssertionError("fixture: a %d byte body was asked for, %d built" % (size, len(body)))
+    return body
+
+
+@_q_live
+def p41(mod, sandbox, names, optional):
+    """Step 8: the four inferNO routes reach the llm app through its app name, any of its ids and
+    the body model; a route of the other kind is 404 route_not_found before any start."""
+    names.extend(("A", "L"))
+    problems = []
+    with _p_front(mod, sandbox, {"A": _p_entry(sandbox, "A"), "L": _p_llm_entry(sandbox, "L")}) as w:
+        for path in R_LLM:
+            for who in ("L", "bge-m3"):
+                body = _p_body("p41-%s" % who, model="Qwen3.8-Flash-Next")
+                problems += _p_relayed("/m/%s%s" % (who, path), _p_post(w.port, _p_m(who, path), body), body,
+                                       sandbox, "L", path)
+            body = _p_body("p41-body", model="bge-reranker-v2-m3")
+            problems += _p_relayed("the body model on %s" % path, _p_post(w.port, path, body), body,
+                                   sandbox, "L", path)
+        if len(read_starts(sandbox, "L")) != 1:
+            problems.append("L started %d times for twelve requests, expected once" % len(read_starts(sandbox, "L")))
+        problems += _p_refused("a chat route naming the sd app in the body",
+                               _p_post(w.port, R_LLM[0], _p_body("p41-x", model="A")), "route_not_found")
+        for label, target in (("a chat route under /m/A/", _p_m("A", R_LLM[0])),
+                              ("an image route under /m/L/", _p_m("L", P_GEN)),
+                              ("an sdapi route under an llm id", _p_m("bge-m3", P_TXT))):
+            problems += _p_refused(label, _p_early(w.port, target), "route_not_found")
+        if read_starts(sandbox, "A"):
+            problems.append("a route of the wrong kind started the sd app")
+        if not w.settled(0):
+            problems.append("a refused request left %d admission(s) taken" % w.admitted())
+        body = _p_body("p41-img")
+        problems += _p_relayed("the sd app after the llm app", _p_post(w.port, _p_m("A", P_GEN), body), body,
+                               sandbox, "A", P_GEN)
+    return problems + w.problems, ["chat, messages, embeddings and rerank relayed byte-exact to L by app name, "
+                                   "id and body model (one start); the other kind's routes are 404, nothing "
+                                   "started; the image route still swaps back"]
+
+
+@_q_live
+def p42(mod, sandbox, names, optional):
+    """Step 8: the per-kind body caps (the table patched small): the cap's bytes are accepted, one
+    more is 413 with no body byte read; image routes keep body_limit; any Transfer-Encoding is
+    411 whatever its case or declared length, and 415 follows the length rules."""
+    names.extend(("A", "L"))
+    problems = []
+    caps = types.MappingProxyType({"chat": 4096, "embed": 2048})
+    with _p_front(mod, sandbox, {"A": _p_entry(sandbox, "A"), "L": _p_llm_entry(sandbox, "L")},
+                  patches=(("_SD_KIND_BODY_CAPS", caps),)) as w:
+        for path in R_LLM:
+            cap = caps[R_ROUTES[path]]
+            target = _p_m("L", path)
+            body = _p_sized("bge-m3", cap, "p42-" + path[-6:])
+            problems += _p_relayed("%s at its cap (%d bytes)" % (path, cap), _p_post(w.port, target, body), body,
+                                   sandbox, "L", path)
+            problems += _p_refused("%s over its cap (%d declared, none sent)" % (path, cap + 1),
+                                   _p_early(w.port, target, length=cap + 1), "body_too_large")
+            problems += _p_refused("%s with a lowercase transfer-encoding" % path,
+                                   _p_early(w.port, target, length=cap + 1,
+                                            extra=("transfer-encoding: chunked",)), "length_required")
+            problems += _p_refused("%s with a text/plain body" % path,
+                                   _p_post(w.port, target, b"{}", ctype="text/plain"), "unsupported_media_type")
+        if not w.settled(0):
+            problems.append("the refusals left %d admission(s) taken" % w.admitted())
+        big = _p_body("p42-img", extra="y" * 3000)
+        problems += _p_relayed("an image body over the chat caps", _p_post(w.port, _p_m("A", P_GEN), big), big,
+                               sandbox, "A", P_GEN)
+    return problems + w.problems, ["each kind token's cap accepted, cap+1 is 413 unread, Transfer-Encoding 411 "
+                                   "(never 413), Content-Type 415; an image route is not capped by the table"]
+
+
+@_q_live
+def p43(mod, sandbox, names, optional):
+    """Step 10 (R7): anthropic-version / anthropic-beta cross the hop on the chat kind only,
+    single and short; a duplicate, an oversize or a non-ASCII value is 400 and nothing is forwarded;
+    an image route ignores them."""
+    names.extend(("A", "L"))
+    problems = []
+    ctype = ("Content-Type", P_JSON)
+    pairs = [ctype, ("anthropic-version", "2023-06-01"), ("Anthropic-Beta", "tf-beta-1"), ("x-api-key", "k"),
+             ("Cookie", "c=1")]
+    got = tuple(mod._sd_forward_headers(pairs, R_LLM[1]))
+    want = (("Content-Type", P_JSON), ("anthropic-version", "2023-06-01"), ("anthropic-beta", "tf-beta-1"))
+    if got != want:
+        problems.append("_sd_forward_headers on the chat kind gave %r, expected %r" % (got, want))
+    for label, path in (("an image route", P_GEN), ("an embeddings route", R_LLM[2]), ("no path", None)):
+        got = tuple(mod._sd_forward_headers(pairs, path) if path is not None else mod._sd_forward_headers(pairs))
+        if got != (("Content-Type", P_JSON),):
+            problems.append("_sd_forward_headers on %s gave %r, expected the Content-Type only" % (label, got))
+    with _p_front(mod, sandbox, {"A": _p_entry(sandbox, "A"), "L": _p_llm_entry(sandbox, "L")}) as w:
+        def post(path, body, extra, who="L"):
+            return _p_exchange(w.port, _p_head(w.port, "POST", _p_m(who, path), length=len(body), extra=extra) + body)
+
+        ok = ("anthropic-version: 2023-06-01", "anthropic-beta: tf-beta-1")
+        body = _p_body("p43-msg", model="Qwen3.8-Flash-Next")
+        problems += _p_relayed("/v1/messages with both headers", post(R_LLM[1], body, ok), body, sandbox, "L", R_LLM[1])
+        sent = (_q_sends(sandbox, "L", body) or [{}])[0].get("anthropic")
+        if sent != {"anthropic-version": "2023-06-01", "anthropic-beta": "tf-beta-1"}:
+            problems.append("the child saw anthropic headers %r on /v1/messages" % (sent,))
+        body = _p_body("p43-emb", model="bge-m3")
+        problems += _p_relayed("/v1/embeddings with both headers", post(R_LLM[2], body, ok), body, sandbox, "L",
+                               R_LLM[2])
+        sent = (_q_sends(sandbox, "L", body) or [{}])[0].get("anthropic")
+        if sent != {}:
+            problems.append("the child saw anthropic headers %r on /v1/embeddings (chat kind only)" % (sent,))
+        bad = (("a duplicate anthropic-version", ("anthropic-version: 2023-06-01", "Anthropic-Version: 2023-06-01")),
+               ("a duplicate anthropic-beta", ("anthropic-beta: a", "anthropic-beta: b")),
+               ("an oversize anthropic-beta", ("anthropic-beta: " + "b" * 257,)),
+               ("a non-ASCII anthropic-version", ("anthropic-version: 2023\udcff",)),
+               ("an empty anthropic-version", ("anthropic-version:",)))
+        for label, extra in bad:
+            body = _p_body("p43-bad", model="Qwen3.8-Flash-Next")
+            problems += _p_refused(label, post(R_LLM[1], body, extra), "invalid_request")
+            if _q_sends(sandbox, "L", body):
+                problems.append("%s reached the child" % label)
+        body = _p_body("p43-img")
+        problems += _p_relayed("an image route ignores a duplicate anthropic header",
+                               post(P_GEN, body, ("anthropic-version: a", "anthropic-version: b"), who="A"), body,
+                               sandbox, "A", P_GEN)
+        if not w.settled(0):
+            problems.append("the refusals left %d admission(s) taken" % w.admitted())
+    return problems + w.problems, ["anthropic-version / anthropic-beta forwarded on the chat kind only (single, "
+                                   "short, printable ASCII); duplicates, oversize, non-ASCII and empty values "
+                                   "are 400 and never reach the child; image routes ignore them"]
+
+
 GP_FUNCS = (p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p13, p14, p15, p16, p17, p18, p19,
             p20, p21, p22, p23, p24, p25, p26, p27, p28, p29, p30, p31, p32, p33, p34, p35, p36,
-            p37, p38, p39, p40)
+            p37, p38, p39, p40, p41, p42, p43)
 
 
 # -- Q-http ---------------------------------------------------------------------------
@@ -6701,6 +7405,8 @@ GU_CASES = (
     "U16 %, unknown key, bad name",
     "U17 unknown model 404",
     "U18 prefix vs ?model= clash",
+    "U19 /v1/models lists every id",
+    "U20 unload through any id",
 )
 
 GQH_CASES = GQH_CASES + ("QH5 racing unloads, one ladder",)
@@ -6712,6 +7418,7 @@ U_CONTROL_BODY_LIMIT = 4096          # D-14: the largest control body
 U_BUSY_S = 1.5                       # the stub's answer delay while an unload queues behind it
 U_ENTRY_KEYS = frozenset(("id", "object", "created", "owned_by", "modality", "state"))
 U_STATES = ("stopped", "starting", "ready", "stopping", "dead", "disabled")
+U_MODALITIES = ("image", "chat")     # the modality of an sd app's ids / an llm app's ids
 U_FLOOD_CAP = 2                      # U11/U12: max_connections; the reserve keeps 4 more slots
 
 
@@ -6766,11 +7473,12 @@ def _u_models(label, resp):
         if set(entry) != U_ENTRY_KEYS:
             problems.append("%s: entry keys %r, expected exactly %r" % (label, sorted(entry), sorted(U_ENTRY_KEYS)))
         created = entry.get("created")
-        if (entry.get("object"), entry.get("owned_by"), entry.get("modality")) != ("model", "gpu-router", "image") \
+        if (entry.get("object"), entry.get("owned_by")) != ("model", "gpu-router") \
+                or entry.get("modality") not in U_MODALITIES \
                 or not isinstance(created, int) or isinstance(created, bool) or created < 0 \
                 or entry.get("state") not in U_STATES or not isinstance(entry.get("id"), str):
-            problems.append("%s: entry %r is not {object model, owned_by gpu-router, modality image, "
-                            "created int, state in %r}" % (label, entry.get("id"), U_STATES))
+            problems.append("%s: entry %r is not {object model, owned_by gpu-router, modality in %r, "
+                            "created int, state in %r}" % (label, entry.get("id"), U_MODALITIES, U_STATES))
         if entry.get("id") in entries:
             problems.append("%s: model %r listed twice" % (label, entry.get("id")))
         entries[entry.get("id")] = entry
@@ -7372,7 +8080,112 @@ def u18(mod, sandbox, names, optional):
                                    "400 invalid_request; the same name twice is accepted (final L5)"]
 
 
-GU_FUNCS = (u1, u2, u3, u4, u5, u6, u7, u8, u9, u10, u11, u12, u13, u14, u15, u16, u17, u18)
+def _p_llm_entry(sandbox, name, *flags, **keys):
+    """An llm-kind app entry (the LLM stub, three ids) with the suite's start/stop bounds."""
+    keys.setdefault("stop_grace", Q_GRACE_S)
+    keys.setdefault("start_timeout", Q_START_TIMEOUT_S)
+    return llm_model(sandbox, name, *flags, **keys)
+
+
+U_EMBED = "/v1/embeddings"
+U_CHAT = "/v1/chat/completions"
+
+
+def _u_load_llm(w, sandbox, who, tag, name="L", path=U_EMBED):
+    """(problems, pid): one relayed request to app *name* through /m/<who> (an id or the app
+    name) that makes it resident, and its child pid."""
+    body = _p_body(tag)
+    problems = _p_relayed("loading %s via %s" % (name, who), _p_post(w.port, _p_m(who, path), body), body,
+                          sandbox, name, path)
+    sends = _q_sends(sandbox, name, body)
+    return problems, (sends[0].get("pid") if sends else None)
+
+
+@_q_live
+def u19(mod, sandbox, names, optional):
+    names.extend(("A", "L"))
+    models = {"A": _p_entry(sandbox, "A"), "L": _p_llm_entry(sandbox, "L")}
+    ids = ["A"] + list(LLM_IDS)
+    with _p_front(mod, sandbox, models) as w:
+        problems, entries = _u_models("before any start", _u_get(w.port))
+        if list(entries) != ids:
+            problems.append("/v1/models lists %r, expected one entry per configured id %r" % (list(entries), ids))
+
+        def expect(label, entries, a_state, l_state):
+            found = []
+            for model_id in ids:
+                entry = entries.get(model_id, {})
+                want_state = a_state if model_id == "A" else l_state
+                want_mod = "image" if model_id == "A" else "chat"
+                if (entry.get("state"), entry.get("modality")) != (want_state, want_mod):
+                    found.append("%s: %s is (%r, %r), expected (%r, %r)"
+                                 % (label, model_id, entry.get("state"), entry.get("modality"), want_state, want_mod))
+            return found
+
+        problems += expect("before any start", entries, "stopped", "stopped")
+        if read_starts(sandbox, "A") or read_starts(sandbox, "L"):
+            problems.append("listing the models started an app: the list is static config, no discovery")
+        more, pid_l = _u_load_llm(w, sandbox, "bge-m3", "u19-l")
+        problems += more
+        found, entries = _u_models("L resident", _u_get(w.port))
+        problems += found + expect("L resident", entries, "stopped", "ready")
+        more, pid_a = _u_load(w, sandbox, "A", "u19-a")
+        problems += more
+        if pid_l is not None and pid_alive(pid_l):
+            problems.append("L's child (pid %d) is alive after A served: two apps resident" % pid_l)
+        found, entries = _u_models("after the swap", _u_get(w.port))
+        problems += found + expect("after the swap", entries, "ready", "stopped")
+        found, entries = _u_models("/m/bge-m3/v1/models", _u_get(w.port, _p_m("bge-m3", U_MODELS)))
+        problems += found
+        if list(entries) != ids:
+            problems.append("a prefixed /v1/models by an id lists %r, expected the whole list" % (list(entries),))
+        problems += _u_refusals(w.port, (_p_m("nosuch", U_MODELS),), "model_unknown", method="GET")
+    return problems + w.problems, ["GET /v1/models: A plus the three inferNO ids in config order, owned_by "
+                                   "gpu-router, modality image / chat, the state of the owning app before "
+                                   "any start, with L resident and after a swap; nothing started to list"]
+
+
+@_q_live
+def u20(mod, sandbox, names, optional):
+    names.append("L")
+    optional.append("A")
+    problems = []
+    models = {"A": _p_entry(sandbox, "A"), "L": _p_llm_entry(sandbox, "L")}
+    with _p_front(mod, sandbox, models) as w:
+        more, pid = _u_load_llm(w, sandbox, "bge-m3", "u20-1")
+        problems += more
+        problems += _u_unloaded("?model=bge-m3", _u_post(w.port, U_UNLOAD + "?model=bge-m3"), True, "L")
+        if pid is not None and pid_alive(pid):
+            problems.append("?model=bge-m3 answered while L's child (pid %d) was alive" % pid)
+        more, pid = _u_load_llm(w, sandbox, "Qwen3.8-Flash-Next", "u20-2", path=U_CHAT)
+        problems += more
+        problems += _u_unloaded("/m/bge-reranker-v2-m3/v1/unload",
+                                _u_post(w.port, _p_m("bge-reranker-v2-m3", U_UNLOAD)), True, "L")
+        if pid is not None and pid_alive(pid):
+            problems.append("an unload through another id of L answered while its child was alive")
+        more, pid = _u_load_llm(w, sandbox, "L", "u20-3")
+        problems += more
+        problems += _u_refusals(w.port, (_p_m("bge-m3", U_UNLOAD) + "?model=A",
+                                         _p_m("A", U_UNLOAD) + "?model=bge-m3"), "invalid_request")
+        problems += _u_refusals(w.port, (U_UNLOAD + "?model=nosuch", _p_m("nosuch", U_UNLOAD)), "model_unknown")
+        problems += _u_intact("after the refusals", w, pid, model="L")
+        problems += _u_unloaded("two ids of one app (prefix + ?model=)",
+                                _u_post(w.port, _p_m("bge-m3", U_UNLOAD) + "?model=Qwen3.8-Flash-Next"), True, "L")
+        more, pid = _u_load_llm(w, sandbox, "bge-m3", "u20-4")
+        problems += more
+        problems += _u_unloaded("no target: the resident app", _u_post(w.port, U_UNLOAD), True, "L")
+        if pid is not None and pid_alive(pid):
+            problems.append("the default unload answered while L's child was alive")
+        if len(read_starts(sandbox, "L")) != 4:
+            problems.append("L started %d times, expected 4 (one cold start per load)" % len(read_starts(sandbox, "L")))
+        if read_starts(sandbox, "A"):
+            problems.append("an unload naming L's ids started A")
+    return problems + w.problems, ["an unload names an app through any of its ids (?model= or /m/<id>/), "
+                                   "compares the RESOLVED apps (two ids of one app agree, an id of another "
+                                   "app is 400), an unknown id is 404, no target stops the resident app"]
+
+
+GU_FUNCS = (u1, u2, u3, u4, u5, u6, u7, u8, u9, u10, u11, u12, u13, u14, u15, u16, u17, u18, u19, u20)
 
 
 @_q_live
@@ -7967,6 +8780,7 @@ GE_CASES = (
     "E2 swap through two prefixes",
     "E3 forced unload, 529 relayed",
     "E4 wrong key: 502, no start",
+    "E5 chat/image/embedding, FIFO",
 )
 
 LLM_SERVER = H.repo_path("Scripts", "llm-router.py")
@@ -8185,12 +8999,88 @@ def e4(mod, sandbox, names, optional):
                                    "to the client, no child started, no key echoed"]
 
 
-GE_FUNCS = (e1, e2, e3, e4)
+E_HOLD_S = 1.0     # e5: the sd stub's answer delay, so the llm and the second image request queue behind it
+
+
+@_q_live
+def e5(_mod, sandbox, names, optional):
+    """Step 11 (SC-2): chat, image and embedding requests interleave with the right app started
+    for each, in strict FIFO across the two apps (A, L, A) with a swap each way; GET /v1/models
+    lists every configured id before and after a swap.  No llm-router here: the raw llm kind lives in
+    stage 3, so the client speaks to the live front directly."""
+    names.extend(("A", "L"))
+    mod, why = load_module("e5")
+    if mod is None:
+        return [why], []
+    problems = []
+    models = {"A": _p_entry(sandbox, "A", "--answer-delay", str(E_HOLD_S)), "L": _p_llm_entry(sandbox, "L")}
+    ids = ["A"] + list(LLM_IDS)
+    with _p_front(mod, sandbox, models) as w:
+        found, entries = _u_models("before any request", _u_get(w.port))
+        problems += found
+        if list(entries) != ids or any(e.get("state") != "stopped" for e in entries.values()):
+            problems.append("before any request /v1/models is %r, expected %r all stopped"
+                            % ({k: v.get("state") for k, v in entries.items()}, ids))
+        b_one, b_emb, b_two = _p_body("e5-a1"), _p_body("e5-l", model="bge-m3"), _p_body("e5-a2")
+        socks, readers = [], []
+        try:
+            socks.append(_p_open(w.port, _p_head(w.port, "POST", _p_m("A", P_GEN), length=len(b_one)) + b_one))
+            first = wait_events(sandbox, "request", 1, "A")
+            if first is None:
+                return problems + ["the first image request never reached A"], []
+            pid_a = first[0].get("pid")
+            socks.append(_p_open(w.port, _p_head(w.port, "POST", "/v1/embeddings", length=len(b_emb)) + b_emb))
+            if not w.settled(2, queued=1):
+                problems.append("the embeddings request is not queued behind A (admitted %d, queued %d)"
+                                % (w.admitted(), w.queued()))
+            socks.append(_p_open(w.port, _p_head(w.port, "POST", _p_m("A", P_GEN), length=len(b_two)) + b_two))
+            if not w.settled(3, queued=2):
+                problems.append("the second image request is not queued (admitted %d, queued %d)"
+                                % (w.admitted(), w.queued()))
+            readers = [_UReader(sock, pid_a if index == 1 else None) for index, sock in enumerate(socks)]
+            for reader in readers:
+                reader.start()
+            resps = [reader.result() for reader in readers]
+        finally:
+            for sock in socks:
+                sock.close()
+        problems += _p_relayed("the first image request", resps[0], b_one, sandbox, "A", P_GEN)
+        problems += _p_relayed("the embeddings request", resps[1], b_emb, sandbox, "L", "/v1/embeddings")
+        problems += _p_relayed("the second image request", resps[2], b_two, sandbox, "A", P_GEN)
+        ends = [reader.at for reader in readers]
+        if None in ends or not ends[0] < ends[1] < ends[2]:
+            problems.append("the answers did not arrive in submission order (A, L, A): %r" % (ends,))
+        if readers and readers[1].alive:
+            problems.append("A's first child (pid %d) was alive when L answered: two apps resident" % pid_a)
+        starts = (len(read_starts(sandbox, "A")), len(read_starts(sandbox, "L")))
+        if starts != (2, 1):
+            problems.append("A and L started %r times, expected (2, 1): A, swap to L, swap back" % (starts,))
+        found, entries = _u_models("after A, L, A", _u_get(w.port))
+        problems += found
+        if (entries.get("A", {}).get("state"), {entries.get(i, {}).get("state") for i in LLM_IDS}) \
+                != ("ready", {"stopped"}):
+            problems.append("after A, L, A /v1/models says %r" % ({k: v.get("state") for k, v in entries.items()},))
+        chat = _p_body("e5-chat", model="Qwen3.8-Flash-Next")
+        problems += _p_relayed("a chat request by body model", _p_post(w.port, "/v1/chat/completions", chat),
+                               chat, sandbox, "L", "/v1/chat/completions")
+        found, entries = _u_models("after the chat swap", _u_get(w.port))
+        problems += found
+        if (entries.get("A", {}).get("state"), {entries.get(i, {}).get("state") for i in LLM_IDS}) \
+                != ("stopped", {"ready"}):
+            problems.append("after the chat swap /v1/models says %r" % ({k: v.get("state") for k, v in entries.items()},))
+        if not w.settled(0):
+            problems.append("admitted %d at the end, expected 0" % w.admitted())
+    return problems + w.problems, ["image, embeddings, image queued behind a held A: answered in order, "
+                                   "A stopped before L answered, starts A 2 / L 1; a chat request swaps "
+                                   "back to L; /v1/models follows the resident app"]
+
+
+GE_FUNCS = (e1, e2, e3, e4, e5)
 
 
 def group_e2e(suite, fixture_root):
     absent = ["%s does not exist" % os.path.relpath(path, H.REPO_ROOT)
-              for path in (SERVER, LLM_SERVER, STUB) if not os.path.isfile(path)]
+              for path in (SERVER, LLM_SERVER, STUB, STUB_LLM) if not os.path.isfile(path)]
     for cid, fn in zip(GE_CASES, GE_FUNCS):
         if absent:
             suite.record(GE, cid, absent)
@@ -8218,9 +9108,12 @@ def group_e2e(suite, fixture_root):
 # D-1, H5, NFR, final security 3):
 #   A1  ONE upstream send site.  An HTTPConnection is built only in `_sd_send`
 #       (the relay, unit 5) and in the readiness probe `_sd_probe_status`, whose
-#       only request is the literal `GET /` (DEVIATION from the plan's "only
-#       _sd_send": the probe predates this gate and sends no client byte; it is
-#       declared here rather than refused).  `_sd_send` is defined once and
+#       only request is `GET <path>`: the literal method GET and the path
+#       literal "/" or the probe's own `path` parameter (stage 2a Step 9 relaxed
+#       the first form, "literal GET /", narrowly: the path is the app's
+#       configured ready_path, never a client byte; DEVIATION from the plan's
+#       "only _sd_send": the probe predates this gate and sends no client byte;
+#       it is declared here rather than refused).  `_sd_send` is defined once and
 #       called from exactly one site; a socket connect happens only in
 #       `_sd_connect` (called only by `_sd_send`) and the probe.
 #   A2  No `shell=` other than a literal False, no os.system / os.popen /
@@ -8443,9 +9336,17 @@ def a1(ctx):
     for call in _a_calls(ctx.tree, ("request",)):
         if _a_leaf(ctx.owners.get(id(call), "")) != "_sd_probe_status":
             continue
-        args = [a.value if isinstance(a, ast.Constant) else None for a in call.args[:2]]
-        if args != ["GET", "/"]:
-            problems.append("%d: the readiness probe sends something other than GET /" % call.lineno)
+        # Step 9 (deviation from the first form of this gate, "literal GET /"): the method is the
+        # literal "GET"; the path is the literal "/" or the probe's own `path` parameter, which
+        # the supervisor fills from the app's configured ready_path (never from a client).
+        method, target = (list(call.args) + [None, None])[:2]
+        probe = _a_enclosing_def(ctx.tree, call)
+        params = {arg.arg for arg in probe.args.args} if probe is not None else set()
+        is_get = isinstance(method, ast.Constant) and method.value == "GET"
+        is_path = (isinstance(target, ast.Constant) and target.value == "/") \
+            or (isinstance(target, ast.Name) and target.id == "path" and "path" in params)
+        if not (is_get and is_path):
+            problems.append("%d: the readiness probe sends something other than GET <path>" % call.lineno)
     for call in _a_calls(ctx.tree, A_CONNECT_CALLS):
         owner = _a_leaf(ctx.owners.get(id(call), ""))
         if owner not in A_CONNECT_OWNERS:
@@ -8456,7 +9357,7 @@ def a1(ctx):
             if owner != "_sd_send":
                 problems.append("%d: _sd_connect called from %s, not _sd_send" % (call.lineno, owner))
     return problems, ["send site   : _sd_send (unit 5), called from %s" % ", ".join(callers),
-                      "declared    : the readiness probe _sd_probe_status (GET / only)"]
+                      "declared    : the readiness probe _sd_probe_status (GET <path>, path = ready_path)"]
 
 
 def a2(ctx):
@@ -8565,7 +9466,7 @@ def a7(ctx):
 
 def a8(ctx):
     problems = []
-    for path in (SERVER, STUB):
+    for path in (SERVER, STUB, STUB_LLM):
         rel = os.path.relpath(path, H.REPO_ROOT)
         if not os.path.isfile(path):
             problems.append("%s does not exist" % rel)
@@ -8576,7 +9477,8 @@ def a8(ctx):
             ast.parse(text, filename=rel, feature_version=(3, 9))
         except SyntaxError as exc:
             problems.append("%s does not parse as Python 3.9: line %s" % (rel, exc.lineno))
-    return problems, ["parsed      : Scripts/gpu-router.py, tests/files/gpu_router/tf_stub_sd.py at (3, 9)"]
+    return problems, ["parsed      : Scripts/gpu-router.py, tests/files/gpu_router/tf_stub_sd.py, "
+                      "tests/files/gpu_router/tf_stub_llm.py at (3, 9)"]
 
 
 def _a_dict_keys(value):

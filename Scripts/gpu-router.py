@@ -3,14 +3,16 @@
 # requires-python = ">=3.9"
 # dependencies = []
 # ///
-"""gpu-router: a supervisor and reverse proxy for stable-diffusion.cpp `sd-server`.
+"""gpu-router: a supervisor and reverse proxy for a GPU's apps -- stable-diffusion.cpp
+`sd-server` (kind "sd") and inferNO-style LLM engines (kind "llm").
 
-One router instance owns one GPU. Its JSON config declares models; per model it
-spawns an sd-server child from config data (argv list, never a shell), proxies
-image requests to it, restarts it on a crash, swaps models when the queue head
-targets another one, and stops it on /v1/unload to free VRAM. Strict FIFO, ONE
-request in flight regardless of model; a cold start or a swap blocks and waits.
-Requires only Python 3.9+ stdlib modules.
+One router instance owns one GPU. Its JSON config declares APPS under `models`; an
+app is one child process that serves one or more model ids. Per app it spawns the
+child from config data (argv list, never a shell), proxies requests to it, restarts
+it on a crash, swaps apps when the queue head targets another one, and stops it on
+/v1/unload to free VRAM. Strict FIFO, ONE request in flight regardless of app; a
+cold start or a swap blocks and waits. Answers are buffered (stage 2a; streaming
+is a later stage). Requires only Python 3.9+ stdlib modules.
 
 Config grammar (one 0600 JSON file owned by you, read through --config)
 -----------------------------------------------------------------------
@@ -28,7 +30,18 @@ Config grammar (one 0600 JSON file owned by you, read through --config)
         "start_timeout": 120,             optional; seconds, (1, 3600]
         "stop_grace": 5,                  optional; seconds, (0, 60]
         "retries": 1,                     optional; ADDITIONAL sends, 0..3
-        "request_timeout": 600            optional; seconds, (1, 7200]
+        "request_timeout": 600,           optional; seconds, sd (1, 7200] default 600,
+                                          llm (1, 604800] default 86400
+        "kind": "sd",                     optional; "sd" (default) or "llm"
+        "model_ids": ["id", ...],         the ids this app serves; required, non-empty
+                                          for llm; sd without it is addressed by its name
+        "ready_path": "/",                optional; the readiness probe path (llm
+                                          default /v1/models)
+        "ready_status": 200,              optional; ready only on exactly this status
+                                          (default: sd any but 503, llm 200)
+        "head_timeout": 1800,             llm only; "idle_timeout": 1800, llm only
+        "child_port": 9000                optional; a fixed child port (no pick, no
+                                          collision retry); never the listener's port
       }
     },
     "bind": "127.0.0.1",                  optional; an IP literal or hostname, as --bind
@@ -51,14 +64,21 @@ Config grammar (one 0600 JSON file owned by you, read through --config)
 Routes (every route requires the bearer)
 ----------------------------------------
   POST /v1/images/generations, /v1/images/edits, /sdapi/v1/txt2img,
-       /sdapi/v1/img2img -- each also under /m/<model>/. The /m/<model>/ prefix
-       is authoritative; without it the body `model` (JSON, or a multipart form
-       field, canonical forms only) selects the model; /sdapi/* needs the prefix.
-       Request and answer bodies are forwarded byte-exact (sd_cpp_extra_args too).
-  GET  /v1/models -- the configured models and their state.
-  POST /v1/unload[?model=<name>][&force=1], /m/<model>/v1/unload -- queued by
-       default (200 only after the child process group is verified gone);
-       ?force=1 is immediate and aborts a running request for that model only.
+       /sdapi/v1/img2img (kind sd) and /v1/chat/completions, /v1/messages,
+       /v1/embeddings, /v1/rerank (kind llm) -- each also under /m/<x>/, where x
+       is an app name or any of its model ids. The /m/<x>/ prefix is
+       authoritative; without it the body `model` (JSON, or a multipart form
+       field, canonical forms only) selects the app; /sdapi/* needs the prefix.
+       A route of the other kind is 404. Request and answer bodies are forwarded
+       byte-exact (sd_cpp_extra_args too); chat/messages bodies are capped at
+       16 MiB and embeddings/rerank at 4 MiB (min with body_limit); the chat
+       kind also forwards one anthropic-version / anthropic-beta header each.
+  GET  /v1/models -- every configured model id (static, nothing is started) with
+       its app's state; modality image (sd) or chat (llm).
+  POST /v1/unload[?model=<id>][&force=1], /m/<id>/v1/unload -- the target is the
+       app owning the id; queued by default (200 only after the child process
+       group is verified gone); ?force=1 is immediate and aborts a running
+       request for that app only. No target: the resident app.
   Everything else: 404 route_not_found.
 
 Closed error table: {"error": {"message", "type", "code"}}
@@ -85,7 +105,7 @@ Layout: one file, nine units, in file order (`# ---- unit N ----`)
   6. scheduler runtime -- the single scheduler thread, the Condition, tickets.
   7. HTTP front -- generated from Scripts/_mcp_httpfront.py plus declared
      hand-written adaptations.
-  8. handlers -- image routes, /v1/models, /v1/unload, the error table.
+  8. handlers -- the routed requests, /v1/models, /v1/unload, the error table.
   9. main, signals, shutdown.
   Units 1-3 reference no socket, subprocess, http or threading name.
 
@@ -115,7 +135,10 @@ Declared limits (ADR 0034 carries the full list)
   * The port/host flag check is a deny-list over flag names; readiness (a live
     child answering on the substituted port) is the real safety mechanism.
   * The free port is picked by bind-and-close; the race is mitigated by the
-    child-liveness readiness rule, not removed.
+    child-liveness readiness rule and a liveness check right before each send,
+    not removed (child_port removes it for an app that sets one).
+  * An llm app's request_timeout aborts the request without killing the child;
+    whether the engine stops generating on the closed connection is its own.
   * No TLS; --allow-remote needs --insecure-cleartext. The control-route
     connection reserve only mitigates unauthenticated slot holders.
   * No keep-alive, Content-Length required (chunked refused 411), no restart
@@ -274,20 +297,61 @@ _SD_TOP_KEYS = ("token", "models", "bind", "port", "allow_remote", "insecure_cle
 _SD_DEFAULT_BIND = "127.0.0.1"
 _SD_DEFAULT_PORT = 0
 _SD_MODEL_KEYS = ("command", "args", "env", "cwd", "start_timeout", "stop_grace", "retries",
-                  "request_timeout")
+                  "request_timeout", "kind", "model_ids", "ready_path", "ready_status",
+                  "head_timeout", "idle_timeout", "child_port")
 # key -> (default, low, high): the range is (low, high], low exclusive, high inclusive.
+# request_timeout is NOT here: its default and ceiling are per kind (_SD_KIND_DEFAULTS).
 _SD_MODEL_FLOATS = {
     "start_timeout": (120.0, 1.0, 3600.0),
     "stop_grace": (5.0, 0.0, 60.0),
-    "request_timeout": (600.0, 1.0, 7200.0),
 }
 _SD_RETRIES_DEFAULT = 1
 _SD_RETRIES_MAX = 3
+_SD_KINDS = ("sd", "llm")
+_SD_KIND_DEFAULT = "sd"
+# A readiness probe path: origin-form, no query and no fragment, printable and without spaces.
+_SD_READY_PATH_RE = re.compile(r"/[A-Za-z0-9._~!$&'()*+,;=:@%/-]{0,255}")
+_SD_CHILD_PORT_RANGE = (1, 65535)
+
+
+class _SdKindRow(NamedTuple):
+    """Everything that differs between the app kinds, in ONE row per kind (no `if kind ==`
+    branches scattered over the units)."""
+
+    modality: str  # the /v1/models modality of the kind's ids
+    route_tokens: Tuple[str, ...]  # the ROUTES kind tokens an app of this kind accepts
+    ids_required: bool  # model_ids must be given (a non-empty list)
+    start_timeout: float  # the default start_timeout, seconds (the range is the same for both)
+    request_timeout: float  # the default request_timeout, seconds
+    request_cap: float  # the request_timeout ceiling: the range is (1, request_cap]
+    deadlines: bool  # head_timeout / idle_timeout are accepted (kind llm only)
+    head_timeout: Optional[float]  # their defaults when accepted
+    idle_timeout: Optional[float]
+    ready_path: str  # the readiness probe path
+    ready_status: Optional[int]  # the status that means ready; None = anything but 503
+    # request_timeout expiry: True = the ladder kills the child, a crash is charged and the
+    # ticket gets 504 (sd, as ever); False = a no-kill abort (llm): the upstream socket is
+    # closed, 504 upstream_timeout, the child stays READY, nothing is charged (owner decision:
+    # a kill throws away a 20-60 s model load).
+    timeout_kills: bool = True
+
+
+# sd: today's behaviour, byte-compatible.  llm: one inferNO-style process serving several ids;
+# ready on HTTP 200 of /v1/models only (it does not listen while it loads); the large deadline
+# defaults are owner-confirmed as "big" and the numbers are a suggestion (ADR 0035).
+_SD_KIND_DEFAULTS: Mapping[str, _SdKindRow] = types.MappingProxyType({
+    "sd": _SdKindRow("image", ("openai", "sdapi"), False, 120.0, 600.0, 7200.0,
+                     False, None, None, "/", None, True),
+    "llm": _SdKindRow("chat", ("chat", "embed"), True, 120.0, 86400.0, 604800.0,
+                      True, 1800.0, 1800.0, "/v1/models", 200, False),
+})
+_SD_DEADLINE_CAP = 604800.0  # head_timeout / idle_timeout ceiling, seconds: (0, cap]
 
 
 @dataclasses.dataclass(frozen=True, repr=False)
 class ModelSpec:
-    """One configured model: how to launch its sd-server child. `env` values are never in repr."""
+    """One configured app: how to launch its child (one process, one or more model ids).
+    `env` values are never in repr. The name is the APP name; the scheduler keys on it."""
 
     name: str  # [A-Za-z0-9._~-]{1,64}
     command: str  # absolute, a regular executable file at load
@@ -297,14 +361,25 @@ class ModelSpec:
     start_timeout: float = 120.0  # (1, 3600]
     stop_grace: float = 5.0  # (0, 60]
     retries: int = 1  # 0..3, ADDITIONAL sends: retries=1 => at most 2 sends
-    request_timeout: float = 600.0  # (1, 7200]; dispatch -> full answer buffered (H7)
+    request_timeout: float = 600.0  # sd (1, 7200], llm (1, 604800]; dispatch -> full answer (H7)
+    # Stage 2a (all defaulted: an existing sd config is unchanged; see _SD_KIND_DEFAULTS):
+    kind: str = "sd"  # "sd" | "llm"
+    model_ids: Tuple[str, ...] = ()  # the static ids this app serves; () = addressed by its name
+    ready_path: str = "/"  # the readiness probe path (llm default /v1/models)
+    ready_status: Optional[int] = None  # None = any status but 503; else exactly this one
+    head_timeout: Optional[float] = None  # llm only: no response head within this
+    idle_timeout: Optional[float] = None  # llm only: no byte within this
+    child_port: Optional[int] = None  # a fixed child port; None = a free port is picked
 
     def __repr__(self) -> str:
         env_keys = ", ".join("%s=<redacted>" % key for key, _value in self.env)
         return ("ModelSpec(name=%r, command=%r, args=<%d items>, env={%s}, cwd=%r, start_timeout=%r, "
-                "stop_grace=%r, retries=%r, request_timeout=%r)"
+                "stop_grace=%r, retries=%r, request_timeout=%r, kind=%r, model_ids=%r, ready_path=%r, "
+                "ready_status=%r, head_timeout=%r, idle_timeout=%r, child_port=%r)"
                 % (self.name, self.command, len(self.args), env_keys, self.cwd, self.start_timeout,
-                   self.stop_grace, self.retries, self.request_timeout))
+                   self.stop_grace, self.retries, self.request_timeout, self.kind, self.model_ids,
+                   self.ready_path, self.ready_status, self.head_timeout, self.idle_timeout,
+                   self.child_port))
 
     __str__ = __repr__
 
@@ -323,12 +398,17 @@ class Settings:
     port: int = _SD_DEFAULT_PORT
     allow_remote: bool = False
     insecure_cleartext: bool = False
+    # model id (or app name) -> app name, built and checked by parse_config; read at the edges
+    # only (routing, unload, /v1/models). Names and ids only: never a token or an env value.
+    model_index: Mapping[str, str] = dataclasses.field(
+        default_factory=lambda: types.MappingProxyType({}))
 
     def __repr__(self) -> str:
-        return ("Settings(token=<redacted>, models=[%s], bind=%r, port=%r, allow_remote=%r, "
-                "insecure_cleartext=%r, body_limit=%r, max_connections=%r, response_limit=%r)"
-                % (", ".join(repr(name) for name in self.models), self.bind, self.port,
-                   self.allow_remote, self.insecure_cleartext, self.body_limit,
+        return ("Settings(token=<redacted>, models=[%s], model_index=%r, bind=%r, port=%r, "
+                "allow_remote=%r, insecure_cleartext=%r, body_limit=%r, max_connections=%r, "
+                "response_limit=%r)"
+                % (", ".join(repr(name) for name in self.models), dict(self.model_index), self.bind,
+                   self.port, self.allow_remote, self.insecure_cleartext, self.body_limit,
                    self.max_connections, self.response_limit))
 
     __str__ = __repr__
@@ -474,8 +554,22 @@ def _sd_cfg_model(name: str, entry: Any, where: str) -> ModelSpec:
         _sd_cfg_no_nul(cwd, f"{where}.cwd")
         if not os.path.isdir(cwd):
             raise ConfigError(f"{where}.cwd: must be an existing directory")
+    kind = entry.get("kind", _SD_KIND_DEFAULT)
+    if not isinstance(kind, str) or kind not in _SD_KIND_DEFAULTS:
+        raise ConfigError(f"{where}.kind: must be one of {', '.join(_SD_KINDS)}")
+    row = _SD_KIND_DEFAULTS[kind]
     floats: Dict[str, float] = {}
-    for key, (default, low, high) in _SD_MODEL_FLOATS.items():
+    limits = dict(_SD_MODEL_FLOATS)
+    limits["start_timeout"] = (row.start_timeout, 1.0, 3600.0)
+    limits["request_timeout"] = (row.request_timeout, 1.0, row.request_cap)
+    if row.deadlines:
+        limits["head_timeout"] = (row.head_timeout, 0.0, _SD_DEADLINE_CAP)
+        limits["idle_timeout"] = (row.idle_timeout, 0.0, _SD_DEADLINE_CAP)
+    else:
+        for key in ("head_timeout", "idle_timeout"):
+            if key in entry:
+                raise ConfigError(f"{where}.{key}: only for kind llm")
+    for key, (default, low, high) in limits.items():
         value = entry.get(key, default)
         if not _sd_is_number(value) or not low < value <= high:
             raise ConfigError(f"{where}.{key}: must be a number of seconds in ({low:g}, {high:g}]")
@@ -483,9 +577,66 @@ def _sd_cfg_model(name: str, entry: Any, where: str) -> ModelSpec:
     retries = entry.get("retries", _SD_RETRIES_DEFAULT)
     if isinstance(retries, bool) or not isinstance(retries, int) or not 0 <= retries <= _SD_RETRIES_MAX:
         raise ConfigError(f"{where}.retries: must be an integer in 0..{_SD_RETRIES_MAX} (additional sends)")
+    model_ids = _sd_cfg_model_ids(entry["model_ids"], f"{where}.model_ids") if "model_ids" in entry else ()
+    if row.ids_required and not model_ids:
+        raise ConfigError(f"{where}.model_ids: required for kind {kind}, a non-empty list of model ids")
+    ready_path = entry.get("ready_path", row.ready_path)
+    if not isinstance(ready_path, str) or not _SD_READY_PATH_RE.fullmatch(ready_path):
+        raise ConfigError(f"{where}.ready_path: must be an origin-form path starting with / "
+                          f"(no query, no fragment, no space, at most 256 characters)")
+    ready_status = row.ready_status
+    if "ready_status" in entry:
+        ready_status = _sd_cfg_int_range(entry["ready_status"], f"{where}.ready_status", 100, 599)
+    child_port = None
+    if "child_port" in entry:
+        child_port = _sd_cfg_int_range(entry["child_port"], f"{where}.child_port", *_SD_CHILD_PORT_RANGE)
     return ModelSpec(name=name, command=command, args=args, env=env, cwd=cwd,
                      start_timeout=floats["start_timeout"], stop_grace=floats["stop_grace"],
-                     retries=retries, request_timeout=floats["request_timeout"])
+                     retries=retries, request_timeout=floats["request_timeout"], kind=kind,
+                     model_ids=model_ids, ready_path=ready_path, ready_status=ready_status,
+                     head_timeout=floats.get("head_timeout"), idle_timeout=floats.get("idle_timeout"),
+                     child_port=child_port)
+
+
+def _sd_cfg_model_ids(value: Any, where: str) -> Tuple[str, ...]:
+    """`model_ids`: a list of distinct ids of the model-name form; a refusal names the key and
+    the rule, never an id."""
+    if not isinstance(value, list):
+        raise ConfigError(f"{where}: must be a list of model ids ([A-Za-z0-9._~-]{{1,64}})")
+    for index, item in enumerate(value):
+        if not isinstance(item, str) or not _SD_MODEL_NAME_RE.fullmatch(item):
+            raise ConfigError(f"{where}[{index}]: must be a model id matching [A-Za-z0-9._~-]{{1,64}}")
+    if len(set(value)) != len(value):
+        raise ConfigError(f"{where}: an id appears more than once")
+    return tuple(value)
+
+
+def _sd_cfg_index(models: Mapping[str, ModelSpec], where: str) -> Dict[str, str]:
+    """The model id (or app name) -> app name index, with the identity rules: an id is served
+    by ONE app and equals no OTHER app's name."""
+    index: Dict[str, str] = {name: name for name in models}
+    for name, spec in models.items():
+        for model_id in spec.model_ids:
+            if model_id == name:
+                continue
+            if model_id in index:
+                raise ConfigError(f"{where}: models.{name}.model_ids: an id is shared by two apps or "
+                                  f"equals another app's name")
+            index[model_id] = name
+    return index
+
+
+def _sd_cfg_child_ports(models: Mapping[str, ModelSpec], listener_port: int, where: str) -> None:
+    """A fixed child_port differs from the listener port and from every other app's."""
+    seen: Dict[int, str] = {}
+    for name, spec in models.items():
+        if spec.child_port is None:
+            continue
+        if spec.child_port == listener_port:
+            raise ConfigError(f"{where}: models.{name}.child_port: must differ from the listener port")
+        if spec.child_port in seen:
+            raise ConfigError(f"{where}: models.{name}.child_port: must differ from another app's child_port")
+        seen[spec.child_port] = name
 
 
 def parse_config(raw: object, where: str = "config") -> Settings:
@@ -526,9 +677,12 @@ def parse_config(raw: object, where: str = "config") -> Settings:
     if "max_connections" in raw:
         max_connections = _sd_cfg_int_range(raw["max_connections"], f"{where}: max_connections",
                                             *_SD_CONNECTIONS_RANGE)
+    index = _sd_cfg_index(models, where)
+    _sd_cfg_child_ports(models, port, where)
     return Settings(token=token, models=types.MappingProxyType(models), body_limit=body_limit,
                     max_connections=max_connections, response_limit=response_limit, bind=bind,
-                    port=port, allow_remote=allow_remote, insecure_cleartext=insecure_cleartext)
+                    port=port, allow_remote=allow_remote, insecure_cleartext=insecure_cleartext,
+                    model_index=types.MappingProxyType(index))
 
 
 def render_args(spec: ModelSpec, host: str, port: int) -> List[str]:
@@ -712,15 +866,28 @@ def _sd_parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
 
 _SD_ROUTE_METHOD = "POST"
 _SD_PREFIX = "/m/"
-# allowlisted upstream path -> kind; "openai" may take the body model, "sdapi" the prefix only
+# allowlisted upstream path -> kind token; "sdapi" takes the /m/<x>/ prefix only, every other
+# token ("openai" images, "chat", "embed") may take the body model. The token also decides
+# which app kind accepts the route (_SdKindRow.route_tokens) and the body cap (_SD_KIND_BODY_CAPS).
 ROUTES: Mapping[str, str] = types.MappingProxyType({
     "/v1/images/generations": "openai",
     "/v1/images/edits": "openai",
     "/sdapi/v1/txt2img": "sdapi",
     "/sdapi/v1/img2img": "sdapi",
+    "/v1/chat/completions": "chat",
+    "/v1/messages": "chat",
+    "/v1/embeddings": "embed",
+    "/v1/rerank": "embed",
 })
 # path -> the very key object of ROUTES, so a Target never carries the client's string
 _SD_ROUTE_KEYS: Mapping[str, str] = types.MappingProxyType({path: path for path in ROUTES})
+# The request-body cap of a ROUTES KIND TOKEN (never of a path: gate A10 keeps ONE path-keyed
+# table). 16 MiB chat/messages, 4 MiB embeddings/rerank (owner-unconfirmed numbers; raise by
+# editing the value). The image tokens have no entry and keep the configured body_limit.
+_SD_KIND_BODY_CAPS: Mapping[str, int] = types.MappingProxyType({
+    "chat": 16 * 1024 * 1024,
+    "embed": 4 * 1024 * 1024,
+})
 
 _SD_SNIFF_LIMIT = 64 * 1024  # leading body bytes the sniffer reads, at most
 _SD_SNIFF_PART_CAP = 64  # multipart parts scanned, at most (llm-router _RT_IMAGE_PART_CAP)
@@ -758,15 +925,32 @@ class SniffError(Exception):
 _SD_NO_ROUTE = RouteError("route_not_found", "no such route")
 
 
+def _sd_body_cap(upstream: str, body_limit: int) -> int:
+    """The request-body cap of the ROUTES path *upstream*: min(its kind token's entry in
+    _SD_KIND_BODY_CAPS, *body_limit*); a route whose token has no entry (the image routes)
+    keeps *body_limit*. PURE."""
+    cap = _SD_KIND_BODY_CAPS.get(ROUTES.get(upstream, ""))
+    return body_limit if cap is None else min(cap, body_limit)
+
+
+def _sd_kind_accepts(kind: str, upstream: str) -> bool:
+    """True when an app of *kind* serves the ROUTES path *upstream* (its token is one of the
+    kind's route tokens). False for an unknown kind or an unrouted path. PURE."""
+    row = _SD_KIND_DEFAULTS.get(kind)
+    token = ROUTES.get(upstream)
+    return row is not None and token is not None and token in row.route_tokens
+
+
 def _sd_route_head(method: str, raw_path: str,
                    models: Any) -> Union[Tuple[Optional[str], str], RouteError]:
-    """(prefix model or None, upstream path) of an image request, or a RouteError: every
+    """(prefix model or None, upstream path) of a routed request, or a RouteError: every
     routing decision that needs no body, so the handler can take it before admission.
 
-    Order: the path (an exact ROUTES key, bare or after /m/<model>/; any `%`, `//`, `.`
-    or `..` segment is 404), the method (405), the query (an image route takes none,
-    400), the prefix model (exact membership in *models*, 404 model_unknown), and an
-    "sdapi" route without a prefix (400 model_required)."""
+    *models* is a container of the names a prefix may use: the pipeline passes
+    Settings.model_index (model ids and app names). Order: the path (an exact ROUTES key,
+    bare or after /m/<model>/; any `%`, `//`, `.` or `..` segment is 404), the method (405),
+    the query (a route takes none, 400), the prefix model (exact membership in *models*,
+    404 model_unknown), and an "sdapi" route without a prefix (400 model_required)."""
     path, qmark, _query = raw_path.partition("?")
     if "%" in path or "//" in path or any(seg in (".", "..") for seg in path.split("/")):
         return _SD_NO_ROUTE
@@ -781,9 +965,9 @@ def _sd_route_head(method: str, raw_path: str,
     if upstream is None:
         return _SD_NO_ROUTE
     if method != _SD_ROUTE_METHOD:
-        return RouteError("method_not_allowed", "an image route takes POST only")
+        return RouteError("method_not_allowed", "a route takes POST only")
     if qmark:
-        return RouteError("invalid_request", "an image route takes no query string")
+        return RouteError("invalid_request", "a route takes no query string")
     if model is not None:
         if model not in models:
             return RouteError("model_unknown", "the /m/<model>/ prefix names no configured model")
@@ -795,7 +979,7 @@ def _sd_route_head(method: str, raw_path: str,
 
 def route_request(method: str, raw_path: str, content_type: str, body: bytes,
                   models: Any) -> Union[Target, RouteError]:
-    """Target or RouteError for one image request; PURE, never raises for a bad request.
+    """Target or RouteError for one routed request; PURE, never raises for a bad request.
 
     The /m/<model>/ prefix is authoritative and the body is then not looked at (D-11);
     without it the body model (sniff_model) chooses: a refused body is 400
@@ -1325,10 +1509,13 @@ def _sd_child_env(spec: ModelSpec) -> Dict[str, str]:
     return env
 
 
-def _sd_probe_status(port: int, deadline: float, stop: threading.Event) -> Optional[int]:
+def _sd_probe_status(port: int, deadline: float, stop: threading.Event,
+                     path: str = "/") -> Optional[int]:
     """One readiness probe: a select-tick non-blocking connect (model: mcp-sandbox
-    _default_connector), then a minimal GET / over http.client. The status code, or None
-    when nothing answered (refused, timed out, stopped, malformed)."""
+    _default_connector), then a minimal GET *path* over http.client -- the app's configured
+    ready_path (a config value validated at load: origin-form, no query, no control
+    character), never a client byte. The status code, or None when nothing answered
+    (refused, timed out, stopped, malformed)."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     conn: Optional[http.client.HTTPConnection] = None
     try:
@@ -1354,7 +1541,7 @@ def _sd_probe_status(port: int, deadline: float, stop: threading.Event) -> Optio
         sock.settimeout(timeout)
         conn = http.client.HTTPConnection(_SD_CHILD_HOST, port, timeout=timeout)
         conn.sock = sock  # already connected: http.client must not connect again
-        conn.request("GET", "/", headers={"Connection": "close"})
+        conn.request("GET", path, headers={"Connection": "close"})
         response = conn.getresponse()
         status = int(response.status)
         response.close()
@@ -1395,9 +1582,10 @@ class Supervisor:
         self.registry: set = set()
 
     def start(self, spec: ModelSpec) -> Child:
-        """ONE spawn on a fresh loopback port -- the only Popen in the file. argv is a list
-        (never a shell); the child leads a new session; stdio is DEVNULL."""
-        port = _sd_free_port()
+        """ONE spawn -- the only Popen in the file -- on the app's fixed child_port, else on a
+        fresh loopback port. argv is a list (never a shell); the child leads a new session;
+        stdio is DEVNULL."""
+        port = spec.child_port if spec.child_port is not None else _sd_free_port()
         argv = [spec.command] + render_args(spec, _SD_CHILD_HOST, port)
         proc = subprocess.Popen(argv, shell=False, start_new_session=True,
                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
@@ -1421,16 +1609,20 @@ class Supervisor:
         return code
 
     def wait_ready(self, child: Child, deadline: float, stop: threading.Event) -> bool:
-        """Poll GET / every _SD_READY_TICK_S until any status EXCEPT 503 answers (503 is
-        still loading, H2). True only while the child is alive; False at once when it
-        exits, at *deadline*, or when *stop* is set. It never kills."""
+        """Poll GET <ready_path> of the app's spec every _SD_READY_TICK_S until it is ready:
+        with ready_status None any status EXCEPT 503 (503 is still loading, H2), else exactly
+        that status. True only while OUR child is alive -- liveness is re-checked after the
+        answer, so a foreign listener answering for an exited child is not ready (R4); False
+        at once when it exits, at *deadline*, or when *stop* is set. It never kills."""
+        spec = child.spec
         while True:
             if stop.is_set() or self._poll(child) is not None:
                 return False
             if _sd_now() >= deadline:
                 return False
-            status = _sd_probe_status(child.port, deadline, stop)
-            if status is not None and status != 503:
+            status = _sd_probe_status(child.port, deadline, stop, spec.ready_path)
+            if status is not None and (status != 503 if spec.ready_status is None
+                                       else status == spec.ready_status):
                 return self._poll(child) is None  # liveness re-checked after the answer
             left = deadline - _sd_now()
             if left <= 0:
@@ -1441,10 +1633,11 @@ class Supervisor:
     def launch(self, spec: ModelSpec, deadline: float,
                stop: threading.Event) -> Tuple[str, Optional[Child]]:
         """start() then wait_ready(); an exit within _SD_EARLY_EXIT_S of the spawn is a port
-        collision and respawns on a new port, at most _SD_PORT_TRIES spawns. Outcome
-        "ready" (the live Child), "failed", "timeout" or "stopped" (child None, every
-        group spawned here stopped)."""
-        tries = _SD_PORT_TRIES
+        collision and respawns on a new port, at most _SD_PORT_TRIES spawns -- unless the app
+        has a fixed child_port: there is no collision to retry, so an early exit is ONE spawn
+        and "failed". Outcome "ready" (the live Child), "failed", "timeout" or "stopped"
+        (child None, every group spawned here stopped)."""
+        tries = 1 if spec.child_port is not None else _SD_PORT_TRIES
         for attempt in range(1, tries + 1):
             try:
                 child = self.start(spec)
@@ -1574,14 +1767,37 @@ class UpstreamError(Exception):
         self.kind = kind
 
 
-def _sd_forward_headers(headers: Sequence[Tuple[str, str]]) -> Tuple[Tuple[str, str], ...]:
-    """The client headers that may cross the proxy hop: the FIRST Content-Type only (D-9).
+# Extra client headers that cross the hop, by ROUTES kind token (never by path): the chat
+# kind forwards Anthropic's two protocol headers (A-6). Each is single, at most
+# _SD_FORWARD_VALUE_MAX printable ASCII characters (the front refuses anything else, R7).
+_SD_KIND_FORWARD: Mapping[str, Tuple[str, ...]] = types.MappingProxyType({
+    "chat": ("anthropic-version", "anthropic-beta"),
+})
+_SD_FORWARD_VALUE_MAX = 256
+_SD_FORWARD_VALUE_RE = re.compile(r"[\x21-\x7e][\x20-\x7e]{0,%d}" % (_SD_FORWARD_VALUE_MAX - 1))
+
+
+def _sd_forward_headers(headers: Sequence[Tuple[str, str]],
+                        path: Optional[str] = None) -> Tuple[Tuple[str, str], ...]:
+    """The client headers that may cross the proxy hop: the FIRST Content-Type (D-9) and,
+    for a *path* whose ROUTES kind token has an entry in _SD_KIND_FORWARD, the first
+    occurrence of each of those headers (stripped; the image routes and no path get none).
     Authorization, Cookie, Host, Expect, Content-Length and every hop-by-hop header are
     dropped; Content-Length, Host, Accept and Accept-Encoding are set by _sd_send itself."""
+    extra = _SD_KIND_FORWARD.get(ROUTES.get(path, ""), ()) if path is not None else ()
+    ctype: Optional[Tuple[str, str]] = None
+    found: Dict[str, str] = {}
     for name, value in headers:
-        if isinstance(name, str) and name.strip().lower() == "content-type":
-            return (("Content-Type", str(value)),)
-    return ()
+        if not isinstance(name, str):
+            continue
+        low = name.strip().lower()
+        if low == "content-type" and ctype is None:
+            ctype = ("Content-Type", str(value))
+        elif low in extra and low not in found:
+            found[low] = str(value).strip()
+    out = [ctype] if ctype is not None else []
+    out.extend((name, found[name]) for name in extra if name in found)
+    return tuple(out)
 
 
 class _SdWireCapture:
@@ -1718,7 +1934,8 @@ def _sd_send(port: int, method: str, path: str, headers: Sequence[Tuple[str, str
     """The ONE upstream send site: one exchange with the child on 127.0.0.1:*port*.
 
     *method* and *path* come from the route table (never the client's request line);
-    only the client's Content-Type crosses (_sd_forward_headers); the body is sent
+    only the client's Content-Type crosses, plus the anthropic-* pair on the chat kind
+    (_sd_forward_headers, keyed by *path*); the body is sent
     byte-exact with a recomputed Content-Length, Accept: */*, Accept-Encoding:
     identity, Host 127.0.0.1:<port> and Connection: close. *deadline* is absolute on the
     _sd_now() scale; *abort_evt* is checked every tick; on_socket(sock) is called once
@@ -1734,7 +1951,7 @@ def _sd_send(port: int, method: str, path: str, headers: Sequence[Tuple[str, str
         conn.sock = capture  # type: ignore[assignment] -- format only, never connect
         conn.putrequest(method, path, skip_host=True, skip_accept_encoding=True)
         conn.putheader("Host", "%s:%d" % (_SD_CHILD_HOST, port))
-        for name, value in _sd_forward_headers(headers):
+        for name, value in _sd_forward_headers(headers, path):
             conn.putheader(name, value)
         conn.putheader("Accept", "*/*")
         conn.putheader("Accept-Encoding", "identity")
@@ -2000,7 +2217,7 @@ class Scheduler:
                        reservation: Optional[Reservation]) -> Ticket:
         """Queue an image request holding an ALREADY-admitted *reservation* (never admits
         by itself). After shutdown() the ticket comes back finished 503 shutting_down."""
-        ticket = Ticket("request", model, False, method, path, _sd_forward_headers(headers), body,
+        ticket = Ticket("request", model, False, method, path, _sd_forward_headers(headers, path), body,
                         reservation)
         closed = False
         with self.cond:
@@ -2439,6 +2656,10 @@ class Scheduler:
         try:
             if child is None or child.spec.name != target:
                 raise UpstreamError("connect")
+            if self.supervisor._poll(child) is not None:
+                # Our child exited after it was declared ready: whatever listens on its port now
+                # is a stranger (R4). Nothing is sent; this is a crash like any other.
+                raise UpstreamError("connect")
             answer = _sd_send(child.port, head.method or "POST", head.path or "/",
                               head.headers, head.body or b"",
                               _sd_now() + spec.request_timeout, head.abort_evt,
@@ -2460,13 +2681,16 @@ class Scheduler:
         """Classify a failed send by abort_reason (H6, H7, M1). None: a CRASH -- DEAD with
         group_alive True, one Budget charge, the ladder, then the SAME ticket back at the
         head while _sd_may_retry allows, else 502 model_crashed. "timeout" (the deadline
-        from dispatch): one charge, the ladder, 504 upstream_timeout, never retried.
+        from dispatch): kind sd -- one charge, the ladder, 504 upstream_timeout, never
+        retried; kind llm (_SdKindRow.timeout_kills False) -- the upstream socket is already
+        closed, 504 upstream_timeout, the child stays READY, no charge, no ladder.
         "force" / "client" / "shutdown": the ladder only (D-12), never a charge.
         An answer the relay refuses (kind "failed": 1xx, 3xx, encoded, malformed; or
         "too_large": over response_limit) with no abort is NOT a crash: the child
         answered and stays READY, nothing is charged, retried or stopped, and the
         ticket is finished 502 upstream_failed after that one send (closed table, P28)."""
         tripped = False
+        kills = _SD_KIND_DEFAULTS[spec.kind].timeout_kills
         with self.cond:
             head.sock = None
             reason = head.abort_reason
@@ -2480,7 +2704,7 @@ class Scheduler:
             if crash:
                 self._state[target] = ModelState.DEAD
                 self._group_alive[target] = True
-            if crash or reason == "timeout":
+            if crash or (reason == "timeout" and kills):
                 tripped = self._charge_locked(target)
         if refused:
             log.warning("sd upstream answer refused: model=%s kind=%s attempts=%d",
@@ -2489,6 +2713,8 @@ class Scheduler:
             return
         if crash:
             ok = self._ladder(target, after=ModelState.DEAD, stopping=False)
+        elif reason == "timeout" and not kills:
+            ok = True  # a no-kill abort: the socket is closed, the child stays resident and READY
         else:
             ok = self._ladder(target)
         retry = False
@@ -2840,7 +3066,7 @@ class _SdHandler(BaseHTTPRequestHandler):
         other target is unauthenticated client text and may carry a token."""
         path = self._sd_raw_target().split("?", 1)[0]
         settings = getattr(self.server, "settings", None)
-        models = settings.models if settings is not None else {}
+        models = settings.model_index if settings is not None else {}
         rest = path
         prefix = ""
         if path.startswith(_SD_PREFIX):
@@ -2996,13 +3222,17 @@ class _SdHandler(BaseHTTPRequestHandler):
 _SD_CLIENT_POLL_S = 0.5  # the client-gone poll while a ticket waits
 _SD_LENGTH_RE = re.compile(r"[0-9]{1,19}")  # one ASCII decimal Content-Length
 
-# The Content-Types each image route takes (media type, parameters ignored here; the
+# The Content-Types each route takes (media type, parameters ignored here; the
 # sniffer checks a multipart boundary itself).
 _SD_ROUTE_MEDIA: Mapping[str, Tuple[str, ...]] = types.MappingProxyType({
     "/v1/images/generations": ("application/json",),
     "/v1/images/edits": ("application/json", "multipart/form-data"),
     "/sdapi/v1/txt2img": ("application/json",),
     "/sdapi/v1/img2img": ("application/json",),
+    "/v1/chat/completions": ("application/json",),
+    "/v1/messages": ("application/json",),
+    "/v1/embeddings": ("application/json",),
+    "/v1/rerank": ("application/json",),
 })
 
 # The OpenAI `type` of each closed-table status class; every status of the table maps.
@@ -3031,7 +3261,7 @@ _SD_ERROR_TEXT = {
     "unload_forced": "the request was aborted by a forced unload",
     "unload_failed": "a model server process group survived SIGKILL; the GPU is not free",
     "upstream_timeout": "the model server did not answer within request_timeout",
-    "queue_full": "too many image requests queued; retry shortly",
+    "queue_full": "too many requests queued; retry shortly",
     "upstream_failed": "the model server answer could not be relayed",
     "shutting_down": "the router is shutting down",
     "queue_closed": "the router closed the queue",
@@ -3183,31 +3413,38 @@ def _sd_control_body(handler: "_SdHandler") -> Optional[bytes]:
     return _sd_read_body(handler, length, time.monotonic())
 
 
-def _sd_models_entry(name: str, view: ModelView, created: int) -> Dict[str, Any]:
-    """One /v1/models entry: llm-router's image-route keys (id, object, created,
-    owned_by, modality) plus `state` -- "disabled" when the flag is set and the model
-    is not resident, else the ModelState name lower-cased. Never command, args, env,
-    cwd, port or pid."""
+def _sd_models_entry(model_id: str, modality: str, view: ModelView, created: int) -> Dict[str, Any]:
+    """One /v1/models entry for *model_id*: llm-router's route keys (id, object, created,
+    owned_by, modality -- the kind's, from _SD_KIND_DEFAULTS) plus `state` of the OWNING
+    app -- "disabled" when the flag is set and the app is not resident, else the
+    ModelState name lower-cased. Never command, args, env, cwd, port or pid."""
     state = "disabled" if view.disabled and not _sd_is_resident(view) else view.state.name.lower()
-    return {"id": name, "object": "model", "created": created, "owned_by": "gpu-router",
-            "modality": "image", "state": state}
+    return {"id": model_id, "object": "model", "created": created, "owned_by": "gpu-router",
+            "modality": modality, "state": state}
 
 
 def _sd_handle_models(handler: "_SdHandler") -> None:
-    """GET /v1/models: every configured model in config order, its state read from
-    scheduler.states() (one locked snapshot)."""
+    """GET /v1/models: one entry per configured model id of every app, apps in config order
+    (an app without model_ids is listed by its name), each with its app's state read from
+    scheduler.states() (one locked snapshot). Static config: nothing is started or asked."""
     server = handler.server
     views = server.scheduler.states()
     created = server.started_epoch
-    data = [_sd_models_entry(name, views[name], created) for name in server.settings.models]
+    data = []
+    for name, spec in server.settings.models.items():
+        modality = _SD_KIND_DEFAULTS[spec.kind].modality
+        for model_id in spec.model_ids or (name,):
+            data.append(_sd_models_entry(model_id, modality, views[name], created))
     _sd_json_answer(handler, {"object": "list", "data": data})
 
 
 def _sd_handle_unload(handler: "_SdHandler", prefix_model: Optional[str], query: str, body: bytes) -> None:
     """POST /v1/unload and /m/<model>/v1/unload (FR-5, D-5, D-16, D-17).
 
-    Order: the body (empty or exactly `{}`, else 400), the strict query (400), a prefix
-    and a ?model= naming different models (400), an unknown target (404 model_unknown,
+    A target names an APP through any of its model ids (or its name): the handler resolves
+    through Settings.model_index and submits the app name, so the answer's `model` is the
+    app. Order: the body (empty or exactly `{}`, else 400), the strict query (400), a prefix
+    and a ?model= resolving to different apps (400), an unknown target (404 model_unknown,
     BEFORE submit_unload, so it is never a 200). Then submit_unload(target, force) and
     a wait on ticket.done; the scheduler's result is written as built (200 {"unloaded",
     "model"} only after the group is gone, 500 unload_failed, 503 shutting_down). A
@@ -3221,11 +3458,17 @@ def _sd_handle_unload(handler: "_SdHandler", prefix_model: Optional[str], query:
         _sd_reply_refuse(handler, parsed.code, parsed.message)
         return
     query_model, force = parsed
+    index = handler.server.settings.model_index
     if prefix_model is not None and query_model is not None and prefix_model != query_model:
-        _sd_reply_refuse(handler, "invalid_request", "the /m/<model>/ prefix and ?model= name different models")
-        return
-    target = prefix_model if prefix_model is not None else query_model
-    if target is not None and target not in handler.server.settings.models:
+        # Two spellings are one target when they resolve to the SAME app (two ids of one app).
+        prefix_app, query_app = index.get(prefix_model), index.get(query_model)
+        if prefix_app is None or query_app is None or prefix_app != query_app:
+            _sd_reply_refuse(handler, "invalid_request",
+                             "the /m/<model>/ prefix and ?model= name different models")
+            return
+    named = prefix_model if prefix_model is not None else query_model
+    target = index.get(named) if named is not None else None
+    if named is not None and target is None:
         _sd_reply_refuse(handler, "model_unknown", "the unload names no configured model")
         return
     ticket = handler.server.scheduler.submit_unload(target, force)
@@ -3251,7 +3494,7 @@ def _sd_control(handler: "_SdHandler", method: str, model: Optional[str], path: 
     if body is None:
         return
     if path == "/v1/models":
-        if model is not None and model not in handler.server.settings.models:
+        if model is not None and model not in handler.server.settings.model_index:
             _sd_reply_refuse(handler, "model_unknown", "the /m/<model>/ prefix names no configured model")
             return
         _sd_handle_models(handler)
@@ -3272,7 +3515,8 @@ def _sd_framing(handler: "_SdHandler", upstream: str) -> Optional[Tuple[int, str
         _sd_reply_refuse(handler, "length_required", "exactly one decimal Content-Length is required")
         return None
     length = int(lengths[0].strip())
-    if length > handler.server.settings.body_limit:
+    # The kind token's cap (chat 16 MiB, embed 4 MiB) or the plain body_limit, whichever is smaller.
+    if length > _sd_body_cap(upstream, handler.server.settings.body_limit):
         _sd_reply_refuse(handler, "body_too_large", "the request body is over the body limit")
         return None
     ok, ctype = handler._single_header("Content-Type")
@@ -3285,6 +3529,14 @@ def _sd_framing(handler: "_SdHandler", upstream: str) -> Optional[Tuple[int, str
     if media not in allowed:
         _sd_reply_refuse(handler, "unsupported_media_type", "Content-Type must be %s" % " or ".join(allowed))
         return None
+    for name in _SD_KIND_FORWARD.get(ROUTES[upstream], ()):
+        # A header that crosses the hop for this kind (R7): at most once, short, printable ASCII.
+        values = handler.headers.get_all(name) or []
+        if len(values) > 1 or (values and not _SD_FORWARD_VALUE_RE.fullmatch(values[0].strip())):
+            _sd_reply_refuse(handler, "invalid_request",
+                             "%s must appear at most once, as 1-%d printable ASCII characters"
+                             % (name, _SD_FORWARD_VALUE_MAX))
+            return None
     return length, ctype or ""
 
 
@@ -3366,12 +3618,16 @@ def _sd_pipeline(handler: "_SdHandler", method: str, started: float) -> None:
     if control is not None:
         _sd_control(handler, method, control[0], control[1], control[2])
         return
-    models = server.settings.models
-    head = _sd_route_head(method, raw, models)
+    settings = server.settings
+    index = settings.model_index  # model id (or app name) -> app: read at the edges only
+    head = _sd_route_head(method, raw, index)
     if isinstance(head, RouteError):
         _sd_reply_refuse(handler, head.code, head.message)
         return
     prefix_model, upstream = head
+    if prefix_model is not None and not _sd_kind_accepts(settings.models[index[prefix_model]].kind, upstream):
+        _sd_reply_refuse(handler, _SD_NO_ROUTE.code, _SD_NO_ROUTE.message)  # the app's kind does not serve it
+        return
     framing = _sd_framing(handler, upstream)
     if framing is None:
         return
@@ -3393,11 +3649,15 @@ def _sd_pipeline(handler: "_SdHandler", method: str, started: float) -> None:
         return
     model = prefix_model
     if model is None:
-        target = route_request(method, raw, ctype, body, models)
+        target = route_request(method, raw, ctype, body, index)
         if isinstance(target, RouteError):
             _sd_reply_refuse(handler, target.code, target.message)
             return
         model = target.model
+        if not _sd_kind_accepts(settings.models[index[model]].kind, upstream):
+            _sd_reply_refuse(handler, _SD_NO_ROUTE.code, _SD_NO_ROUTE.message)
+            return
+    model = index[model]  # the scheduler keys on the APP name
     ticket = scheduler.submit_request(model, "POST", upstream, list(handler.headers.items()), body, reservation)
     handler._sd_ticket = ticket
     body = b""
@@ -3471,6 +3731,8 @@ def _sd_settings(args: argparse.Namespace, cfg: Settings) -> Settings:
                           "token and images would cross the network in cleartext")
     if not merged.allow_remote and not _sd_is_loopback(merged.bind):
         raise ConfigError("--bind: a non-loopback address needs --allow-remote --insecure-cleartext")
+    if merged.port:
+        _sd_cfg_child_ports(merged.models, merged.port, "--port")  # a CLI port may clash too
     return merged
 
 

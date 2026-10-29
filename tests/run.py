@@ -966,17 +966,19 @@ SUITES = [
      "streamed image answers (openai), advertised image sizes, "
      "secret leaks, static rules, "
      "hygiene", 460),
-    # TYPED: a fixed case table (A 17, L 39, R 20, D 22, S 20, Q-sched 16,
-    # Q-http 5, T 13, P 40, U 18, G 6, E2E 4 = 220), so a count that moves is
+    # TYPED: a fixed case table (A 17, L 45, R 23, D 22, S 22, Q-sched 16,
+    # Q-http 5, T 15, P 43, U 20, G 6, E2E 5 = 239), so a count that moves is
     # the alarm.
     ("gpu_router", run_gpu_router,
      "gpu-router, the supervisor and proxy for stable-diffusion.cpp "
-     "sd-server: config refusals, one model loaded at a time with switch on "
-     "demand, the bounded queue and scheduler, /v1/unload (queued and "
-     "?force=1), crash retries and the DISABLED state, the kill ladder and "
-     "process-group sweep, byte-exact relay through stub children, "
-     "OpenAI-shaped refusals, bearer auth, structure-only logs, static "
-     "rules, end-to-end through llm-router", 220),
+     "sd-server and inferNO-style LLM apps: config refusals, one app loaded "
+     "at a time with switch on demand, the bounded queue and scheduler, "
+     "/v1/unload (queued and ?force=1, through any model id), crash retries "
+     "and the DISABLED state, the kill ladder and process-group sweep, "
+     "byte-exact relay through stub children, the per-kind routes, body caps "
+     "and readiness probe, OpenAI-shaped refusals, bearer auth, "
+     "structure-only logs, static rules, end-to-end through llm-router and "
+     "across the two app kinds", 239),
     # TYPED: a fixed case table (A 7, E 3), so a count that moves is the alarm.
     ("tshark_fields", run_tshark_fields,
      "mcp-tshark analyze's `fields` parameter, in-process with tshark "
