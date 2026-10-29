@@ -1,13 +1,16 @@
 ---
 name: sd-router
 type: component
-status: draft
+status: active
 title: sd-router — a supervisor and reverse proxy for stable-diffusion.cpp sd-server
 description: The stdlib-only HTTP front that owns one GPU's stable-diffusion.cpp sd-server children -- a 0600 JSON config of models launched from an argv list, one strict FIFO with one request in flight and a swap when the head names another model, a per-model state machine with one definition of resident, queued and forced unloads that answer 200 only once the child's process group is verified gone, retries and a restart budget that disables, a closed table of OpenAI-shaped error codes, the llm-router sdcpp integration through a bearer, how it is tested against an adversarial stub child, the code-mode security review and its fix round, and what it declares rather than gates.
 sources:
   - Scripts/sd-router.py
   - tests/test_sd_router.py
   - tests/files/sd_router/tf_stub_sd.py
+verified:
+  commit: 91ff40b
+  date: 2026-10-28
 links:
   - llm-router
   - mcp-proxy

@@ -22,8 +22,8 @@ sources:
   - Scripts/_mcp_zstd.py
   - tests/test_generated_region.py
 verified:
-  commit: 2c3e9e5
-  date: 2026-10-16
+  commit: 91ff40b
+  date: 2026-10-28
 links:
   - scripts
   - tests

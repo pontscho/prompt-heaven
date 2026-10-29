@@ -1,7 +1,7 @@
 ---
 name: 0034-sd-router-a-supervisor-and-proxy-for-sd-server
 type: adr
-status: draft
+status: active
 title: sd-router -- a supervisor and reverse proxy for sd-server
 description: Decision to put one stdlib-only file, Scripts/sd-router.py, in front of stable-diffusion.cpp sd-server as a supervisor and reverse proxy -- one scheduler thread and one Condition, an allowlisted route table, strict FIFO with one request in flight on the single GPU, process-group kill with a verified exit before an unload answers, and a declared host of the generated HTTP front (ADR 0029, 0025) -- with the alternatives rejected, the measurements, the planner decisions D-1 to D-17 as an overrule list with their costs (D-11 and D-12 awaiting user sign-off), the twelve implementation deviations from the plan, the threat table, the llm-router sdcpp credential phase that supersedes ADR 0028's no-credential rule, the declared limits, and the code-mode security review (APPROVE, nine LOW) with its red-first fix round and that round's three deviations.
 sources:
@@ -16,6 +16,9 @@ sources:
   - Scripts/amalgamate.py:DECLARED_HOSTS
   - tests/test_generated_region.py:HTTPFRONT_ADAPTATIONS
   - tests/test_sd_router.py
+verified:
+  commit: 91ff40b
+  date: 2026-10-28
 links:
   - 0028-route-by-model-translate-at-the-edge
   - 0029-the-http-front-is-a-domain
