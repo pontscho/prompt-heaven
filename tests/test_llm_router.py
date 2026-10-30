@@ -1003,6 +1003,7 @@ GA_CASES = (
     "CLI flag beats the config key",     # A52
     "listener key refusals",             # A53
     "write-back keeps listener keys",    # A54
+    "bind list, repeatable --bind",      # A55
 )
 
 # (label, text, is_config_error) of every exception group A provoked and every
@@ -2394,7 +2395,8 @@ def group_a(suite, fixture_root):
         # A config key of the wrong type or range is refused naming the key; an unknown key still is.
         problems = []
         lo, hi = mod._BODY_LIMIT_RANGE
-        rows = (("bind", (5, "", None, ["127.0.0.1"], "a\0b")), ("port", ("80", True, -1, 65536, 1.5, None)),
+        rows = (("bind", (5, "", None, [], ["127.0.0.1", "127.0.0.1"], ["127.0.0.1", 5], ["127.0.0.1", ""],
+                          "a\0b")), ("port", ("80", True, -1, 65536, 1.5, None)),
                 ("allow_remote", (1, "true", None)), ("debug", (0, "false", None)),
                 ("allowed_origin", ("http://a.example", [5], ["http://a.example/path"], ["ftp://a.example"], None)),
                 ("ready_file", (5, "", None, "a\0b")), ("log_file", (5, "", [], "a\0b")),
@@ -2434,6 +2436,60 @@ def group_a(suite, fixture_root):
             problems += ctl
         return problems, ["rewrite     : only backends.%s.oauth changed; %d listener keys intact" % (GL_CODEX, len(extra))]
 
+    def a55():
+        # Several listeners: `bind` is an IPv4 literal or a list of unique ones; --bind is repeatable and
+        # a flag list replaces the config value whole; the address rules run on EACH address of the
+        # merged result; the port is shared, so it must be explicit when there are several addresses.
+        problems = []
+        count = [0]
+
+        def merged(top, *argv):
+            count[0] += 1
+            return a51_settings(cfg_with("lb-%d.json" % count[0], lambda cfg: cfg.update(top)), *argv)
+
+        def want_bind(label, expected, top, *argv):
+            try:
+                got = merged(top, *argv).bind
+            except Exception as exc:  # noqa: BLE001
+                problems.append("%s: raised %s: %s" % (label, type(exc).__name__, ga_redact(str(exc))[:160]))
+                return
+            if got != expected or type(got) is not type(expected):
+                problems.append("%s: RouterSettings.bind is %r, expected %r" % (label, got, expected))
+
+        def want_refused(label, top, *argv):
+            try:
+                merged(top, *argv)
+            except mod.ConfigError as exc:
+                text = str(exc)
+                if "bind" not in text and "--port" not in text or "10.9.8.7" in text or "\n" in text:
+                    problems.append("%s: ConfigError %r names no key/flag or echoes a value" % (label, text))
+            except Exception as exc:  # noqa: BLE001
+                problems.append("%s: raised %s instead of ConfigError" % (label, type(exc).__name__))
+            else:
+                problems.append("%s: accepted, expected a ConfigError" % label)
+
+        two = ["127.0.0.1", "127.0.0.2"]
+        want_bind("config list", tuple(two), {"bind": two, "port": 8123})
+        want_bind("one-element config list", "127.0.0.1", {"bind": ["127.0.0.1"]})
+        want_bind("two --bind flags", tuple(two), {}, "--bind", two[0], "--bind", two[1], "--port", 8123)
+        want_bind("a flag over a config list", "127.0.0.3", {"bind": two, "port": 8123}, "--bind", "127.0.0.3")
+        want_bind("flags over a config list", ("127.0.0.3", "127.0.0.4"), {"bind": two, "port": 8123},
+                  "--bind", "127.0.0.3", "--bind", "127.0.0.4")
+        want_bind("loopback + VPN address, allow_remote", ("127.0.0.1", "10.9.8.7"),
+                  {"bind": ["127.0.0.1", "10.9.8.7"], "port": 8123, "allow_remote": True})
+        want_refused("duplicate flags", {}, "--bind", two[0], "--bind", two[0], "--port", 8123)
+        want_refused("port 0, two addresses", {"bind": two}, "--port", 0)
+        want_refused("port absent, two addresses", {"bind": two})
+        want_refused("one non-loopback address, no allow_remote", {"bind": ["127.0.0.1", "10.9.8.7"], "port": 8123})
+        want_refused("an unspecified address with allow_remote", {"bind": ["127.0.0.1", "0.0.0.0"], "port": 8123,
+                                                                  "allow_remote": True})
+        want_refused("an IPv6 element", {"bind": ["127.0.0.1", "::1"], "port": 8123})
+        want_refused("a host name element", {"bind": ["127.0.0.1", "localhost"], "port": 8123})
+        return problems, ["accepted    : a unique list in the config or as repeated --bind; a flag list replaces the key whole; "
+                          "a one-element list is the plain string",
+                          "refused     : duplicates, port 0 or absent with several addresses, and the per-address rules "
+                          "(non-loopback, unspecified, IPv6, names); no value echoed"]
+
     def a12():
         problems = []
 
@@ -2471,7 +2527,8 @@ def group_a(suite, fixture_root):
         GA_CASES[42]: a43, GA_CASES[43]: a44, GA_CASES[44]: a45, GA_CASES[45]: a46,
         GA_CASES[46]: a47, GA_CASES[47]: a48, GA_CASES[48]: a49, GA_CASES[49]: a50,
         GA_CASES[50]: a51, GA_CASES[51]: a52, GA_CASES[52]: a53, GA_CASES[53]: a54,
-        GA_CASES[11]: a12,    # last: it sweeps every message the others provoked
+        GA_CASES[54]: a55,
+        GA_CASES[11]: a12,   # last: it sweeps every message the others provoked
     }
     results = {}
     for cid, fn in cases.items():
@@ -2524,6 +2581,9 @@ GB_CASES = (
     "mid-conversation system rules",     # B30
     "models: token limits advertised",   # B31
     "vision false: image -> 400",        # B32
+    "bind list: every address answers",  # B33
+    "one bind failure aborts startup",   # B34
+    "peer listeners share the state",    # B35
 )
 
 # "Accepted" in a B case means "not a front refusal" (plan section 8): the status
@@ -2887,6 +2947,23 @@ def gb_accepted(label, status, body):
     if status == 400 and GB_MISPLACED in gb_text(body):
         return ["%s: the misplaced-token 400" % label]
     return []
+
+
+def gb_free_port():
+    """A TCP port that was free on 127.0.0.1 a moment ago (bind to 0, read, close)."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def gb_second_loopback():
+    """"127.0.0.2" when this host can bind it (Linux: all of 127/8 is up), else None (macOS)."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.2", 0))
+        return "127.0.0.2"
+    except OSError:
+        return None
 
 
 def gb_control(client, label="control: a valid request"):
@@ -3934,6 +4011,98 @@ def group_b(suite, fixture_root):
             finally:
                 vis.close()
 
+        def b33():
+            # Several listeners: repeated --bind opens one listener per address on the one port; each
+            # answers an authorised request; the ready file stays {port, pid}; SIGTERM exits 0.  Without a
+            # second loopback address (macOS) only 127.0.0.1 is exercised and the detail says so.
+            second = gb_second_loopback()
+            hosts = ["127.0.0.1"] + ([second] if second else [])
+            port = gb_free_port()
+            box = new_sandbox(fixture_root, "multi")
+            argv = ["--port", port]
+            for host in hosts:
+                argv += ["--bind", host]
+            multi = RouterProc(box, write_config(box, gb_config(peer.url())), argv, label="multi")
+            problems = []
+            try:
+                if multi.wait_ready() is None:
+                    return [gb_not_ready(multi)], []
+                with open(multi.ready_path, "r", encoding="utf-8") as fh:
+                    data = json.load(fh)
+                if sorted(data) != ["pid", "port"] or data.get("port") != port:
+                    problems.append("ready file %r, expected exactly pid and the port %d" % (data, port))
+                for host in hosts:
+                    c = multi.client()
+                    c.host = host
+                    problems += gb_control(c, "control: a request to %s:%d" % (host, port))
+            finally:
+                code = multi.close()
+            if code != 0:
+                problems.append("SIGTERM: exit %r, expected 0" % (code,))
+            return problems, ["listeners   : %s on port %d, each answered" % (", ".join(hosts), port)
+                              + ("" if second else " (no second loopback address here: 127.0.0.2 not exercised)")]
+
+        def b34():
+            # A bind failure on ANY address aborts startup (exit 2, one line, no ready file).  The failing
+            # address comes second, so a socket is already bound and must be closed again.
+            second = gb_second_loopback()
+            holder = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                holder.bind(("127.0.0.1", 0))
+                holder.listen(1)
+                port = holder.getsockname()[1]
+                if second:
+                    hosts, failing = [second, "127.0.0.1"], "127.0.0.1"
+                else:
+                    holder.close()
+                    port = gb_free_port()
+                    hosts, failing = ["127.0.0.1", "127.0.0.2"], "127.0.0.2"
+                argv = ["--port", port]
+                for host in hosts:
+                    argv += ["--bind", host]
+                problems = ga_cli_refused(sandbox, cfgpath, "busy-multi", argv,
+                                          ["cannot listen on", "%s:%d" % (failing, port)])
+            finally:
+                holder.close()
+            return problems, ["bind failure: %s second, port %d" % (failing, port),
+                              "expect      : exit 2, one `llm-router: cannot listen on` line, no ready file"]
+
+        def b35():
+            # A listener built with `peer` shares the image and raw-relay caps, the shutdown flag, the
+            # upstream registry, the token store (one OAuth writer) and the drain condition; its
+            # socket, connection cap, `loopback` and `active` count stay its own.
+            if mod is None:
+                return [mod_why], []
+            problems = []
+            settings = mod.RouterSettings(bind="127.0.0.1", port=0, allow_remote=False, origins=frozenset(),
+                                          body_limit=mod._ROUTER_BODY_LIMIT, max_connections=4, ready_file=None,
+                                          debug=False, log_file=None)
+            cfg = mod.load_config(cfgpath)
+            first = second = None
+            try:
+                first = mod._RouterHttpServer(("127.0.0.1", 0), settings, cfg, None)
+                second = mod._RouterHttpServer(("127.0.0.1", 0), settings, cfg, None, peer=first)
+                for attr in mod._RouterHttpServer._SHARED:
+                    if getattr(second, attr) is not getattr(first, attr):
+                        problems.append("a peer listener has its own %s" % attr)
+                if second.server_port == first.server_port or second.socket is first.socket:
+                    problems.append("the peer shares the first listener's socket")
+                if second.conn_sem is first.conn_sem:
+                    problems.append("the connection cap is shared, expected one per listener")
+                if not (first.loopback and second.loopback):
+                    problems.append("loopback is not set per listener")
+                second.active += 1
+                if first.active != 0:
+                    problems.append("active is shared between listeners, expected one count each")
+                if second.tokens.closing is not first.closing:
+                    problems.append("the shared token store does not see the shared closing flag")
+            finally:
+                for srv in (first, second):
+                    if srv is not None:
+                        srv.server_close()
+            return problems, ["shared      : %s" % ", ".join(mod._RouterHttpServer._SHARED),
+                              "per listener: socket, conn_sem, loopback, active"]
+
         cases = [(GB_CASES[0], live(b1)), (GB_CASES[1], live(b2)), (GB_CASES[2], live(b3)),
                  (GB_CASES[3], live(b4)), (GB_CASES[4], live(b5)), (GB_CASES[5], live(b6)),
                  (GB_CASES[6], live(b7)), (GB_CASES[7], live(b8)), (GB_CASES[8], live(b9)),
@@ -3945,7 +4114,7 @@ def group_b(suite, fixture_root):
                  (GB_CASES[24], live_models(b25)), (GB_CASES[25], live_models(b26)),
                  (GB_CASES[26], live_models(b27)), (GB_CASES[27], live_models(b28)),
                  (GB_CASES[28], b29), (GB_CASES[29], live(b30)), (GB_CASES[30], b31),
-                 (GB_CASES[31], b32),
+                 (GB_CASES[31], b32), (GB_CASES[32], b33), (GB_CASES[33], b34), (GB_CASES[34], b35),
                  (GB_CASES[16], live(b17))]   # last: it sweeps every error body the others provoked
         for cid, fn in cases:
             try:

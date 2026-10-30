@@ -654,6 +654,7 @@ GL_CASES = (
     "L46 ready_file, log_file, debug accepted",
     "L47 process key types refused",
     "L48 CLI beats config (process keys)",
+    "L49 bind list, repeatable --bind",
 )
 
 L_NAMES_CONFIG = ("ConfigError", "ModelSpec", "Settings", "parse_config", "load_config",
@@ -1317,7 +1318,7 @@ def l34(mod, sandbox):
     """A wrong type per key is refused naming the key, never the value."""
     problems = []
     sentinel = L_UNKNOWN_VALUE
-    rows = (("bind", (5, True, None, ["10.0.0.1"], 1.5)),
+    rows = (("bind", (5, True, None, [], [5], ["10.0.0.1", "10.0.0.1"], {"a": 1}, 1.5)),
             ("port", ("8080", True, False, 1.5, None, [8080], sentinel)),
             ("allow_remote", (1, 0, "true", None, [True], sentinel)),
             ("insecure_cleartext", (1, 0, "true", None, [True], sentinel)),
@@ -1748,10 +1749,66 @@ def l48(mod, sandbox):
     return problems, ["flag > config > default for ready_file, log_file and debug (--debug over debug false)"]
 
 
+def l49(mod, sandbox):
+    """Several listeners: `bind` is a string or a non-empty list of unique strings; --bind is
+    repeatable and a flag list replaces the config value whole; the loopback rule runs per
+    address on the merged result; duplicates and port 0 with several addresses are refused,
+    no value echoed.  A single address stays a plain string."""
+    problems = []
+    kind, val = _l_top(mod, sandbox, {"bind": ["127.0.0.1", "127.0.0.2"]})
+    if kind != "ok":
+        problems.append("config bind list: %s (%s)" % (kind, str(val)[:120]))
+    else:
+        problems += _l_same("config bind list: Settings.bind", getattr(val, "bind", "<missing>"),
+                            ("127.0.0.1", "127.0.0.2"))
+    for label, bad in (("empty list", []), ("duplicate", ["127.0.0.1", "127.0.0.1"]),
+                       ("non-string element", ["127.0.0.1", 5]), ("empty element", ["127.0.0.1", ""]),
+                       ("NUL element", ["127.0.0.1", "a\0b"])):
+        problems += _l_refused(mod, "config bind " + label, mod.parse_config,
+                               (_l_raw(dict(_l_doc(sandbox), bind=bad)),), needles=("bind",))
+    ports = ["--port", "18321"]
+    kind, val = _l_merge(mod, sandbox, {}, ["--bind", "127.0.0.1", "--bind", "127.0.0.2"] + ports, "l49-a.json")
+    if kind != "ok":
+        problems.append("two --bind flags: %s (%s)" % (kind, str(val)[:120]))
+    else:
+        problems += _l_same("two --bind flags: Settings.bind", getattr(val, "bind", "<missing>"),
+                            ("127.0.0.1", "127.0.0.2"))
+    kind, val = _l_merge(mod, sandbox, {"bind": ["127.0.0.1", "127.0.0.2"]}, ["--bind", "127.0.0.3"], "l49-b.json")
+    if kind != "ok":
+        problems.append("one flag over a config list: %s (%s)" % (kind, str(val)[:120]))
+    else:
+        problems += _l_same("one flag over a config list: Settings.bind", getattr(val, "bind", "<missing>"),
+                            "127.0.0.3")
+    kind, val = _l_merge(mod, sandbox, {"bind": ["127.0.0.1"]}, [], "l49-c.json")
+    if kind != "ok":
+        problems.append("one-element config list: %s (%s)" % (kind, str(val)[:120]))
+    else:
+        problems += _l_same("one-element config list: Settings.bind", getattr(val, "bind", "<missing>"),
+                            "127.0.0.1")
+    for label, top, argv, needle in (
+            ("duplicate flags", {}, ["--bind", "127.0.0.1", "--bind", "127.0.0.1"] + ports, "--bind"),
+            ("port 0, two addresses", {"bind": ["127.0.0.1", "127.0.0.2"]}, ["--port", "0"], "--port"),
+            ("port absent, two addresses", {"bind": ["127.0.0.1", "127.0.0.2"]}, [], "--port"),
+            ("one address non-loopback", {}, ["--bind", "127.0.0.1", "--bind", "10.9.8.7"] + ports, "--bind"),
+            ("config list, one non-loopback", {"bind": ["127.0.0.1", "10.9.8.7"], "port": 18321}, [], "--bind")):
+        kind, val = _l_merge(mod, sandbox, top, argv, "l49-%d.json" % len(label))
+        if kind != "refused":
+            problems.append("%s: %s, expected a refusal" % (label, kind))
+        elif needle not in val or "\n" in val or "10.9.8.7" in val:
+            problems.append("%s: the refusal does not name %s on one line without the value: %r"
+                            % (label, needle, val[:120]))
+    kind, val = _l_merge(mod, sandbox, {"allow_remote": True, "insecure_cleartext": True},
+                         ["--bind", "127.0.0.1", "--bind", "10.9.8.7"] + ports, "l49-d.json")
+    if kind != "ok":
+        problems.append("loopback + remote with both acknowledgements: %s (%s)" % (kind, str(val)[:120]))
+    return problems, ["bind: string or unique list; --bind repeatable and replacing; the loopback rule per "
+                      "address; duplicates and an ephemeral port with several addresses refused"]
+
+
 GL_FUNCS = (l1, l2, l3, l4, l5, l6, l7, l8, l9, l10, l11, l12, l13, l14, l15, l16, l17, l18,
             l19, l20, l21, l22, l23, l24, l25, l26, l27, l28, l29, l30, l31, l32,
-            l33, l34, l35, l36, l37, l38, l39, l40, l41, l42, l43, l44, l45, l46, l47, l48)
-GL_CLI = frozenset(("L23", "L25", "L26", "L27", "L28", "L32", "L37", "L38", "L39", "L44", "L48"))
+            l33, l34, l35, l36, l37, l38, l39, l40, l41, l42, l43, l44, l45, l46, l47, l48, l49)
+GL_CLI = frozenset(("L23", "L25", "L26", "L27", "L28", "L32", "L37", "L38", "L39", "L44", "L48", "L49"))
 
 
 def group_l(suite, fixture_root):
@@ -6095,6 +6152,9 @@ GP_CASES = (
     "P44 stream head allow-list (R20)",
     "P45 stream incremental, chunked",
     "P46 mid-stream EOF: no replay (R3)",
+    "P47 bind list: every address answers",
+    "P48 one bind failure aborts startup",
+    "P49 peer listeners share the cap",
 )
 
 GQH_CASES = (
@@ -7777,9 +7837,145 @@ def p46(mod, sandbox, names, optional):
                                    "restarts for the next request"]
 
 
+def _p_free_port():
+    """A TCP port that was free on 127.0.0.1 a moment ago (bind to 0, read, close)."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind((LOOPBACK, 0))
+        return sock.getsockname()[1]
+
+
+def _p_second_loopback():
+    """"127.0.0.2" when this host can bind it (Linux: all of 127/8 is up), else None (macOS)."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.2", 0))
+        return "127.0.0.2"
+    except OSError:
+        return None
+
+
+def _p_models_status(host, port):
+    """The status code of an authorised GET /v1/models sent to host:port, or None."""
+    try:
+        with socket.create_connection((host, port), timeout=WAIT_CEILING_S) as sock:
+            sock.sendall(("GET /v1/models HTTP/1.1\r\nHost: %s:%d\r\nAuthorization: Bearer %s\r\n"
+                          "Connection: close\r\n\r\n" % (host, port, TF_TOKEN)).encode("ascii"))
+            raw = b""
+            while b"\r\n" not in raw:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                raw += chunk
+        return int(raw.split(b" ", 2)[1])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def p47(mod, sandbox):
+    """Several listeners through main(): a config `bind` list opens one listener per address on
+    the one port; both answer an authorised request; the ready file keeps {port, pid}; SIGTERM
+    exits 0.  Without a second loopback address (macOS) only 127.0.0.1 is exercised and the
+    detail says so."""
+    second = _p_second_loopback()
+    hosts = [LOOPBACK] + ([second] if second else [])
+    port = _p_free_port()
+    path = write_config(sandbox, base_config({"A": _p_entry(sandbox, "A")}, bind=hosts, port=port))
+    # The harness always passes `--port 0`; the later explicit flag wins.
+    proc, ready = launch(path, ["--port", str(port)], label="p47")
+    problems = []
+    try:
+        if ready is None:
+            return [_p_not_ready(proc)], []
+        if sorted(ready) != ["pid", "port"] or ready.get("port") != port:
+            problems.append("ready file %r, expected exactly pid and the configured port %d" % (ready, port))
+        for host in hosts:
+            status = _p_models_status(host, port)
+            if status != 200:
+                problems.append("GET /v1/models on %s:%d answered %r, expected 200" % (host, port, status))
+    finally:
+        code = proc.close()
+    if code != 0:
+        problems.append("SIGTERM: exit %r, expected 0" % (code,))
+    problems += _p_leaks("stderr", proc.stderr_text())
+    return problems, ["config bind list, one port: %s answered; ready file {pid, port}"
+                      % ", ".join(hosts) + ("" if second else " (no second loopback address here: "
+                                                              "127.0.0.2 not exercised)")]
+
+
+def p48(mod, sandbox):
+    """A bind failure on ANY address aborts startup: exit 2, one `gpu-router:` line, never ready.
+    The failing address is the second one, so a socket is already bound and must be closed."""
+    second = _p_second_loopback()
+    holder = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        holder.bind((LOOPBACK, 0))
+        holder.listen(1)
+        port = holder.getsockname()[1]
+        # Linux: 127.0.0.2 binds, then 127.0.0.1 (held here) fails.  macOS: 127.0.0.1 binds,
+        # then 127.0.0.2 fails with EADDRNOTAVAIL -- but 127.0.0.1 is held, so use a free port.
+        if second:
+            hosts = [second, LOOPBACK]
+        else:
+            holder.close()
+            port = _p_free_port()
+            hosts = [LOOPBACK, "127.0.0.2"]
+        path = write_config(sandbox, base_config({"A": _p_entry(sandbox, "A")}, bind=hosts, port=port))
+        proc, ready = launch(path, ["--port", str(port)], label="p48")
+        try:
+            code = proc.wait_exit()
+        finally:
+            proc.close()
+    finally:
+        holder.close()
+    problems = []
+    if ready is not None:
+        problems.append("the router became ready although an address could not be bound")
+    if code != 2:
+        problems.append("exit %r, expected 2" % (code,))
+    lines = [ln for ln in proc.stderr_text().splitlines() if ln.strip()]
+    if len(lines) != 1 or not lines[0].startswith("gpu-router: ") or "--bind" not in lines[0]:
+        problems.append("stderr is not the one-line refusal: %r" % (lines[:3],))
+    problems += _p_leaks("stderr", proc.stderr_text())
+    return problems, ["a failing second address: exit 2, one line, never ready"]
+
+
+def p49(mod, sandbox):
+    """Listeners built with `peer` share one shutdown flag, one start time and one drain condition, and
+    keep their own socket, connection cap, `loopback` and `active` count (no second address needed:
+    two ephemeral ports on 127.0.0.1)."""
+    problems = []
+    settings = mod.parse_config(_l_raw(_l_doc(sandbox)))
+    first = second = None
+    try:
+        first = mod._SdHttpServer((LOOPBACK, 0), settings, None)
+        second = mod._SdHttpServer((LOOPBACK, 0), settings, None, peer=first)
+        for attr in ("closing", "active_cond"):
+            if getattr(second, attr) is not getattr(first, attr):
+                problems.append("a peer listener has its own %s" % attr)
+        if second.conn_sem is first.conn_sem:
+            problems.append("the connection cap is shared, expected one per listener")
+        if second.started_epoch != first.started_epoch:
+            problems.append("a peer listener has its own started_epoch")
+        if second.server_port == first.server_port or second.socket is first.socket:
+            problems.append("the peer shares the first listener's socket")
+        if not (first.loopback and second.loopback):
+            problems.append("loopback is not set per listener")
+        if first.peers != [] or second.peers != []:
+            problems.append("a fresh listener lists peers")
+        second.active += 1
+        if first.active != 0:
+            problems.append("active is shared between listeners, expected one count each")
+    finally:
+        for srv in (first, second):
+            if srv is not None:
+                srv.server_close()
+    return problems, ["a peer shares closing, started_epoch and active_cond; socket, conn_sem, loopback and "
+                      "active stay per listener"]
+
+
 GP_FUNCS = (p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p13, p14, p15, p16, p17, p18, p19,
             p20, p21, p22, p23, p24, p25, p26, p27, p28, p29, p30, p31, p32, p33, p34, p35, p36,
-            p37, p38, p39, p40, p41, p42, p43, p44, p45, p46)
+            p37, p38, p39, p40, p41, p42, p43, p44, p45, p46, p47, p48, p49)
 
 
 # -- Q-http ---------------------------------------------------------------------------

@@ -97,7 +97,11 @@ llama.cpp quirks -- delete a row when its upstream fix is the minimum supported 
 Listener and process options in the config
 ------------------------------------------
   Optional top-level config keys, each the twin of one flag with the same range and
-  rule: bind, port, allow_remote, allowed_origin (a list of strings, each an exact
+  rule: bind (an IPv4 literal, or a non-empty list of unique ones: one listener per
+  address, all on the one port, in one process sharing one state; --bind is repeatable
+  and any --bind flag replaces the config value as a whole; the address rules run per
+  address; several addresses need an explicit non-zero port; max_connections applies
+  to each listener, the image and raw-relay caps to the process), port, allow_remote, allowed_origin (a list of strings, each an exact
   scheme://host[:port]), ready_file, log_file, debug (a real bool), body_limit,
   max_connections, max_image_requests, max_llm_requests. Precedence: an explicit
   command-line flag, then the config key, then the built-in default (--allowed-origin
@@ -836,7 +840,7 @@ class RouterConfig(_RouterConfigBase):
 
 
 class RouterSettings(NamedTuple):   # from the command line (network)
-    bind: str
+    bind: Union[str, Tuple[str, ...]]   # one address (str) or, for several listeners, a tuple of 2+ unique ones
     port: int
     allow_remote: bool
     origins: FrozenSet[str]
@@ -1629,6 +1633,13 @@ def _rt_cfg_listener(data: dict) -> Dict[str, Any]:
                 raise ConfigError("config: allowed_origin: each entry must be an exact "
                                   "scheme://host[:port] (http or https, no path, query or "
                                   "trailing slash, port in [1, 65535])") from None
+        elif key == "bind" and isinstance(value, list):
+            # Several listeners: a non-empty list of unique non-empty strings (the address rules run
+            # per address on the merged result, in _rt_settings).
+            if (not value or not all(isinstance(item, str) and item and "\0" not in item for item in value)
+                    or len(set(value)) != len(value)):
+                raise ConfigError("config: bind: a list must hold unique non-empty strings without a NUL")
+            value = tuple(value)
         else:   # bind, ready_file, log_file: a non-empty string without a NUL
             if not isinstance(value, str) or not value or "\0" in value:
                 raise ConfigError(f"config: {key}: must be a non-empty string without a NUL")
@@ -8573,12 +8584,23 @@ class _RouterHttpServer(ThreadingHTTPServer):
     front_log = log
 
     def __init__(self, addr: Tuple[str, int], settings: RouterSettings, cfg: RouterConfig,
-                 tokens: Optional[_RtTokenStore] = None) -> None:
+                 tokens: Optional[_RtTokenStore] = None,
+                 peer: Optional["_RouterHttpServer"] = None) -> None:
         # Everything a handler reads is set BEFORE super().__init__, which
         # binds and listens (L4).
         self.settings = settings
         self.cfg = cfg
+        # One listener per --bind address: each has its own socket, `loopback` (the Host check),
+        # `active` count and connection cap (max_connections PER listener, so a flood on one address
+        # can not starve the other); every other piece of router state is the PRIMARY's (_share_from).
+        self.peers: List["_RouterHttpServer"] = []
+        self.active = 0
+        self.loopback = ipaddress.IPv4Address(addr[0]).is_loopback
         self.conn_sem = threading.BoundedSemaphore(settings.max_connections)
+        if peer is not None:
+            self._share_from(peer)
+            super().__init__(addr, _RouterHandler)
+            return
         # Image requests in flight (D10b): taken without blocking once an image route resolves, so a
         # burst of 64 MiB answers can not hold every connection slot; the 429 comes before any upstream contact.
         self.image_sem = threading.BoundedSemaphore(settings.max_image_requests)
@@ -8586,7 +8608,6 @@ class _RouterHttpServer(ThreadingHTTPServer):
         # front has no queue wait limit, so queued requests would otherwise hold every connection slot.
         self.llm_sem = threading.BoundedSemaphore(settings.max_llm_requests)
         self.closing = threading.Event()
-        self.loopback = ipaddress.IPv4Address(settings.bind).is_loopback
         # Raw upstream sockets, every one from its connect on -- a model call's
         # (R-0095) and a token POST's (R-0083): shutdown(SHUT_RDWR) unblocks a
         # connect or a read, never close() (P24). `track` is the registry _rt_send takes.
@@ -8599,8 +8620,7 @@ class _RouterHttpServer(ThreadingHTTPServer):
         self.tokens = tokens if tokens is not None else _RtTokenStore(None, cfg)
         self.tokens.closing = self.closing
         self.tokens.track = self.track
-        # Running handler threads, for the shutdown drain.
-        self.active = 0
+        # Running handler threads, for the shutdown drain (this listener's own count).
         self.active_cond = threading.Condition()
         # GET /v1/models's created_at (ISO) and created (epoch seconds) for every entry: the start
         # time, second precision, UTC, both from one clock read so the two agree.
@@ -8618,6 +8638,17 @@ class _RouterHttpServer(ThreadingHTTPServer):
         self.effort_supported: Dict[Tuple[str, str], FrozenSet[str]] = {}
         self.sampling_lock = threading.Lock()
         super().__init__(addr, _RouterHandler)
+
+    # Everything a second listener must share with the first: one image and one raw-relay cap, one
+    # shutdown flag and upstream registry, one token store (the OAuth write-back must have a single
+    # writer), one drain condition and one learned-state table. The connection cap is per listener.
+    _SHARED = ("image_sem", "llm_sem", "closing", "inflight", "inflight_lock", "track",
+               "tokens", "active_cond", "started_at", "started_epoch", "sampling_unsupported",
+               "sampling_noted", "effort_supported", "sampling_lock")
+
+    def _share_from(self, peer: "_RouterHttpServer") -> None:
+        for name in self._SHARED:
+            setattr(self, name, getattr(peer, name))
 
     def sampling_learned(self, backend: str, model: str) -> FrozenSet[str]:
         """The sampling names (backend, model) is known to refuse; empty when none."""
@@ -9903,19 +9934,29 @@ def _rt_settings(args: argparse.Namespace, cfg: Optional[RouterConfig] = None) -
         max_connections=pick("max_connections", _HTTP_CONNECTION_CAP),
         max_image_requests=pick("max_image_requests", _IMAGE_REQUEST_CAP),
         max_llm_requests=pick("max_llm_requests", _LLM_REQUEST_CAP))
-    try:
-        addr = ipaddress.IPv4Address(args.bind)
-    except ValueError:
-        raise ConfigError("--bind takes an IPv4 literal (e.g. 127.0.0.1); "
-                          "IPv6 and host names are not supported") from None
-    if not addr.is_loopback and not args.allow_remote:
-        raise ConfigError("--bind: a non-loopback address needs --allow-remote to listen on it "
-                          "(localhost or a VPN interface only, never a public one)")
-    # V2: "never a public one" is enforced, not only stated. 100.64.0.0/10 (the
-    # carrier-grade NAT range VPNs such as Tailscale use) is not global, so it stays.
-    if args.allow_remote and (addr.is_unspecified or addr.is_global):
-        raise ConfigError("--bind: --allow-remote refuses an unspecified (0.0.0.0) or public "
-                          "address; bind the VPN interface's own address")
+    # --bind is repeatable and the config key may be a list: the rules run on EACH address.
+    wanted = [args.bind] if isinstance(args.bind, str) else list(args.bind)
+    addrs: List[Any] = []
+    for entry in wanted:
+        try:
+            addr = ipaddress.IPv4Address(entry)
+        except ValueError:
+            raise ConfigError("--bind takes an IPv4 literal (e.g. 127.0.0.1); "
+                              "IPv6 and host names are not supported") from None
+        if not addr.is_loopback and not args.allow_remote:
+            raise ConfigError("--bind: a non-loopback address needs --allow-remote to listen on it "
+                              "(localhost or a VPN interface only, never a public one)")
+        # V2: "never a public one" is enforced, not only stated. 100.64.0.0/10 (the
+        # carrier-grade NAT range VPNs such as Tailscale use) is not global, so it stays.
+        if args.allow_remote and (addr.is_unspecified or addr.is_global):
+            raise ConfigError("--bind: --allow-remote refuses an unspecified (0.0.0.0) or public "
+                              "address; bind the VPN interface's own address")
+        addrs.append(addr)
+    if len(set(addrs)) != len(addrs):
+        raise ConfigError("--bind: the addresses must be unique")
+    if len(addrs) > 1 and args.port == 0:
+        # An ephemeral port is picked per socket: the addresses would not share one.
+        raise ConfigError("--port: several --bind addresses need an explicit port (not 0)")
     _rt_cli_range("--port", args.port, _RT_PORT_RANGE)
     _rt_cli_range("--body-limit", args.body_limit, _BODY_LIMIT_RANGE)
     _rt_cli_range("--max-connections", args.max_connections, _CONNECTION_CAP_RANGE)
@@ -9925,7 +9966,7 @@ def _rt_settings(args: argparse.Namespace, cfg: Optional[RouterConfig] = None) -
     if args.ready_file is not None and not args.ready_file:
         raise ConfigError("--ready-file: must not be empty")
     return RouterSettings(
-        bind=str(addr),
+        bind=str(addrs[0]) if len(addrs) == 1 else tuple(str(a) for a in addrs),
         port=args.port,
         allow_remote=bool(args.allow_remote),
         origins=origins,
@@ -9977,7 +10018,9 @@ example config (chmod 600; token: python3 -c 'import secrets;print(secrets.token
   }
   the last two lines are optional: each key is the config twin of the flag of the same name
   (bind -> --bind, allowed_origin -> --allowed-origin, ...); an explicit flag beats the key,
-  the key beats the built-in default.
+  the key beats the built-in default. "bind" may also be a list of unique IPv4 literals
+  (["127.0.0.1", "192.168.2.245"]; --bind is repeatable): one listener per address on
+  the one port (explicit, not 0), one process, one shared state.
   routes are keyed by the exact model string Claude Code sends; "default" takes the rest.
   A route's optional max_input_tokens / max_tokens (integers 1-100000000) are only
   advertised by GET /v1/models (context_window too, = max_input_tokens), never enforced.
@@ -10079,9 +10122,11 @@ def _rt_parser() -> argparse.ArgumentParser:
     # Every option below defaults to None (absent): an explicit flag beats the config's
     # top-level key of the same name (bind, port, allow_remote, allowed_origin, ...), which
     # beats the built-in default (_rt_settings resolves it).
-    parser.add_argument("--bind", default=None,
+    parser.add_argument("--bind", action="append", default=None,
                         help="IPv4 literal to listen on (default: the config `bind`, else 127.0.0.1); "
-                             "non-loopback needs --allow-remote")
+                             "non-loopback needs --allow-remote. Repeatable: one listener per address, "
+                             "all on the same --port (which must then be explicit, not 0); "
+                             "flags replace the config `bind` as a whole")
     parser.add_argument("--port", type=_rt_cli_int, default=None,
                         help="TCP port (default: the config `port`, else 0 = ephemeral)")
     parser.add_argument("--allow-remote", action="store_const", const=True, default=None,
@@ -10476,11 +10521,21 @@ def main() -> None:
     tokens = _RtTokenStore(args.config, cfg)
 
     # Bind first (P18): nothing else has started, so a refusal has nothing to stop.
-    try:
-        srv = _RouterHttpServer((settings.bind, settings.port), settings, cfg, tokens)
-    except OSError as exc:                       # EADDRINUSE, EADDRNOTAVAIL, EACCES ...
-        _rt_refuse(f"cannot listen on {settings.bind}:{settings.port}: "
-                   f"{exc.strerror or type(exc).__name__}")
+    # One server per address (same port), all sharing the first one's state; any failure
+    # closes the sockets already bound and ends startup.
+    hosts = [settings.bind] if isinstance(settings.bind, str) else list(settings.bind)
+    listeners: List[_RouterHttpServer] = []
+    for host in hosts:
+        try:
+            listeners.append(_RouterHttpServer((host, settings.port), settings, cfg, tokens,
+                                               peer=listeners[0] if listeners else None))
+        except OSError as exc:                   # EADDRINUSE, EADDRNOTAVAIL, EACCES ...
+            for bound in listeners:
+                bound.server_close()
+            _rt_refuse(f"cannot listen on {host}:{settings.port}: "
+                       f"{exc.strerror or type(exc).__name__}")
+    srv = listeners[0]
+    srv.peers = listeners[1:]
 
     # The handlers go in before the ready file: a supervisor that signals as
     # soon as the file appears must reach the ordered shutdown, not the default
@@ -10493,13 +10548,15 @@ def main() -> None:
         try:
             _http_write_ready_file(settings.ready_file, srv.server_port, ConfigError)
         except ConfigError as exc:
-            srv.server_close()
+            for bound in listeners:
+                bound.server_close()
             _rt_refuse(str(exc))
 
-    # serve_forever on its own thread: shutdown() blocks until serve_forever
+    # serve_forever on its own thread per listener: shutdown() blocks until serve_forever
     # returns, so it is never called from the serving thread (as mcp-proxy's
     # _stop_http_server does).
-    threading.Thread(target=srv.serve_forever, name="rt-serve", daemon=True).start()
+    for bound in listeners:
+        threading.Thread(target=bound.serve_forever, name="rt-serve", daemon=True).start()
     while not stop.is_set():
         stop.wait(_RT_TICK_S)
     _rt_shutdown(srv)
@@ -10523,14 +10580,15 @@ def _rt_shutdown(srv: _RouterHttpServer) -> None:
     # 3. Drain the running handlers for at most _DRAIN_S; the rest are daemon
     #    threads and are abandoned (count only).
     with srv.active_cond:
-        srv.active_cond.wait_for(lambda: srv.active == 0, timeout=_DRAIN_S)
-        left = srv.active
+        srv.active_cond.wait_for(lambda: sum(s.active for s in [srv] + srv.peers) == 0, timeout=_DRAIN_S)
+        left = sum(s.active for s in [srv] + srv.peers)
     if left > 0:
         log.warning("shutdown drain abandoned %d handler(s)", left)
-    # 4. Close the listener, remove our ready file (V24), then flush every
+    # 4. Close the listeners, remove our ready file (V24), then flush every
     #    logging handler, each in its own try.
-    srv.shutdown()
-    srv.server_close()
+    for listener in [srv] + srv.peers:
+        listener.shutdown()
+        listener.server_close()
     if srv.settings.ready_file is not None:
         _http_remove_ready_file(srv.settings.ready_file, log)
     for handler in logging.getLogger().handlers + log.handlers:

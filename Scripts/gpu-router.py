@@ -47,7 +47,9 @@ Config grammar (one 0600 JSON file owned by you, read through --config)
                                           collision retry); never the listener's port
       }
     },
-    "bind": "127.0.0.1",                  optional; an IP literal or hostname, as --bind
+    "bind": "127.0.0.1",                  optional; an IP literal or hostname, as --bind; or a
+                                          non-empty list of unique ones (one listener each,
+                                          same port, one process; --bind is repeatable)
     "port": 0,                            optional; 0..65535, 0 = ephemeral, as --port
     "allow_remote": false,                optional; a real bool, as --allow-remote
     "insecure_cleartext": false,          optional; a real bool, as --insecure-cleartext
@@ -61,7 +63,9 @@ Config grammar (one 0600 JSON file owned by you, read through --config)
   Precedence for bind, port, allow_remote, insecure_cleartext, max_connections,
   body_limit, ready_file, log_file and debug: an explicit command-line flag, then the
   config key, then the built-in default. The listener rules (a non-loopback bind needs
-  allow_remote AND insecure_cleartext) run on the merged result. response_limit is
+  allow_remote AND insecure_cleartext) run on the merged result, per address. Any --bind
+  flag replaces the config `bind` as a whole. Several addresses share ONE port (it must be
+  explicit, not 0) and one scheduler; max_connections applies to each listener. response_limit is
   config-only.
   Duplicate keys and unknown keys are refused; a refusal names the key and the
   rule, never the value. A NUL in command, args, env or cwd is refused. {port} and {host} are substituted by an explicit
@@ -415,7 +419,7 @@ class Settings:
     max_connections: int = _SD_DEFAULT_MAX_CONNECTIONS
     response_limit: int = _SD_DEFAULT_RESPONSE_LIMIT
     # The listener: from the config (or its default); _sd_settings lets an explicit flag win.
-    bind: str = _SD_DEFAULT_BIND
+    bind: Union[str, Tuple[str, ...]] = _SD_DEFAULT_BIND   # one address, or a tuple of 2+ unique ones
     port: int = _SD_DEFAULT_PORT
     allow_remote: bool = False
     insecure_cleartext: bool = False
@@ -490,8 +494,14 @@ def _sd_cfg_bool(value: Any, where: str) -> bool:
     return value
 
 
-def _sd_cfg_bind(value: Any, where: str) -> str:
-    """`bind`: a non-empty string without a NUL (an IP literal or hostname, as --bind takes)."""
+def _sd_cfg_bind(value: Any, where: str) -> Union[str, Tuple[str, ...]]:
+    """`bind`: a non-empty string without a NUL (an IP literal or hostname, as --bind takes), or
+    a non-empty list of unique such strings (one listener each; the rules run per address later)."""
+    if isinstance(value, list):
+        if not value or not all(isinstance(item, str) and item and "\0" not in item for item in value) \
+                or len(set(value)) != len(value):
+            raise ConfigError(f"{where}: a list must hold unique non-empty strings without a NUL")
+        return tuple(value)
     if not isinstance(value, str) or not value:
         raise ConfigError(f"{where}: must be a non-empty string (an address to listen on)")
     return _sd_cfg_no_nul(value, where)
@@ -846,10 +856,12 @@ def _sd_parser() -> argparse.ArgumentParser:
                         help="Path to the JSON config (must be owned by you, mode 0600)")
     # The five listener options and --body-limit default to None (absent): an explicit flag
     # beats the config key, which beats the built-in default (_sd_settings resolves it).
-    parser.add_argument("--bind", default=None,
+    parser.add_argument("--bind", action="append", default=None,
                         help="Address to listen on (default: the config `bind`, else "
                              f"{_SD_DEFAULT_BIND}); non-loopback needs --allow-remote "
-                             f"--insecure-cleartext (flags or config keys)")
+                             f"--insecure-cleartext (flags or config keys). Repeatable: one "
+                             f"listener per address, all on the same --port (which must then be "
+                             f"explicit, not 0); flags replace the config `bind` as a whole")
     parser.add_argument("--port", type=_sd_cli_int(*_SD_PORT_RANGE), default=None,
                         help=f"TCP port (default: the config `port`, else {_SD_DEFAULT_PORT} = ephemeral)")
     parser.add_argument("--allow-remote", action="store_const", const=True, default=None,
@@ -3394,18 +3406,29 @@ class _SdHttpServer(ThreadingHTTPServer):
     # The generated server methods log through this, never the module global (R-0072, PD-3).
     front_log = log
 
-    def __init__(self, server_address: Tuple[str, int], settings: Settings, scheduler: "Scheduler") -> None:
+    def __init__(self, server_address: Tuple[str, int], settings: Settings, scheduler: "Scheduler",
+                 peer: Optional["_SdHttpServer"] = None) -> None:
         # Everything a handler reads is set BEFORE super().__init__, which binds and listens.
         self.settings = settings
         self.scheduler = scheduler
-        self.conn_sem = threading.BoundedSemaphore(settings.max_connections + _SD_CONTROL_RESERVE)
-        self.closing = threading.Event()
+        # One listener per --bind address: its own socket, `loopback` (the Host check), `active`
+        # count and connection cap (max_connections PER listener, so a flood on one address can
+        # not starve the other); the shutdown flag, start time and drain condition are the
+        # PRIMARY's (a *peer* shares them). The scheduler, and with it the image admission, is one.
+        self.peers: List["_SdHttpServer"] = []
         self.loopback = _sd_is_loopback(server_address[0])
-        # The /v1/models `created` of every entry (llm-router's started_epoch).
-        self.started_epoch = int(time.time())
-        # Running handler threads, for the shutdown drain.
         self.active = 0
-        self.active_cond = threading.Condition()
+        self.conn_sem = threading.BoundedSemaphore(settings.max_connections + _SD_CONTROL_RESERVE)
+        if peer is not None:
+            self.closing = peer.closing
+            self.started_epoch = peer.started_epoch
+            self.active_cond = peer.active_cond
+        else:
+            self.closing = threading.Event()
+            # The /v1/models `created` of every entry (llm-router's started_epoch).
+            self.started_epoch = int(time.time())
+            # Running handler threads, for the shutdown drain.
+            self.active_cond = threading.Condition()
         super().__init__(server_address, _SdHandler)
 
     # Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
@@ -4261,8 +4284,19 @@ def _sd_settings(args: argparse.Namespace, cfg: Settings) -> Settings:
     if merged.allow_remote and not merged.insecure_cleartext:
         raise ConfigError("--allow-remote needs --insecure-cleartext: gpu-router has no TLS, the bearer "
                           "token and images would cross the network in cleartext")
-    if not merged.allow_remote and not _sd_is_loopback(merged.bind):
+    # --bind is repeatable and the config key may be a list: the loopback rule runs per address.
+    wanted = [merged.bind] if isinstance(merged.bind, str) else list(merged.bind)
+    if not merged.allow_remote and not all(_sd_is_loopback(host) for host in wanted):
         raise ConfigError("--bind: a non-loopback address needs --allow-remote --insecure-cleartext")
+    if len(set(wanted)) != len(wanted):
+        raise ConfigError("--bind: the addresses must be unique")
+    if len(wanted) > 1 and merged.port == 0:
+        # An ephemeral port is picked per socket: the addresses would not share one.
+        raise ConfigError("--port: several --bind addresses need an explicit port (not 0)")
+    if len(wanted) == 1 and not isinstance(merged.bind, str):
+        merged = dataclasses.replace(merged, bind=wanted[0])
+    elif len(wanted) > 1:
+        merged = dataclasses.replace(merged, bind=tuple(wanted))
     if merged.port:
         _sd_cfg_child_ports(merged.models, merged.port, "--port")  # a CLI port may clash too
     return merged
@@ -4286,10 +4320,20 @@ def main(argv: Optional[List[str]] = None) -> None:
     supervisor = Supervisor()
     scheduler = Scheduler(settings, supervisor)
     # Bind first: nothing else has started, so a refusal has nothing to stop.
-    try:
-        srv = _SdHttpServer((settings.bind, settings.port), settings, scheduler)
-    except OSError as exc:                       # EADDRINUSE, EADDRNOTAVAIL, EACCES ...
-        _sd_refuse(f"--bind/--port: cannot listen ({exc.strerror or type(exc).__name__})")
+    # One server per address (same port), sharing the first one's state; a failure on any
+    # address closes the sockets already bound and ends startup.
+    hosts = [settings.bind] if isinstance(settings.bind, str) else list(settings.bind)
+    listeners: List[_SdHttpServer] = []
+    for host in hosts:
+        try:
+            listeners.append(_SdHttpServer((host, settings.port), settings, scheduler,
+                                           peer=listeners[0] if listeners else None))
+        except OSError as exc:                   # EADDRINUSE, EADDRNOTAVAIL, EACCES ...
+            for bound in listeners:
+                bound.server_close()
+            _sd_refuse(f"--bind/--port: cannot listen ({exc.strerror or type(exc).__name__})")
+    srv = listeners[0]
+    srv.peers = listeners[1:]
 
     # The handlers go in before the ready file: a supervisor that signals as soon
     # as the file appears must reach the ordered shutdown, not the default action.
@@ -4307,13 +4351,15 @@ def main(argv: Optional[List[str]] = None) -> None:
         try:
             _http_write_ready_file(settings.ready_file, srv.server_port, ConfigError)
         except ConfigError as exc:
-            srv.server_close()
+            for bound in listeners:
+                bound.server_close()
             scheduler.shutdown()
             _sd_refuse(str(exc))
 
-    # serve_forever on its own thread: shutdown() blocks until serve_forever returns,
-    # so it is never called from the serving thread.
-    threading.Thread(target=srv.serve_forever, name="sd-serve", daemon=True).start()
+    # serve_forever on its own thread per listener: shutdown() blocks until serve_forever
+    # returns, so it is never called from the serving thread.
+    for bound in listeners:
+        threading.Thread(target=bound.serve_forever, name="sd-serve", daemon=True).start()
     log.info("gpu-router listening: port=%d models=%d", srv.server_port, len(settings.models))
     _sd_wait_stop(stop_flag, threading.Event())
     _sd_shutdown(srv, scheduler, settings.ready_file)
@@ -4334,13 +4380,15 @@ def _sd_shutdown(srv: _SdHttpServer, scheduler: Scheduler, ready_file: Optional[
     # 3. Drain the running handlers for at most _SD_DRAIN_S; the rest are daemon
     #    threads and are abandoned (count only).
     with srv.active_cond:
-        srv.active_cond.wait_for(lambda: srv.active == 0, timeout=_SD_DRAIN_S)
-        left = srv.active
+        srv.active_cond.wait_for(lambda: sum(s.active for s in [srv] + srv.peers) == 0,
+                                 timeout=_SD_DRAIN_S)
+        left = sum(s.active for s in [srv] + srv.peers)
     if left > 0:
         log.warning("shutdown drain abandoned %d handler(s)", left)
-    # 4. Close the listener, remove our ready file, then flush every logging handler.
-    srv.shutdown()
-    srv.server_close()
+    # 4. Close the listeners, remove our ready file, then flush every logging handler.
+    for listener in [srv] + srv.peers:
+        listener.shutdown()
+        listener.server_close()
     if ready_file is not None:
         _http_remove_ready_file(ready_file, log)
     log.info("gpu-router stopped")
