@@ -3,7 +3,7 @@ name: llm-router
 type: component
 status: active
 title: llm-router — an Anthropic Messages router for Claude Code
-description: The stdlib-only HTTP server between Claude Code and several kinds of LLM backend -- an Anthropic Messages front that routes each request by its exact model string to a passthrough, llama.cpp, Mistral, codex, openai or sdcpp (a local stable-diffusion.cpp sd-server, image routes only) adapter, codex and openai speaking the OpenAI Responses API through one profile table; its command line and login subcommand, its 0600 JSON config and the OAuth write-back into it, the per-kind header allow-list and llama.cpp quirk rows, reasoning across kinds, images per kind and the route's vision key, the OpenAI-shaped image generation and edit endpoints behind the route's modality key, the inbound and outbound security rules, how it is tested and what it declares rather than gates.
+description: The stdlib-only HTTP server between Claude Code and several kinds of LLM backend -- an Anthropic Messages front that routes each request by its exact model string to a passthrough, llama.cpp, Mistral, codex, openai, sdcpp (a local stable-diffusion.cpp sd-server, image routes only) or rawllm (an inferNO-style server, typically behind a gpu-router, relayed raw on the OpenAI chat, embeddings and rerank endpoints and on /v1/messages) adapter, codex and openai speaking the OpenAI Responses API through one profile table; its command line and login subcommand, its 0600 JSON config and the OAuth write-back into it, the per-kind header allow-list and llama.cpp quirk rows, reasoning across kinds, images per kind and the route's vision key, the OpenAI-shaped image generation and edit endpoints behind the route's modality key, the raw LLM relay with its body caps and in-flight cap, the inbound and outbound security rules, how it is tested and what it declares rather than gates.
 sources:
   - Scripts/llm-router.py
   - Scripts/_mcp_oauth.py
@@ -11,8 +11,8 @@ sources:
   - tests/test_llm_router.py
   - tests/files/llm_router/README.md
 verified:
-  commit: e8fe011
-  date: 2026-10-28
+  commit: f43a052
+  date: 2026-10-30
 links:
   - 0028-route-by-model-translate-at-the-edge
   - mcp-proxy
@@ -28,6 +28,8 @@ links:
   - 0024-pure-python-39-and-the-stdlib
   - 0025-generate-do-not-import
   - 0029-the-http-front-is-a-domain
+  - gpu-router
+  - 0035-one-gpu-several-apps
 ---
 
 # llm-router
@@ -41,7 +43,9 @@ repaired (`llamacpp`), translated to and from Mistral's chat-completions API
 (`mistral`), or translated to and from the OpenAI Responses API, on the
 ChatGPT-subscription endpoint over OAuth (`codex`) or on the platform endpoint
 with an API key or a Sign-in-with-ChatGPT login (`openai`) — or, for the image
-endpoints only, to a local stable-diffusion.cpp `sd-server` (`sdcpp`)
+endpoints only, to a local stable-diffusion.cpp `sd-server` (`sdcpp`) — or,
+relayed raw and never translated, to an inferNO-style OpenAI/Anthropic server,
+typically a [[gpu-router]] llm app (`rawllm`)
 `Scripts/llm-router.py:KIND_CLASSES`. The OAuth backends are logged in once by
 the `login` subcommand, and the router keeps their refresh tokens current in
 the same config file. Every answer the client sees is
@@ -50,7 +54,11 @@ the `{"type":"error","error":{...}}` envelope `Scripts/llm-router.py:_rt_error_b
 — except on the two OpenAI-shaped image endpoints, `POST /v1/images/generations`
 and `POST /v1/images/edits`, which serve the routes marked `"modality": "image"`
 and answer their errors in the OpenAI envelope
-`Scripts/llm-router.py:_rt_openai_error_body` (see *Image endpoints* below).
+`Scripts/llm-router.py:_rt_openai_error_body` (see *Image endpoints* below), and
+except on the raw LLM endpoints `POST /v1/chat/completions`, `/v1/embeddings`
+and `/v1/rerank`, which serve `rawllm` routes only, relay the upstream's own
+answer and answer their own errors in the OpenAI envelope too (see *Raw LLM
+relay* below).
 It is pure Python 3.9 and the standard library
 ([[0024-pure-python-39-and-the-stdlib]]), and it is not an MCP server.
 
@@ -88,14 +96,15 @@ clock or thread name, so every translator is sans-IO — `begin` / `feed(line)` 
 `finish` / `fail` / `ping` each return bytes `Scripts/llm-router.py:Adapter` —
 and the translators are tested in-process with literal input and output.
 
-**Five endpoints: four POST, one GET.** `/v1/messages`,
-`/v1/messages/count_tokens`, `/v1/images/generations` and `/v1/images/edits`
-take POST, `/v1/models` and `/v1/models/{id}` take
-GET; there are no other paths `Scripts/llm-router.py:_ENDPOINTS`
-`Scripts/llm-router.py:_rt_front_endpoint`. On the messages paths the only
-query strings accepted are none and `beta=true`
-`Scripts/llm-router.py:_RT_ALLOWED_QUERIES`, on the image paths none at all
-`Scripts/llm-router.py:_RT_IMAGE_ALLOWED_QUERIES`; anything else is a 404. On the
+**The endpoints.** `/v1/messages`, `/v1/messages/count_tokens`,
+`/v1/images/generations`, `/v1/images/edits`, `/v1/chat/completions`,
+`/v1/embeddings` and `/v1/rerank` take POST, `/v1/models` and
+`/v1/models/{id}` take GET; there are no other paths
+`Scripts/llm-router.py:_ENDPOINTS` `Scripts/llm-router.py:_rt_front_endpoint`.
+On the messages paths the only query strings accepted are none and `beta=true`
+`Scripts/llm-router.py:_RT_ALLOWED_QUERIES`, on the image and raw LLM paths none
+at all `Scripts/llm-router.py:_RT_IMAGE_ALLOWED_QUERIES`
+`Scripts/llm-router.py:_RT_OPENAI_ENDPOINTS`; anything else is a 404. On the
 models paths the query keys `limit`, `before_id`, `after_id`, `beta` and
 `modality` are accepted, the first four with any value and ignored, any other key
 is a 400 `Scripts/llm-router.py:_RT_MODELS_QUERY_KEYS`. Every other method — `OPTIONS`
@@ -240,7 +249,14 @@ classifier is a declared verbatim hand copy from `Scripts/_mcp_chrome.py`
 
 Network settings are flags; routing and secrets are the config. There is no
 `--config-json`: argv is visible in `ps`, and every config carries a secret
-`Scripts/llm-router.py:_rt_parser`.
+`Scripts/llm-router.py:_rt_parser`. Every server flag below except `--config`
+has an optional top-level config twin of the same name with an underscore
+(`bind`, `port`, `allow_remote`, `allowed_origin`, `ready_file`, `log_file`,
+`debug`, `body_limit`, `max_connections`, `max_image_requests`,
+`max_llm_requests`) `Scripts/llm-router.py:_RT_LISTENER_KEYS`. An explicit flag
+wins, then the config key, then the default in the table; a repeated
+`--allowed-origin` on the command line replaces the config's `allowed_origin`
+list rather than adding to it `Scripts/llm-router.py:_rt_settings`.
 
 | Flag | Default | Rule |
 |---|---|---|
@@ -253,11 +269,17 @@ Network settings are flags; routing and secrets are the config. There is no
 | `--body-limit` | 32 MiB `Scripts/llm-router.py:_ROUTER_BODY_LIMIT` | bytes, inside `Scripts/llm-router.py:_BODY_LIMIT_RANGE` (1 MiB to 256 MiB) |
 | `--max-connections` | `Scripts/llm-router.py:_HTTP_CONNECTION_CAP` (32) | inside `Scripts/llm-router.py:_CONNECTION_CAP_RANGE` (1 to 1024); past it a connection gets a bare 503 and is closed. Chat and image requests share it |
 | `--max-image-requests` | `Scripts/llm-router.py:_IMAGE_REQUEST_CAP` (4) | image requests in flight at once, inside `Scripts/llm-router.py:_IMAGE_REQUEST_RANGE` (1 to 64); one more is refused at once with a 429 and `Retry-After: 1`, before any upstream contact. It protects chat only while it is below `--max-connections`: a value not below it logs one startup WARNING `Scripts/llm-router.py:main` |
+| `--max-llm-requests` | `Scripts/llm-router.py:_LLM_REQUEST_CAP` (8) | requests to a `rawllm` route in flight at once — the three raw LLM endpoints and `/v1/messages` to a `rawllm` route alike, since the slot is keyed on the backend's kind — inside `Scripts/llm-router.py:_LLM_REQUEST_RANGE` (1 to 64); one more is refused at once with a 429 `rate_limit_error` and `Retry-After: 1`, before any upstream contact. A value not below `--max-connections` logs one startup WARNING `Scripts/llm-router.py:main` |
 | `--debug` | off | DEBUG logging to stderr |
 | `--log-file` | none | log to a `0600` file; implies `--debug` |
 
-The flags are validated before the config is read
-`Scripts/llm-router.py:_rt_settings`. The listener is bound before anything
+The config is read first, then each option is merged (flag, config key,
+default) and the merged result validated: the IPv4-literal and
+non-loopback rules for `bind` run after the merge, so a config `bind` is refused
+exactly like `--bind` `Scripts/llm-router.py:_rt_settings`. Logging is set up
+only after that merge, because `debug` and `log_file` may come from the config,
+so nothing logged while the config loads reaches `--debug` or the log file; a
+config refusal is still one stderr line `Scripts/llm-router.py:main`. The listener is bound before anything
 else starts; SIGTERM, SIGINT and SIGHUP handlers go in before the ready file is
 written, so a supervisor that signals as soon as the file appears reaches the
 ordered shutdown `Scripts/llm-router.py:main`. Exit 0 is a normal or
@@ -420,11 +442,45 @@ kind. Without one, `auth_header` resolves to `none`, and `authorization` or
 `backends.<n>.auth_header`. The key obeys every `api_key` rule below, the
 non-loopback `http://` refusal and the difference from `auth_token` included,
 and those run before the kind's own rule `Scripts/llm-router.py:_rt_cfg_backend`.
-A keyed `sdcpp` backend points at one [[gpu-router]] model, with a `base_url` of
-`http://<host>:<port>/m/<model>` and the sd-router token as its key.
+A keyed `sdcpp` backend points at one [[gpu-router]] sd app, with a `base_url` of
+`http://<host>:<port>/m/<app>` and the gpu-router token as its key.
 
-**Top level** — exactly `auth_token`, `backends`, `routes`, `default`; any
-other key is refused by name `Scripts/llm-router.py:_RT_TOP_KEYS`.
+The `rawllm` kind, an inferNO-style OpenAI/Anthropic server relayed raw —
+typically a [[gpu-router]] llm app, whose token is then the key (sent only as
+`Authorization: Bearer`, by the same rule as a keyed `sdcpp` backend):
+
+```json
+"backends": {
+  "gpu-llm": {"kind": "rawllm", "base_url": "http://127.0.0.1:8082/m/llm",
+              "allow_private": true, "allow_loopback": true, "api_key": "<the gpu-router token>"}
+},
+"routes": {
+  "Qwen3.8-Flash-Next": {"backend": "gpu-llm", "model": "Qwen3.8-Flash-Next"},
+  "bge-m3": {"backend": "gpu-llm", "model": "bge-m3"}
+}
+```
+
+A `rawllm` route is a chat route whose key equals its `model` (the body is
+relayed untouched, so the upstream reads the client's `model`), takes no
+options (its `ROUTE_OPTIONS` is empty, so any option is refused by name) and is
+refused as the `default` route, since the raw endpoints find a route by exact
+name only `Scripts/llm-router.py:_rt_cfg_route`. The address policy is the
+`sdcpp` one: a LAN host needs `allow_private`, loopback `allow_private` and
+`allow_loopback`, and a key over a non-loopback `http://` URL needs
+`allow_cleartext_api_key` like any other key.
+
+**Top level** — `auth_token`, `backends`, `routes`, `default`, plus the
+optional listener and process keys of the command line's table
+`Scripts/llm-router.py:_RT_LISTENER_KEYS`; any other key is refused by name
+`Scripts/llm-router.py:_RT_TOP_KEYS`. Each listener key is validated at load with
+its flag's own rule, so a bad value is refused even when a flag would override
+it `Scripts/llm-router.py:_rt_cfg_listener`: `port` in
+`Scripts/llm-router.py:_RT_PORT_RANGE`, `body_limit`, `max_connections`,
+`max_image_requests` and `max_llm_requests` in the flags' ranges (a JSON
+integer, never a boolean), `allow_remote` and `debug` real booleans,
+`allowed_origin` a list of exact `scheme://host[:port]` strings, and `bind`,
+`ready_file` and `log_file` non-empty strings without a NUL (whether `bind` is
+an IPv4 literal is checked on the merged result).
 
 - `auth_token` (required): the router's bearer token, at least
   `Scripts/llm-router.py:_TOKEN_MIN_LEN` (32) printable ASCII characters with
@@ -443,17 +499,17 @@ other key is refused by name `Scripts/llm-router.py:_RT_TOP_KEYS`.
 
 | Key | Default | Rule |
 |---|---|---|
-| `kind` | required | `passthrough`, `llamacpp`, `mistral`, `codex`, `openai` or `sdcpp`; `anthropic` is reserved and refused `Scripts/llm-router.py:_KINDS` |
+| `kind` | required | `passthrough`, `llamacpp`, `mistral`, `codex`, `openai`, `sdcpp` or `rawllm`; `anthropic` is reserved and refused `Scripts/llm-router.py:_KINDS` |
 | `base_url` | required, except codex and `openai` (their profile row's) | `http` or `https`; no userinfo, query or fragment; path segments `[A-Za-z0-9._~-]` `Scripts/llm-router.py:_rt_cfg_base_url`. An `http://` URL requires `allow_private` |
 | `allow_private` | `false` | admits private, ULA, CGNAT and site-local addresses, minus the metadata addresses and Teredo (see Security) |
 | `allow_loopback` | `false` | admits loopback; requires `allow_private` |
 | `ca_file` | none | an absolute path to a PEM CA, https only; replaces the system trust store for this backend `Scripts/llm-router.py:_rt_read_ca_file` |
-| `api_key` | none | at least `Scripts/llm-router.py:_API_KEY_MIN_LEN` (16) printable ASCII characters, no whitespace, different from `auth_token`; required for `mistral`, refused for codex, optional for `sdcpp` (sent as a bearer), and for `openai` the alternative to `oauth`. With an `http://` `base_url` it needs a loopback host (`localhost` or a loopback literal, never resolved) `Scripts/llm-router.py:_rt_is_loopback_host` or `allow_cleartext_api_key` |
+| `api_key` | none | at least `Scripts/llm-router.py:_API_KEY_MIN_LEN` (16) printable ASCII characters, no whitespace, different from `auth_token`; required for `mistral`, refused for codex, optional for `sdcpp` and `rawllm` (sent as a bearer), and for `openai` the alternative to `oauth`. With an `http://` `base_url` it needs a loopback host (`localhost` or a loopback literal, never resolved) `Scripts/llm-router.py:_rt_is_loopback_host` or `allow_cleartext_api_key` |
 | `oauth` | none | codex (required) and `openai` only: the login state, `{}` before the first `login`. Keys `Scripts/llm-router.py:_RT_OAUTH_PERSIST_KEYS` only — `refresh_token` (the token rule, at least 16 characters, different from `auth_token`), `account_id`, `expires_at`, and for `openai` the issued `client_id` and `host_id`; written by `login` and the router, never by hand in normal use `Scripts/llm-router.py:_rt_cfg_oauth` |
 | `identity` | the omp row | codex only: overrides of `originator`, `user-agent` and `version` in `Scripts/llm-router.py:_RT_CODEX_IDENTITY`, each 1-256 printable ASCII characters `Scripts/llm-router.py:_rt_cfg_identity` |
 | `auth_base_url` | the provider's | an OAuth profile only: where the token endpoint lives instead (tests, a proxy). The `base_url` rules, but `https` only, except an `http://` loopback host under `allow_private` and `allow_loopback`; with it the token endpoint inherits the backend's address policy and `ca_file`, without it the token endpoint is public-only with the system trust store |
 | `allow_cleartext_api_key` | `false` | a JSON bool; `true` lets the `api_key` — or an OAuth profile's access token, the same opt-in — travel over a non-loopback `http://` URL in clear text — a LAN backend you accept that for. No effect without an `api_key` or an `oauth` |
-| `auth_header` | `x-api-key` with an `api_key`, else `none` | `authorization`, `x-api-key` or `none`; anything but `none` needs an `api_key`; `mistral` and `openai` with an `api_key` use `authorization` only, and so does `sdcpp` with an `api_key`; refused on an OAuth profile, whose credential comes from the token store |
+| `auth_header` | `x-api-key` with an `api_key`, else `none` | `authorization`, `x-api-key` or `none`; anything but `none` needs an `api_key`; `mistral` and `openai` with an `api_key` use `authorization` only, and so do `sdcpp` and `rawllm` with an `api_key`; refused on an OAuth profile, whose credential comes from the token store |
 | `forward_headers` | the kind's `DEFAULT_FORWARD` | lower-case names, each in the kind's `FORWARDABLE` (table below) |
 | `connect_timeout` | `Scripts/llm-router.py:_CONNECT_TIMEOUT_S` (10 s) | resolve, connect and TLS handshake under one deadline (the resolver runs on a daemon thread joined with what remains of it; a late answer is a 504 and the thread is abandoned); `0 < x <= 3600` |
 | `idle_timeout` | `Scripts/llm-router.py:_IDLE_TIMEOUT_S` (300 s) | per upstream read; `0 < x <= 3600`. It bounds the wait for an answer's head too, and is not a total deadline: a slow image model needs it raised on its backend |
@@ -498,6 +554,7 @@ limits, `vision`, `modality` and, on an image route, `sizes` and
 `Scripts/llm-router.py:PassthroughAdapter` `Scripts/llm-router.py:LlamacppAdapter`
 `Scripts/llm-router.py:MistralAdapter` `Scripts/llm-router.py:CodexAdapter`
 `Scripts/llm-router.py:OpenaiAdapter` `Scripts/llm-router.py:SdcppAdapter`
+`Scripts/llm-router.py:RawllmAdapter`
 
 ## Backends
 
@@ -522,6 +579,7 @@ answers a failure with a 502, as for a bad token
 | codex | (none) | (none) | `Authorization: Bearer <access token>` from the token store, plus `chatgpt-account-id` and the omp identity headers |
 | openai | (none) | (none) | `Authorization: Bearer` the `api_key`, or the access token of an OAuth login |
 | sdcpp | (none) | (none) | `Authorization: Bearer <api_key>` with a key, else none |
+| rawllm | `anthropic-version`, `anthropic-beta` | both, on `/v1/messages` only; each once, 1-`Scripts/llm-router.py:_RT_RAW_HEADER_LIMIT` printable ASCII characters | `Authorization: Bearer <api_key>` with a key, else none |
 | anthropic | reserved: refused by the loader | — | — |
 
 `Scripts/llm-router.py:_NEVER_FORWARD` lists the names no table may ever hold —
@@ -1154,6 +1212,83 @@ to 1-8; a 404 has an empty body; every answer carries
 extra-args tag with a 400 (the router refuses any prompt holding the marker
 before it is sent).
 
+## Raw LLM relay
+
+The `rawllm` kind is the one kind that never translates and never rebuilds a
+body ([[0028-route-by-model-translate-at-the-edge]], [[0035-one-gpu-several-apps]]):
+it exists so every inferNO route family — OpenAI chat, Anthropic messages,
+models, embeddings and rerank — is reachable through llm-router, typically
+from a [[gpu-router]] llm app `Scripts/llm-router.py:RawllmAdapter`.
+
+**Inbound.** `POST /v1/chat/completions`, `/v1/embeddings` and `/v1/rerank` are
+the raw endpoints `Scripts/llm-router.py:_RT_RAW_ENDPOINTS`: bearer first, then
+`Content-Type: application/json`, then the framing (any `Transfer-Encoding` is
+411, before any length check), then the endpoint's body cap — 16 MiB for chat,
+4 MiB for embeddings and rerank, each `min(cap, --body-limit)`, checked before a
+body byte is read `Scripts/llm-router.py:_RT_RAW_BODY_CAPS`. The body is parsed
+by the strict loader (a repeated key, `NaN` / `Infinity`, depth and a long
+integer refused) for VALIDATION only and never rebuilt: it must be an object
+whose `model` (1-256 characters) names a configured route by exact name —
+never the default route — of a raw-relay backend and modality `chat`; `stream` is
+absent or a boolean and `true` on chat only `Scripts/llm-router.py:_rt_parse_raw_inbound`.
+`/v1/messages` to a `rawllm` route enters through the Anthropic parser, whose
+validation only reads the body, and is relayed as the client's bytes too; it
+keeps the plain `--body-limit`. On both paths a key that only a case-insensitive
+reader would take for `model` or `stream` (`"Model"`, `"STREAM"`) is refused 400,
+because the router reads the exact lower-case keys and the upstream may not
+`Scripts/llm-router.py:_rt_refuse_case_variants`
+([[0015-ambiguity-is-the-defect]]). Errors on the raw endpoints are the OpenAI
+envelope; on `/v1/messages` the Anthropic one.
+
+**The in-flight cap.** `--max-llm-requests` slots are taken after the route is
+known and before any upstream contact, keyed on the backend's kind, so
+`/v1/messages` to a `rawllm` route takes one and `/v1/messages` to every other
+kind never does; the request past the cap gets 429 with `Retry-After: 1`
+`Scripts/llm-router.py:_post`. A gpu-router in front queues without a wait
+limit, so an uncapped relay would hand every connection slot to the GPU queue.
+`/v1/messages/count_tokens` on a `rawllm` route takes no slot and is refused
+400: the upstream is not asked and nothing is estimated.
+
+**Outbound.** The upstream path is fixed per endpoint and never comes from the
+client — `RAW_PATHS` appends `/v1/messages`, `/v1/chat/completions`,
+`/v1/embeddings` or `/v1/rerank` to the backend's `base_url`; the body is the
+client's bytes; the credential is exactly `Authorization: Bearer <api_key>` or
+none; the only client headers that travel are `anthropic-version` and
+`anthropic-beta` on `/v1/messages`, each once, 1-256 printable ASCII
+characters. An upstream 3xx is never followed.
+
+**The answer.** Nothing of the upstream's head is copied but a digit-only
+`Retry-After` on a 429 `Scripts/llm-router.py:_relay_raw`:
+
+- A JSON answer (embeddings, rerank, a non-stream chat or messages answer) is
+  read whole under `Scripts/llm-router.py:_UPSTREAM_BODY_LIMIT` before a byte is
+  sent, so a truncated body is a 502 and never a partial answer. A 2xx must
+  start with `{` after whitespace — a first-byte check, not a parse — or it is a
+  502; any 2xx is answered 200 with the upstream's bytes, a fixed
+  `Content-Type: application/json` and `Cache-Control: no-store`. A non-2xx is
+  mapped through the status table to an error of the endpoint's shape: fixed
+  credential text for a 401/403, else the upstream's text relayed scrubbed and
+  cut for 400/404/413/422/429 only `Scripts/llm-router.py:RawllmAdapter`.
+- A `stream: true` request whose upstream answers 2xx goes through the SSE
+  relay, and a 2xx that is not `text/event-stream` is a 502 before any SSE head;
+  a non-2xx answer to a stream request is a JSON error, never a 200 SSE head.
+  The relay passes whole upstream events byte for byte
+  `Scripts/llm-router.py:RawSseRelay`: the stream ends at `data: [DONE]` (chat)
+  or `event: message_stop` (messages) and nothing after it is relayed; an
+  upstream EOF before it yields one in-band error event, never a clean-looking
+  end; comment lines are dropped (the router's own `: ping` keeps an idle
+  stream alive, and a comment trickle does not reset `idle_timeout`); an event
+  named `error` is replaced by a fixed error event with no upstream text; an
+  event over `Scripts/llm-router.py:_SSE_EVENT_LIMIT` bytes or
+  `Scripts/llm-router.py:_RT_RAW_SSE_EVENT_LINES` lines, or a line over
+  `Scripts/llm-router.py:_SSE_LINE_LIMIT`, is an in-band error. The fixed
+  head is `text/event-stream` with `Cache-Control: no-cache`. A client that
+  hangs up mid-stream is noticed at the next tick, the upstream closed and the
+  slot freed.
+
+2xx JSON and SSE content are not scrubbed; only relayed error text is.
+`GET /v1/models` lists `rawllm` routes with modality `chat`.
+
 ## OAuth: the token store and the write-back
 
 **Where the tokens live.** A logged-in backend's `oauth` object holds the
@@ -1191,8 +1326,11 @@ to a 0600 temp file only if the result round-trips and every value outside
 that object is unchanged; the hash is re-checked against a writer that took no
 lock; then the temp file is renamed over the config and the directory is
 synced. A refusal at any step is one WARNING with the backend name and a type
-name; the token stays in memory. A config that only holds non-OAuth backends
-never gets a lock file `Scripts/llm-router.py:_rt_startup_sweep`.
+name; the token stays in memory. The merge copies the whole document and
+replaces only that one object, so the top-level listener keys survive a
+rewrite with their order `Scripts/llm-router.py:_rt_config_merge`. A config
+that only holds non-OAuth backends never gets a lock file
+`Scripts/llm-router.py:_rt_startup_sweep`.
 
 **A login on disk wins.** When a refresh fails because the login expired or was
 revoked, a different refresh token on disk — a `login` ran, or another router
@@ -1350,7 +1488,11 @@ J, because I sweeps every log the run collected and J compares start-of-run
 snapshots `tests/test_llm_router.py:GROUP_ORDER`. Its case count is declared
 once, per group, in `tests/run.py:SUITES`, and checked against the run; the
 per-group detail is the suite's row in [[tests]], and the red-first record per
-group is ADR 0028's, its addendum included.
+group is ADR 0028's, its addendum included. The config twins of the flags are
+A51 (all eleven keys applied, absent keys giving the defaults), A52 (a flag
+beats the key, and the `--allow-remote` rule on the merged result), A53 (the
+wrong types and ranges, and an unknown top-level key) and A54 (the OAuth
+write-back keeps them) `tests/test_llm_router.py:group_a`.
 
 **Images.** One case per layer, each in the group of the code it covers: the
 `vision` key's boolean rule (A50) `tests/test_llm_router.py:group_a`; the
@@ -1493,6 +1635,30 @@ the `--log-file`, the answer body, the route repr and the structured
 upstream-failure WARNING (R14). J12, J39 and A14's refusal text carry
 the sixth kind, and J42 pins `sdcpp` as image-only with the three image hooks and
 none of the chat ones overridden.
+
+**The rawllm kind.** Group V `tests/test_llm_router.py:group_v`
+`tests/test_llm_router.py:GV_CASES` drives `rawllm` backends on a scripted peer,
+with SSE fixtures `tests/files/llm_router/tf_rawllm_chat.sse` and
+`tests/files/llm_router/tf_rawllm_messages.sse`, and was written threat-table
+first, its first red case the response-head allow-list: no upstream header
+reaches the client, only the fixed `Content-Type`, `Cache-Control` and framing
+(V1); a truncated upstream never read as complete, once as SSE and once as JSON
+(V2); the per-endpoint body caps at the boundary, 411 before 413, and
+`/v1/messages` still on the plain `--body-limit` (V3); bearer before the body,
+method, media type and query (V4); strict JSON, `model` and `stream` (V5);
+`--max-llm-requests` — 429 at once, keyed on the backend's kind, released on
+every exit (V6); the exact upstream request: the fixed path, the byte-exact body
+and exactly `Authorization: Bearer <api_key>` (V7); the `anthropic-*` headers
+(V8); a non-SSE answer to a stream request (V9); the SSE relay, byte-exact events,
+the terminators, the size limits, an idle stall and a client hang-up (V10);
+upstream errors, a 3xx never followed, the status map and a digit-only
+`Retry-After` (V11); the config and command-line rules (V12); the `/v1/models`
+listing and the `count_tokens` refusal (V13); no secret or payload in a log
+(V14); and a case-variant `model` or `stream` key on `/v1/messages` to a
+`rawllm` route refused 400 with every other kind unchanged (V15, the fix of
+security finding F1). J42 and J44 also pin the raw hooks and `RAW_PATHS`. The
+end-to-end chain through a live gpu-router to its stub LLM app is case E6 of
+the `gpu_router` suite ([[gpu-router]]).
 
 **Deadlines in milliseconds.** A case whose observable is one of the router's
 own deadlines — the ping interval, the relay tick, the pre-auth, header and
@@ -1653,6 +1819,23 @@ read before relying on one of them. In brief:
   *Declared limits of `sdcpp`* above).
 - **Two refusals on an image path stay Anthropic-shaped:** a header-defect 400
   and an unknown-path 404, both answered before the path is known.
+- **The raw LLM relay trusts its upstream within bounds.** A `rawllm` backend is
+  operator-configured, and a hostile upstream is outside the model: 2xx JSON and
+  SSE content reach the client unscrubbed, a 2xx JSON answer is checked by its
+  first byte only, and a relayed 4xx error text passes a pattern-based scrub, so
+  a partial or encoded key echo or a private LAN name could pass
+  ([[0035-one-gpu-several-apps]]).
+- **The raw relay's buffered path does not notice a departed client** and has no
+  total wall-clock deadline: `idle_timeout` is per read, so a request queued
+  behind a long generation at a gpu-router sees no byte, and a `rawllm` backend
+  in front of one needs an `idle_timeout` above the longest queue wait it should
+  survive. Whether the upstream stops its work on a closed connection is the
+  upstream's own behaviour.
+- **The raw endpoints parse before the slot.** Up to 16 MiB of JSON is parsed
+  before `--max-llm-requests` is consulted, the same exposure class as the
+  existing body limit. The caps (16 MiB chat, 4 MiB embeddings and rerank) and
+  the in-flight default 8 are the router's numbers, not the owner's or the
+  upstream's; they can cut a large embedding batch or a base64-image chat.
 - **A stalled resolve is given up, not interrupted.** `getaddrinfo` cannot be
   cut, so a shutdown waits up to one `Scripts/llm-router.py:_RT_TICK_S` for a
   stalled resolve and leaves its thread running, as above. That a

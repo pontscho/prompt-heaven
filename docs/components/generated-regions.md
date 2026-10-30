@@ -22,8 +22,8 @@ sources:
   - Scripts/_mcp_zstd.py
   - tests/test_generated_region.py
 verified:
-  commit: 91ff40b
-  date: 2026-10-28
+  commit: f43a052
+  date: 2026-10-30
 links:
   - scripts
   - tests
@@ -63,7 +63,7 @@ fetcher `Scripts/fetch.py` takes the same client and decoders and no search
 domain. The LLM router
 `Scripts/llm-router.py`, an HTTP server that is not an MCP server, takes the
 two logging regions, the OAuth client and the stdlib HTTP front it shares with
-`Scripts/mcp-proxy.py`. The sd-server supervisor `Scripts/gpu-router.py`, the
+`Scripts/mcp-proxy.py`. The GPU app supervisor `Scripts/gpu-router.py`, the
 second HTTP server that is not an MCP server, takes the two logging regions and
 the same HTTP front ([[gpu-router]]). They are targets because the generator **names them
 by hand** `Scripts/amalgamate.py:DECLARED_HOSTS` — see "A host outside the glob"

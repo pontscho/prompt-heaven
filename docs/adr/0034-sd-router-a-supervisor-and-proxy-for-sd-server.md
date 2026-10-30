@@ -31,6 +31,7 @@ links:
   - mcp-proxy
   - generated-regions
   - gpu-router
+  - 0035-one-gpu-several-apps
 ---
 
 # ADR 0034: sd-router -- a supervisor and reverse proxy for sd-server
@@ -516,3 +517,7 @@ declared limits above.
    pull a later caller's unload ahead of requests queued before it; the tail
    rule keeps FIFO order, and the queue then holds at most one unload between
    two requests, which admission bounds.
+
+## Addendum (2026-10-30): generalised and partly superseded by ADR 0035 (gpu-router)
+
+This design was generalised in four commits on master -- `bde9876` (sd-router renamed to `Scripts/gpu-router.py`), `ef2ea0d` (an llm app kind, the model-id index, the readiness probe path), `da9eb1e` (streamed llm answers, the abort matrix) and `f43a052` (llm-router's rawllm kind) -- and that generalisation is recorded in [[0035-one-gpu-several-apps]]. Everything above still holds for the sd kind with ONE exception: **D-12 is amended** -- a client abort of a running request now closes the upstream connection and kills nothing, for both kinds (`_SD_ABORT_KILLS_SD` is `False`); whether sd-server stops generating on the closed connection is unmeasured. This record stays `active` rather than `deprecated` or `superseded` on purpose: it is already a frozen record, `deprecated` would label a design that is only partly superseded as gone, and `superseded` is outside the status enum and would unfreeze it. The `Scripts/sd-router.py` paths in the body above quote the tree at decision time; the file is now `Scripts/gpu-router.py`, and the component page is [[gpu-router]].

@@ -3,13 +3,13 @@ name: scripts
 type: subsystem
 status: active
 title: Scripts & MCP Servers
-description: The standalone scripts in Scripts/ -- the MCP servers and the canonical sources their generated regions come from, the llm-router, sd-router and mcp-proxy HTTP fronts, the requirements.yaml task utilities, the fetch.py browser-like fetcher, and the shell scripts behind restartable sessions.
+description: The standalone scripts in Scripts/ -- the MCP servers and the canonical sources their generated regions come from, the llm-router, gpu-router and mcp-proxy HTTP fronts, the requirements.yaml task utilities, the fetch.py browser-like fetcher, and the shell scripts behind restartable sessions.
 sources:
   - Scripts
   - Scripts/context-guard.sh
 verified:
-  commit: 026d993
-  date: 2026-10-29
+  commit: f43a052
+  date: 2026-10-30
 links:
   - overview
   - mcp-proxy
@@ -43,6 +43,7 @@ links:
   - 0030-point-at-the-near-miss-never-resolve-it
   - gpu-router
   - 0034-sd-router-a-supervisor-and-proxy-for-sd-server
+  - 0035-one-gpu-several-apps
 ---
 
 # Scripts & MCP Servers
@@ -51,8 +52,8 @@ links:
 sources their shared helpers are generated from `Scripts/amalgamate.py`, the
 `requirements.yaml` task utilities, the search tools, a browser-like
 single-URL fetcher ("fetch.py" below), two HTTP servers that are
-not MCP servers, the LLM router ("LLM router" below) and the sd-server
-supervisor ("SD router" below), and the shell scripts
+not MCP servers, the LLM router ("LLM router" below) and the GPU app
+supervisor ("GPU router" below), and the shell scripts
 behind a restartable session ("Restartable sessions" below). The servers share that
 plumbing by generation rather than import; the canonical sources, the
 rules deciding what may be a shared block, and the copies deliberately left in
@@ -240,7 +241,7 @@ limits are [[mcp-proxy]]; why it relays and never composes is
 are generated from `Scripts/_mcp_httpfront.py` into it, into the LLM router's
 `Scripts/llm-router.py:_RouterHttpServer` and into gpu-router's
 `Scripts/gpu-router.py:_SdHttpServer`, each keeping declared adaptations
-([[0029-the-http-front-is-a-domain]]; see "LLM router" and "SD router" below).
+([[0029-the-http-front-is-a-domain]]; see "LLM router" and "GPU router" below).
 
 `Scripts/mcp-search.py` (`search_call`: web search over DDG lite and Bing, code
 search over grep.app) is the other live server outside the table: it is **not
@@ -1392,16 +1393,21 @@ profile row `Scripts/llm-router.py:ResponsesProfile` — codex over a ChatGPT
 OAuth login, openai over an API key or OAuth — and `sdcpp`, a local
 stable-diffusion.cpp `sd-server` (or [[gpu-router]] in front of one, then with a
 bearer `api_key`) that serves the image routes and nothing else
-`Scripts/llm-router.py:SdcppAdapter`; a sixth row, `anthropic`, is reserved and
-refused by the loader `Scripts/llm-router.py:_RT_KIND_TABLE`. A route whose
+`Scripts/llm-router.py:SdcppAdapter`, and `rawllm`, an inferNO-style
+OpenAI/Anthropic server (typically a [[gpu-router]] llm app) relayed raw and
+never translated on `/v1/chat/completions`, `/v1/embeddings`, `/v1/rerank` and
+`/v1/messages` `Scripts/llm-router.py:RawllmAdapter`; one more row,
+`anthropic`, is reserved and refused by the loader
+`Scripts/llm-router.py:_RT_KIND_TABLE`. A route whose
 `modality` is `image` is served by the OpenAI-shaped `/v1/images/generations`
 and `/v1/images/edits` endpoints instead of `/v1/messages` — on an openai
 API-key backend, an sdcpp backend or, experimentally, a codex one
 `Scripts/llm-router.py:_rt_cfg_route` `Scripts/llm-router.py:_RT_IMAGE_ENDPOINTS`. Routing and secrets live in one
 JSON config that must be a regular file owned by the user with mode `0600`,
 opened without following a symlink
-`Scripts/llm-router.py:_rt_read_config_file`; network settings are flags, and
-there is no inline-config flag because argv is visible in `ps`. An OAuth backend
+`Scripts/llm-router.py:_rt_read_config_file`; network and process settings are
+flags, each with an optional top-level config twin that an explicit flag beats
+`Scripts/llm-router.py:_RT_LISTENER_KEYS`, and there is no inline-config flag because argv is visible in `ps`. An OAuth backend
 is signed in by the `login` subcommand (browser or device flow)
 `Scripts/llm-router.py:_rt_login`, which writes its tokens back into that same
 config. Its HTTP front is generated from `Scripts/_mcp_httpfront.py`, shared
@@ -1415,30 +1421,35 @@ allow-lists, the security rules, the `llm_router` suite and the declared limits
 are [[llm-router]]; why it routes by model and translates at the edge is
 [[0028-route-by-model-translate-at-the-edge]].
 
-## SD router
+## GPU router
 
-`Scripts/gpu-router.py` is the second HTTP server here that is **not an MCP
-server**: a stdlib-only supervisor and reverse proxy in front of
-stable-diffusion.cpp `sd-server` on a host with one GPU, run by path with
-`--config <file>` `Scripts/gpu-router.py:_sd_parser`. Its 0600 JSON config
-declares the models, each launched as an `sd-server` child from an argv list
-`Scripts/gpu-router.py:load_config`; image requests are relayed byte-exact to
-the child for the model they name, in strict FIFO order with one request in
-flight, and a request for another model swaps the resident child out
-`Scripts/gpu-router.py:Scheduler`. The supervisor kills a child's whole process
-group and verifies it gone before an unload answers
+`Scripts/gpu-router.py` (sd-router until `bde9876`) is the second HTTP server
+here that is **not an MCP server**: a stdlib-only supervisor and reverse proxy
+for the apps of a host with one GPU, run by path with `--config <file>`
+`Scripts/gpu-router.py:_sd_parser`. Its 0600 JSON config declares apps, each one
+child process launched from an argv list and serving one or more model ids, of
+kind `sd` (stable-diffusion.cpp `sd-server`) or `llm` (an inferNO-style LLM,
+embedding and reranker engine) `Scripts/gpu-router.py:load_config`
+`Scripts/gpu-router.py:_SD_KIND_DEFAULTS`; requests are relayed byte-exact to
+the app that serves the model they name, in strict FIFO order with one request
+in flight, and a request for another app swaps the resident child out
+`Scripts/gpu-router.py:Scheduler`. An sd answer is buffered, an llm answer
+streams through a bounded queue, and a client that leaves closes the upstream
+and kills nothing `Scripts/gpu-router.py:_sd_abort_plan`. The supervisor kills
+a child's whole process group and verifies it gone before an unload answers
 `Scripts/gpu-router.py:Supervisor`. Every route needs a bearer token, and the
-image routes are one allowlisted table `Scripts/gpu-router.py:ROUTES`. Its
-intended client is the LLM router's `sdcpp` kind, which sends the router token
-as `Authorization: Bearer` `Scripts/llm-router.py:_rt_cfg_backend`. It is a
+routes are one allowlisted table `Scripts/gpu-router.py:ROUTES`. Its intended
+clients are the LLM router's `sdcpp` and `rawllm` kinds, which send the router
+token as `Authorization: Bearer` `Scripts/llm-router.py:_rt_cfg_backend`. It is a
 hand-declared host of the generator `Scripts/amalgamate.py:DECLARED_HOSTS`:
 its HTTP front, `Scripts/gpu-router.py:_SdHttpServer`, is generated from
 `Scripts/_mcp_httpfront.py` with its declared adaptations, and its logging from
 `Scripts/_mcp_logging.py` ([[generated-regions]]). The config, the request
 pipeline, the scheduler and its state machine, unload, the closed error table,
-the `gpu_router` suite and the declared limits are [[gpu-router]]; the decision
+the `gpu_router` suite and the declared limits are [[gpu-router]]; the decisions
 and the alternatives that lost are
-[[0034-sd-router-a-supervisor-and-proxy-for-sd-server]].
+[[0034-sd-router-a-supervisor-and-proxy-for-sd-server]] and, for apps, the llm
+kind, streaming and the abort matrix, [[0035-one-gpu-several-apps]].
 
 ## Restartable sessions: `context-guard.sh` and `loop-restart.sh`
 
@@ -1447,7 +1458,9 @@ back in a fresh process when its context fills. `Scripts/claude-loop.sh` runs a
 Claude Code session in a loop through the `safranek` launcher, exports `CLAUDE_LOOP_PID` (its own pid) and
 `CLAUDE_LOOP_FLAG`, and starts a new round only when the flag file exists after
 the process ends; every round's prompt resumes from the newest checkpoint session
-`Scripts/claude-loop.sh`. `Scripts/context-guard.sh` is the Claude Code hook that
+`Scripts/claude-loop.sh`. With `--entity NAME` (`[a-z0-9-]`) a loop resumes from
+its own `.claude/tmp/checkpoint-NAME.md` and uses its own restart flag, so
+several loops in one repo do not touch each other's checkpoint. `Scripts/context-guard.sh` is the Claude Code hook that
 decides *when*, and `Scripts/loop-restart.sh` is what the model runs to end the
 round.
 
