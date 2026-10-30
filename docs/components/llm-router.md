@@ -119,7 +119,7 @@ Anthropic list shape — `data`, `has_more` (always `false`), `first_id`,
 `{"type": "model", "id", "display_name", "created_at"}` per route key in config
 order, followed by the OpenAI model fields `"object": "model"`, `created` (the
 same start time as whole epoch seconds, an integer), `"owned_by": "llm-router"`
-(fixed, never a backend name) and the route's `modality` (`chat` or `image`),
+(fixed, never a backend name) and the route's `modality` (`chat`, `image`, `embedding` or `rerank`),
 then the route's advertised `max_input_tokens` and `max_tokens` and a
 `context_window` equal to `max_input_tokens` (each `null` when the route sets
 none), and after them, on an image route and only when the route configures
@@ -129,7 +129,7 @@ the router's start time in UTC to the second, read from the same clock reading
 as `created` `Scripts/llm-router.py:_rt_model_entry`
 `Scripts/llm-router.py:_RouterHttpServer`. The `default` route has no name
 and is never listed `Scripts/llm-router.py:_rt_models_list`. `?modality=chat`,
-`?modality=image` or `?modality=all` keeps only that kind of route; without it
+`?modality=image`, `?modality=embedding`, `?modality=rerank` or `?modality=all` keeps only that kind of route; without it
 every route is listed, image routes included, because the OpenAI SDK's
 `models.list()` sends no query — so Claude Code's model picker, which sends none
 either, shows a configured image route too. A repeated, blank or other
@@ -554,7 +554,7 @@ limits, `vision`, `modality` and, on an image route, `sizes` and
 | `display_name` | the route key | a string of 1-`Scripts/llm-router.py:_RT_DISPLAY_NAME_LIMIT` (256) characters with no control character; shown by `GET /v1/models` only. Allowed on `default` too, where it is unused |
 | `max_input_tokens`, `max_tokens` | none | integers from `Scripts/llm-router.py:_RT_TOKEN_LIMIT_MIN` to `Scripts/llm-router.py:_RT_TOKEN_LIMIT_MAX`; advertised by `GET /v1/models` (with `context_window`), never enforced |
 | `vision` | `true` | a JSON boolean (`0`, `1`, `"false"`, `null` are refused by path); `false` makes the router answer 400 to any request holding an image block, never strip it — see *Images* under Backends `Scripts/llm-router.py:RouteSpec`. Allowed on `default` too |
-| `modality` | `chat` | `chat` or `image` `Scripts/llm-router.py:_RT_MODALITIES`. An `image` route is served by the two image endpoints only and needs a kind that lists `image` in its adapter's `MODALITIES` (`openai`, `sdcpp` — which serves nothing else, so an `sdcpp` route without `"modality": "image"` is refused — and the experimental `codex`), a backend that is not the `openai-oauth` profile ("image generation is not available with Sign in with ChatGPT tokens; use an api_key backend"), and, for every kind but `sdcpp`, a `model` equal to the route key, because the body is forwarded byte for byte and the upstream reads the client's `model` (sd-server ignores `model`, so an `sdcpp` route may name any upstream model). The key is refused on `default`, checked on the config path and not on the route's name, so a typo can never send a prompt to an image model `Scripts/llm-router.py:_rt_cfg_route` |
+| `modality` | `chat` | `chat`, `image`, `embedding` or `rerank` `Scripts/llm-router.py:_RT_MODALITIES`. `embedding` and `rerank` are accepted on a `rawllm` route only (any other kind: "kind X does not serve embedding routes"), refused on `default`, need `model` equal to the route key like every `rawllm` route, and refuse `sizes` and `default_size`; `/v1/embeddings` serves only `embedding` routes, `/v1/rerank` only `rerank` ones and `/v1/chat/completions` and `/v1/messages` only `chat` ones `Scripts/llm-router.py:_RT_RAW_ENDPOINT_MODALITY`. An `image` route is served by the two image endpoints only and needs a kind that lists `image` in its adapter's `MODALITIES` (`openai`, `sdcpp` — which serves nothing else, so an `sdcpp` route without `"modality": "image"` is refused — and the experimental `codex`), a backend that is not the `openai-oauth` profile ("image generation is not available with Sign in with ChatGPT tokens; use an api_key backend"), and, for every kind but `sdcpp`, a `model` equal to the route key, because the body is forwarded byte for byte and the upstream reads the client's `model` (sd-server ignores `model`, so an `sdcpp` route may name any upstream model). The key is refused on `default`, checked on the config path and not on the route's name, so a typo can never send a prompt to an image model `Scripts/llm-router.py:_rt_cfg_route` |
 | `sizes` | none | an image route only (a chat route and `default` refuse it by path, "only allowed on a modality image route"): a non-empty list of at most `Scripts/llm-router.py:_RT_SIZES_LIMIT` (32) unique strings, each `auto` or `WIDTHxHEIGHT` with two to five digits per side and no leading zero, matched whole (`1024X1024`, `5x1024`, a padded or newline-terminated value are refused; the value is never echoed) `Scripts/llm-router.py:_rt_check_sizes` `Scripts/llm-router.py:_RT_SIZE_RE`. Advertised by `GET /v1/models` only, never enforced |
 | `default_size` | none | an image route only: one string by the same grammar `Scripts/llm-router.py:_rt_size_ok`, a member of `sizes` when both are set, allowed alone. Advertised by `GET /v1/models` only, never added to a request |
 
@@ -1254,7 +1254,9 @@ body byte is read `Scripts/llm-router.py:_RT_RAW_BODY_CAPS`. The body is parsed
 by the strict loader (a repeated key, `NaN` / `Infinity`, depth and a long
 integer refused) for VALIDATION only and never rebuilt: it must be an object
 whose `model` (1-256 characters) names a configured route by exact name —
-never the default route — of a raw-relay backend and modality `chat`; `stream` is
+never the default route — of a raw-relay backend whose modality matches the endpoint (`/v1/chat/completions`
+takes `chat`, `/v1/embeddings` `embedding`, `/v1/rerank` `rerank`; a mismatch is a
+400 "not served by this endpoint"); `stream` is
 absent or a boolean and `true` on chat only `Scripts/llm-router.py:_rt_parse_raw_inbound`.
 `/v1/messages` to a `rawllm` route enters through the Anthropic parser, whose
 validation only reads the body, and is relayed as the client's bytes too; it
@@ -1312,7 +1314,13 @@ characters. An upstream 3xx is never followed.
   slot freed.
 
 2xx JSON and SSE content are not scrubbed; only relayed error text is.
-`GET /v1/models` lists `rawllm` routes with modality `chat`.
+`GET /v1/models` lists a `rawllm` route with its own modality: `chat` (the
+default; also what `/v1/messages` serves), `embedding` or `rerank`. A route
+serving an embedding or a rerank model (bge-m3, bge-reranker-v2-m3) must say so
+with `"modality": "embedding"` or `"modality": "rerank"`; an older config that
+left such a route at `chat` now has `/v1/embeddings` and `/v1/rerank` refused
+for it (a behaviour change, ADR 0035 addendum). An embedding or rerank route is
+never served by `/v1/messages` or the image endpoints.
 
 ## OAuth: the token store and the write-back
 

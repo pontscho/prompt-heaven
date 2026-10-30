@@ -368,6 +368,9 @@ their refusals and the OAuth write-back keeping them; A9 now takes
 A53 no longer list a one-element `bind` list as a bad type, and the live
 two-address cases bind `127.0.0.2` only where the host can (Linux), exercising
 `127.0.0.1` alone on macOS `tests/run.py:SUITES`.
+The `embedding` and `rerank` route modalities left `llm_router` at 483: they
+extend cases A55, V5, V12 and V13 (accept/refuse matrix, each raw endpoint
+admitting only its modality, the listing and its filter) rather than add one.
 These are a snapshot copied for the reader, not a second authority: the
 table wins wherever the two disagree, and the fleet total is computed by the
 run, never typed `tests/run.py:main`.
