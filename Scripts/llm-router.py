@@ -1108,7 +1108,7 @@ _RT_BACKEND_KEYS = frozenset({"kind", "base_url", "allow_private", "allow_loopba
 _RT_ROUTE_KEYS = frozenset({"backend", "model", "options", "display_name",
                             "max_input_tokens", "max_tokens", "vision", "modality",
                             "sizes", "default_size"})
-_RT_MODALITIES = ("chat", "image")
+_RT_MODALITIES = ("chat", "image", "embedding", "rerank")
 _RT_SIZES_LIMIT = 32                      # entries in an image route's advertised `sizes`
 _RT_SIZE_RE = re.compile(r"[1-9][0-9]{1,4}x[1-9][0-9]{1,4}")   # fullmatch; "auto" is the other spelling
 _RT_ROUTE_LIMIT_KEYS = ("max_input_tokens", "max_tokens")   # a route's optional advertised caps
@@ -1536,7 +1536,7 @@ def _rt_cfg_route(name: str, entry: Any, backends: Mapping[str, BackendSpec],
         raise ConfigError(f"{where}.modality: not allowed on the default route (image endpoints never use it)")
     modality = entry.get("modality", "chat")
     if not isinstance(modality, str) or modality not in _RT_MODALITIES:
-        raise ConfigError(f"{where}.modality: must be chat or image")
+        raise ConfigError(f"{where}.modality: must be one of chat, image, embedding, rerank")
     raw = entry.get("options", {})
     if not isinstance(raw, dict):
         raise ConfigError(f"{where}.options: must be an object")
@@ -2145,6 +2145,9 @@ def _rt_parse_inbound(endpoint: str, body: Any, headers: Any, cfg: RouterConfig)
             if not isinstance(tool, dict) or not isinstance(tool.get("name"), str):
                 raise _rt_bad("tools.%d" % k, "must be an object with a string name")
     route = _rt_route(cfg, model)
+    if route.modality in ("embedding", "rerank"):
+        raise _rt_bad("model", "route %s is not a chat model; use /v1/%s"
+                      % (_log_value(route.name), "embeddings" if route.modality == "embedding" else "rerank"))
     if route.modality != "chat":
         raise _rt_bad("model", "route %s is an image model; use /v1/images/generations or /v1/images/edits"
                       % _log_value(route.name))
@@ -2474,7 +2477,9 @@ def _rt_parse_image_inbound(endpoint: str, content_type: str, raw: bytes, header
     model = fields["model"]
     route = _rt_route_named(cfg, model)
     if route.modality != "image":
-        raise _rt_bad("model", "route %s is a chat model; use /v1/messages" % _log_value(route.name))
+        raise _rt_bad("model", "route %s is %s model; use %s"
+                      % (_log_value(route.name), "a chat" if route.modality == "chat" else "not an image",
+                         "/v1/messages" if route.modality == "chat" else "its own endpoint"))
     backend = cfg.backends[route.backend]
     adapter_cls = KIND_CLASSES[backend.kind]
     if endpoint == "images_edits" and media == "application/json" and not adapter_cls.IMAGE_EDIT_JSON:
@@ -2497,6 +2502,7 @@ def _rt_parse_image_inbound(endpoint: str, content_type: str, raw: bytes, header
 # The three OpenAI-shaped inbound endpoints of a raw-relay (rawllm) route -> their token. /v1/messages to a
 # rawllm route is not here: it enters through _rt_parse_inbound and is relayed raw by the same adapter.
 _RT_RAW_ENDPOINTS = frozenset({"chat_completions", "embeddings", "rerank"})
+_RT_RAW_ENDPOINT_MODALITY = {"chat_completions": "chat", "embeddings": "embedding", "rerank": "rerank"}
 _RT_RAW_STREAM_ENDPOINTS = frozenset({"chat_completions"})      # `stream: true` is accepted on chat only
 _RT_RAW_WATCHED = ("model", "stream")                           # the only keys the router reads
 
@@ -2545,9 +2551,10 @@ def _rt_parse_raw_inbound(endpoint: str, raw: bytes, headers: Any, cfg: RouterCo
         raise _rt_bad("stream", "is not supported on this endpoint")
     route = _rt_route_named(cfg, model)
     backend = cfg.backends[route.backend]
-    if route.modality != "chat" or not KIND_CLASSES[backend.kind].RAW_RELAY:
-        raise _rt_bad("model", "route %s is not served by a raw LLM backend; use /v1/messages or the image endpoints"
-                      % _log_value(route.name))
+    if route.modality != _RT_RAW_ENDPOINT_MODALITY[endpoint] or not KIND_CLASSES[backend.kind].RAW_RELAY:
+        raise _rt_bad("model", "route %s is not served by this endpoint (modality %s); use /v1/messages, "
+                      "the route's own raw endpoint or the image endpoints"
+                      % (_log_value(route.name), route.modality))
     return InboundRequest(endpoint=endpoint, requested_model=model, body={"model": model}, stream=stream,
                           route=route, backend=backend, client_headers={}, scrub=cfg.scrub,
                           raw=raw, content_type="application/json", fields=types.MappingProxyType({}))
@@ -6202,7 +6209,7 @@ class RawllmAdapter(Adapter):
     FORWARDABLE = frozenset({"anthropic-version", "anthropic-beta"})
     DEFAULT_FORWARD = frozenset({"anthropic-version", "anthropic-beta"})
     ROUTE_OPTIONS: Mapping[str, _RtOptionValidator] = {}
-    MODALITIES = frozenset({"chat"})
+    MODALITIES = frozenset({"chat", "embedding", "rerank"})
     RAW_RELAY = True
     RAW_PATHS = {"messages": "/v1/messages", "chat_completions": "/v1/chat/completions",
                  "embeddings": "/v1/embeddings", "rerank": "/v1/rerank"}
@@ -8863,7 +8870,7 @@ def _rt_models_modality(query: str) -> Optional[str]:
     values = [value for key, value in pairs if key == "modality"]
     if not values:
         return "all"
-    return values[0] if len(values) == 1 and values[0] in ("chat", "image", "all") else None
+    return values[0] if len(values) == 1 and values[0] in (*_RT_MODALITIES, "all") else None
 
 _RT_MISPLACED_TOKEN = "the router token must appear only in the Authorization header"
 
@@ -10030,6 +10037,8 @@ example config (chmod 600; token: python3 -c 'import secrets;print(secrets.token
   An image route's optional "sizes" (a list of up to 32 unique strings, each "auto" or WIDTHxHEIGHT
   such as "1024x1024") and "default_size" (one such string, in sizes when both are set) are only
   advertised by GET /v1/models, never enforced and never added to a request; a chat route refuses them.
+  A rawllm route may also be "embedding" (served by /v1/embeddings only) or "rerank" (/v1/rerank
+  only); /v1/chat/completions and /v1/messages serve "chat" routes only.
   A route's optional "modality" ("chat", the default, or "image"): an image route is served by
   POST /v1/images/generations and /v1/images/edits (OpenAI-shaped, multipart or JSON edits, no
   streaming yet; errors there are the OpenAI envelope) and refused 400 on /v1/messages, and a chat

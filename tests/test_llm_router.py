@@ -2737,8 +2737,8 @@ def gb_check_entry(label, entry, want_id, want_display, launched):
                       ("object", "model"), ("owned_by", "llm-router")):
         if entry[key] != want:
             problems.append("%s: %s %r, expected %r" % (label, key, entry[key], want))
-    if entry["modality"] not in ("chat", "image"):
-        problems.append("%s: modality %r, expected chat or image" % (label, entry["modality"]))
+    if entry["modality"] not in ("chat", "image", "embedding", "rerank"):
+        problems.append("%s: modality %r, expected chat, image, embedding or rerank" % (label, entry["modality"]))
     epoch = entry["created"]
     if isinstance(epoch, bool) or not isinstance(epoch, int):
         problems.append("%s: created %r is not an integer" % (label, epoch))
@@ -18069,7 +18069,7 @@ def group_q(suite, fixture_root):
                 for label, value in (("an unknown word", "video"), ("a non-string", 7), ("null", None)):
                     problems += ga_refused(
                         mod, write(lambda c, v=value: c["routes"][GQ_IMG].__setitem__("modality", v)),
-                        [where + ".modality", "chat or image"], "modality %s" % label, absent=("video",))
+                        [where + ".modality", "chat, image, embedding, rerank"], "modality %s" % label, absent=("video",))
                 for label, value in (("image", "image"), ("chat", "chat")):
                     problems += ga_refused(
                         mod, write(lambda c, v=value: c.__setitem__("default", {"backend": "oa", "model": "gpt-5",
@@ -20180,7 +20180,7 @@ def gs_s1(fixture_root, mod):
         mod, write(lambda c: c.__setitem__("default", {"backend": "cx", "model": "gpt-5", "modality": "image"})),
         ["default.modality"], "modality on the default route")
     problems += ga_refused(mod, write(lambda c: c["routes"][GS_IMG].__setitem__("modality", "video")),
-                           [where + ".modality", "chat or image"], "an unknown modality", absent=("video",))
+                           [where + ".modality", "chat, image, embedding, rerank"], "an unknown modality", absent=("video",))
     for backend, kind in (("ms", "mistral"), ("pt", "passthrough"), ("ll", "llamacpp")):
         problems += ga_refused(
             mod, write(lambda c, b=backend: c["routes"][GS_IMG].__setitem__("backend", b)),
@@ -21971,8 +21971,8 @@ def gv_config(peer_url):
         },
         "routes": {
             GV_CHAT: {"backend": "tfv", "model": GV_CHAT},
-            GV_EMB: {"backend": "tfv", "model": GV_EMB},
-            GV_RANK: {"backend": "tfv", "model": GV_RANK},
+            GV_EMB: {"backend": "tfv", "model": GV_EMB, "modality": "embedding"},
+            GV_RANK: {"backend": "tfv", "model": GV_RANK, "modality": "rerank"},
             GV_NOKEY: {"backend": "tfv-nokey", "model": GV_NOKEY},
             GV_FAST: {"backend": "tfv-fast", "model": GV_FAST},
             GV_PASS: {"backend": "tfv-pass", "model": "tf-v-pass-up"},
@@ -22345,6 +22345,17 @@ def gv_v5(ctx):
         if err is None or err.get("code") != "model_not_found":
             problems.append("%s: an unknown model's error code is %r, expected model_not_found"
                             % (path, (err or {}).get("code")))
+    # Each endpoint admits only its own modality: chat, embedding and rerank routes are not interchangeable.
+    for path in GV_NEW_PATHS:
+        for other in (GV_CHAT, GV_EMB, GV_RANK):
+            if other == GV_MODEL_OF[path]:
+                continue
+            status, _h, got = gv_post(client, path, b'{"model":"%s"}' % other.encode())
+            problems += gv_oai("%s with the %s route" % (path, other), status, got, 400, "not served")
+    for other in (GV_EMB, GV_RANK):
+        status, _h, got = gv_post(client, GV_MSG_P, json.dumps({"model": other, "max_tokens": 4, "messages": [
+            {"role": "user", "content": "x"}]}).encode())
+        problems += gv_anth("/v1/messages with the %s route" % other, status, got, 400, "not a chat model")
     if len(peer.requests) != before:
         problems.append("a refused request reached the peer (%d)" % (len(peer.requests) - before))
     # stream: chat only.
@@ -22757,6 +22768,12 @@ def gv_v12(fixture_root, mod):
                                 getattr(spec, "auth_header", None), getattr(spec, "api_key", None)),))
         if getattr(cfg.routes.get(GV_CHAT), "modality", None) != "chat":
             problems.append("the rawllm route's modality is not chat")
+    for modality in ("embedding", "rerank"):
+        cfg, more = ga_accepted(mod, write(lambda c, m=modality: c["routes"][GV_CHAT].update(modality=m)),
+                                "a rawllm %s route" % modality)
+        problems += more
+        if cfg is not None and getattr(cfg.routes.get(GV_CHAT), "modality", None) != modality:
+            problems.append("a rawllm %s route: modality is %r" % (modality, getattr(cfg.routes.get(GV_CHAT), "modality", None)))
     for label, mutate in (("an api_key", lambda c: c["backends"]["rl"].update(api_key=TF_KEY_RAWLLM)),
                           ("an api_key and auth_header authorization",
                            lambda c: c["backends"]["rl"].update(api_key=TF_KEY_RAWLLM, auth_header="authorization")),
@@ -22791,6 +22808,24 @@ def gv_v12(fixture_root, mod):
              ["routes.%s.options" % GV_CHAT, "max_n"]),
             ("an image route", lambda c: c["routes"][GV_CHAT].update(modality="image"),
              ["routes.%s.modality" % GV_CHAT, "rawllm"]),
+            ("an embedding route on a passthrough backend",
+             lambda c: c["routes"]["tf-v-other"].update(modality="embedding"),
+             ["routes.tf-v-other.modality", "kind passthrough does not serve embedding"]),
+            ("a rerank route on a passthrough backend",
+             lambda c: c["routes"]["tf-v-other"].update(modality="rerank"),
+             ["routes.tf-v-other.modality", "kind passthrough does not serve rerank"]),
+            ("an embedding route whose model differs from its key",
+             lambda c: c["routes"][GV_CHAT].update(modality="embedding", model="other"),
+             ["routes.%s.model" % GV_CHAT, "rawllm"]),
+            ("sizes on an embedding route",
+             lambda c: c["routes"][GV_CHAT].update(modality="embedding", sizes=["auto"]),
+             ["routes.%s.sizes" % GV_CHAT, "image"]),
+            ("a modality embedding default route",
+             lambda c: c.__setitem__("default", {"backend": "pt", "model": "up", "modality": "embedding"}),
+             ["default.modality"]),
+            ("a modality rerank default route",
+             lambda c: c.__setitem__("default", {"backend": "pt", "model": "up", "modality": "rerank"}),
+             ["default.modality"]),
             ("the default route", lambda c: c.__setitem__("default", {"backend": "rl", "model": "up"}),
              ["default", "rawllm"])):
         problems += ga_refused(mod, write(mutate), needles, label, absent=(TF_KEY_RAWLLM,))
@@ -22843,9 +22878,19 @@ def gv_v13(ctx):
     problems += bad
     if obj is not None:
         entries = {e.get("id"): e for e in obj.get("data", [])}
-        for key in (GV_CHAT, GV_EMB, GV_RANK, GV_NOKEY, GV_FAST, GV_PASS):
-            if entries.get(key, {}).get("modality") != "chat":
-                problems.append("GET /v1/models: %s is %r, expected an entry of modality chat" % (key, entries.get(key)))
+        for key, want in ((GV_CHAT, "chat"), (GV_EMB, "embedding"), (GV_RANK, "rerank"), (GV_NOKEY, "chat"),
+                          (GV_FAST, "chat"), (GV_PASS, "chat")):
+            if entries.get(key, {}).get("modality") != want:
+                problems.append("GET /v1/models: %s is %r, expected an entry of modality %s" % (key, entries.get(key), want))
+    for query, want in (("chat", [GV_CHAT, GV_NOKEY, GV_FAST, GV_PASS]), ("embedding", [GV_EMB]), ("rerank", [GV_RANK])):
+        status, hdrs, body = gb_get(client, "/v1/models?modality=" + query)
+        obj, bad = gb_json_200("GET /v1/models?modality=" + query, status, hdrs, body)
+        problems += bad
+        if obj is not None and sorted(e.get("id") for e in obj.get("data", [])) != sorted(want):
+            problems.append("?modality=%s lists %r, expected %r" % (query, [e.get("id") for e in obj["data"]], want))
+    status, _h, _b = gb_get(client, "/v1/models?modality=bogus")
+    if status != 400:
+        problems.append("?modality=bogus: status %r, expected 400" % (status,))
     status, hdrs, body = gb_get(client, "/v1/models?modality=image")
     obj, bad = gb_json_200("GET /v1/models?modality=image", status, hdrs, body)
     problems += bad
@@ -26330,8 +26375,9 @@ def group_j(suite, fixture_root, pyc_before, tree_before):
         if rl is None:
             problems.append("ADAPTERS holds no rawllm")
         else:
-            if rl.MODALITIES != frozenset({"chat"}):
-                problems.append("rawllm.MODALITIES is %r, expected {'chat'}" % (set(rl.MODALITIES),))
+            if rl.MODALITIES != frozenset({"chat", "embedding", "rerank"}):
+                problems.append("rawllm.MODALITIES is %r, expected {'chat', 'embedding', 'rerank'}"
+                                % (set(rl.MODALITIES),))
             if dict(rl.RAW_PATHS) != {"messages": "/v1/messages", "chat_completions": "/v1/chat/completions",
                                       "embeddings": "/v1/embeddings", "rerank": "/v1/rerank"}:
                 problems.append("rawllm RAW_PATHS %r" % (dict(rl.RAW_PATHS),))
