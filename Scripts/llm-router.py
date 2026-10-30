@@ -9824,7 +9824,7 @@ class _RouterHandler(BaseHTTPRequestHandler):
         cfg = self.server.cfg
         modality = _rt_models_modality((self.path or "").partition("?")[2])
         if modality is None:
-            self._refuse(400, message="query: modality must be given once, as chat, image or all")
+            self._refuse(400, message="query: modality must be given once, as chat, image, embedding, rerank or all")
             return
         if endpoint == "models":
             self._send_json(200, _rt_models_list(cfg, self.server.started_at, self.server.started_epoch, modality))
