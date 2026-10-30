@@ -338,3 +338,11 @@ ancestor stays refused there -- and darwin uses `--egress-port`, not the socket.
 ## Addendum (2026-10-12): the code landed in c643221; the page is append-only
 
 The Status paragraph above was written while the code sat uncommitted on top of `5498e8f`. That is no longer true. The runner's `network` config and per-run CONNECT proxy, the two restricted-only sbx egress flags and their gate rows, the Linux `--rlimit-nproc +N` task-count fix, the security-review fixes and their tests were committed as `c643221` (2026-10-12), together with the dated addenda to [[0031-sbx-restricted-mode]] and [[0032-a-runner-behind-a-proxy]]. The page now carries `sources:` and `verified.commit: c643221`. From that commit on this ADR is append-only: a later change to runner egress lands as a dated addendum here, never as an edit of the body.
+
+## Addendum (2026-10-30): network.internal: an opt-in exact IPv4:port allowlist for internal targets
+
+Owner need: a sandboxed script must reach exactly 127.0.0.1:8082 and 192.168.2.245:8082 (llm-router). That was impossible by design: the config refused IP literals in network.allow and the proxy answered 403 for every non-public address.
+
+Decision: a new optional key network.internal, a non-empty list of exact IPv4:port strings in canonical dotted form (port 1-65535; no hostnames, wildcards, ranges or duplicates; link-local, 0.0.0.0/8, multicast and broadcast refused; at most 16). network.allow may be absent or empty only when internal is present; IP literals stay refused in allow. In the proxy, a CONNECT whose host:port equals an internal entry skips the name rules, the ports list, the lookup and the public-address check and connects directly to the literal. Every other literal CONNECT stays 403, and a hostname that resolves to a private address stays refused, so the DNS-rebinding guard is unchanged. The per-run sbx egress endpoint is untouched and works with internal entries alone. Tests: mcp_sandbox A20 and N23 (192 -> 194).
+
+Declared limit: a listed internal entry gives the script raw TCP to that host:port through the tunnel; the proxy does not inspect the stream, and whatever speaks on that port (here llm-router, with whatever credentials it holds) is reachable by any script the runner executes. List only endpoints you would hand to an untrusted script.

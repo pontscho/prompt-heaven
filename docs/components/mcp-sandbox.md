@@ -150,6 +150,15 @@ top level is `version` (1), `sbx`, `work_root`, `seccomp`, `log_content`,
   refusal names `network.allow[i]`, `network.ports[i]` or `network.nat64[i]`,
   never the value. The allowlist is the runner's, not a skill's. How a run uses
   it is "Network egress" below.
+- `network.internal` is an optional, opt-in list of exact `IPv4:port` strings
+  (canonical dotted form, port 1-65535, no hostnames, wildcards, ranges or
+  duplicates; link-local, `0.0.0.0/8`, multicast and broadcast refused)
+  `Scripts/mcp-sandbox.py:_cfg_internal`
+  `Scripts/mcp-sandbox.py:_internal_entry_problem`, bounded by
+  `Scripts/mcp-sandbox.py:_NETWORK_INTERNAL_MAX`. It is the only way to name
+  loopback or a private address (an IP literal stays refused in `allow`); with
+  it `allow` may be absent or empty, without it `allow` stays required
+  (`mcp_sandbox:A20`).
 - Every integer limit is range-checked without coercion — a bool, a float or a
   string is refused — against `Scripts/mcp-sandbox.py:_LIMIT_RANGES`; the
   ranges are the code's, this page does not copy them. `timeout_ms` runs from
@@ -411,6 +420,13 @@ site-local IPv6 forms, the well-known NAT64 prefixes
 `Scripts/mcp-sandbox.py:_NAT64_NETS` and the configured `network.nat64`; and
 the connect goes to the vetted address itself, never a second resolution
 `Scripts/mcp-sandbox.py:_default_connector`.
+
+**The internal exception.** A CONNECT whose host is an IP literal and whose
+`host:port` equals a `network.internal` entry skips the name rules, the port
+list, the lookup and the public-address check, and connects straight to that
+literal; any other literal, an unlisted port on a listed IP, and a hostname that
+resolves to a private address stay 403 (`mcp_sandbox:N23`). A listed entry gives
+the script raw TCP to that host:port.
 
 **Bounds** are the code's: tunnels per run (503 beyond)
 `Scripts/mcp-sandbox.py:_EGRESS_MAX_TUNNELS`, connections per run
