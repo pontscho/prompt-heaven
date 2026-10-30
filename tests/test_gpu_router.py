@@ -9472,7 +9472,7 @@ def group_g(suite, fixture_root):
 
 
 # ---------------------------------------------------------------------------
-# Group E2E -- llm-router (kind sdcpp) -> gpu-router -> the stub child
+# Group E2E -- llm-router (kinds sdcpp and rawllm) -> gpu-router -> the stub child
 # ---------------------------------------------------------------------------
 # Three kinds of real process per case and nothing in-process: Scripts/gpu-router.py
 # as a subprocess (`launch`, --debug), Scripts/llm-router.py on the same
@@ -9507,6 +9507,12 @@ def group_g(suite, fixture_root):
 #   SC-6.  Neither key (the gpu-router token, which is llm-router's api_key, and
 #     llm-router's own auth_token) appears in either router's stderr at --debug,
 #     in a stub's environment or argv (--dump-env), or in a client answer.
+#   Stage 3 (E6, SC-4).  A backend of kind rawllm at http://127.0.0.1:<port>/m/<app>
+#     with the same keyed bearer relays /v1/chat/completions (JSON and SSE),
+#     /v1/embeddings, /v1/rerank and /v1/messages RAW to the LLM stub: the stub's
+#     answer carries the SHA-256 of the body it received, so the round trip is
+#     proven byte-exact by that SHA, and its recorded header names hold no
+#     `authorization`.  The three model ids of the one child start it once.
 # If llm-router refuses the config -- the credential phase absent: exit 2 with
 # the refusal naming `api_key` -- the case is INFO and skipped, so the
 # gpu-router phases stay shippable alone.  Any other llm-router start failure,
@@ -9518,6 +9524,7 @@ GE_CASES = (
     "E3 forced unload, 529 relayed",
     "E4 wrong key: 502, no start",
     "E5 chat/image/embedding, FIFO",
+    "E6 raw LLM routes, bearer chain",
 )
 
 LLM_SERVER = H.repo_path("Scripts", "llm-router.py")
@@ -9569,18 +9576,19 @@ def _e_sweep(sandbox, world, models, names):
 
 
 @contextlib.contextmanager
-def _e_world(sandbox, models, routes, names, key=TF_TOKEN):
+def _e_world(sandbox, models, routes, names, key=TF_TOKEN, config=None):
     """gpu-router over *models*, then llm-router over *routes* pointing at it; both at --debug.
 
-    Raises _ESkip when llm-router refuses the keyed sdcpp backends.  On exit both
-    are closed (llm-router first), the gpu-router exit code checked and the SC-6
+    *config* builds llm-router's config file (default _e_llm_config: keyed sdcpp backends; E6 passes
+    _e_raw_config: keyed rawllm backends).  Raises _ESkip when llm-router refuses the keyed sdcpp
+    backends.  On exit both are closed (llm-router first), the gpu-router exit code checked and the SC-6
     sweep run; problems in world.problems."""
     world = types.SimpleNamespace(sd=None, llm=None, problems=[])
     try:
         world.sd, ready = launch(write_config(sandbox, base_config(models)), ["--debug"], label="sd")
         if ready is None:
             raise AssertionError(_p_not_ready(world.sd))
-        world.llm, ready = launch(_e_llm_config(sandbox, world.sd.port, routes, key), ["--debug"],
+        world.llm, ready = launch((config or _e_llm_config)(sandbox, world.sd.port, routes, key), ["--debug"],
                                   label="llm", server=LLM_SERVER)
         if ready is None:
             code = world.llm.wait_exit()
@@ -9743,8 +9751,8 @@ E_HOLD_S = 1.0     # e5: the sd stub's answer delay, so the llm and the second i
 def e5(_mod, sandbox, names, optional):
     """Step 11 (SC-2): chat, image and embedding requests interleave with the right app started
     for each, in strict FIFO across the two apps (A, L, A) with a swap each way; GET /v1/models
-    lists every configured id before and after a swap.  No llm-router here: the raw llm kind lives in
-    stage 3, so the client speaks to the live front directly."""
+    lists every configured id before and after a swap.  No llm-router here: the client speaks to the
+    live front directly (E6 is the llm-router chain for the same routes)."""
     names.extend(("A", "L"))
     mod, why = load_module("e5")
     if mod is None:
@@ -9812,7 +9820,107 @@ def e5(_mod, sandbox, names, optional):
                                    "back to L; /v1/models follows the resident app"]
 
 
-GE_FUNCS = (e1, e2, e3, e4, e5)
+E_RAW_ROUTES = {"Qwen3.8-Flash-Next": "L", "bge-m3": "L", "bge-reranker-v2-m3": "L"}   # llm-router route key -> app
+
+
+def _e_raw_config(sandbox, gpu_port, routes, key=TF_TOKEN):
+    """A 0600 llm-router config: one rawllm backend per route of *routes* ({route key: gpu-router app}),
+    each at http://127.0.0.1:<gpu_port>/m/<app> with *key* as a bearer; the route key is the model id."""
+    backends, table = {}, {}
+    for index, (route, app) in enumerate(sorted(routes.items())):
+        backend = "raw%d" % index
+        backends[backend] = {"kind": "rawllm", "base_url": "http://%s:%d/m/%s" % (LOOPBACK, gpu_port, app),
+                             "allow_private": True, "allow_loopback": True,
+                             "api_key": key, "auth_header": "authorization"}
+        table[route] = {"backend": backend, "model": route}
+    doc = {"auth_token": E_LLM_TOKEN, "backends": backends, "routes": table}
+    return write_file(os.path.join(sandbox, "llm-router.json"), json.dumps(doc, indent=2, sort_keys=True) + "\n")
+
+
+def _e_raw_body(tag, route, path, **extra):
+    """A unique JSON body for llm-router route *route* on *path* (its SHA identifies it)."""
+    doc = {"model": route}
+    if path in ("/v1/chat/completions", "/v1/messages"):
+        doc["messages"] = [{"role": "user", "content": "%s %s-%s" % (P_PROMPT, tag, secrets.token_hex(4))}]
+    elif path == "/v1/embeddings":
+        doc["input"] = "%s %s-%s" % (P_PROMPT, tag, secrets.token_hex(4))
+    else:
+        doc["query"], doc["documents"] = "%s %s-%s" % (P_PROMPT, tag, secrets.token_hex(4)), ["a", "b"]
+    if path == "/v1/messages":
+        doc["max_tokens"] = 16
+    doc.update(extra)
+    return json.dumps(doc, sort_keys=True).encode("utf-8")
+
+
+def _e_raw_check(label, resp, body, sandbox, path, stream=False):
+    """Problems unless llm-router answered 200 with the LLM stub's answer for exactly *body* (JSON, or the
+    stub's SSE events ending at [DONE] for a stream), which the stub received once on *path* with no
+    Authorization header (the gpu-router consumed the bearer)."""
+    if _e_secret_in(resp.raw.decode("latin-1")):
+        return ["%s: the client's answer carries a key" % label]
+    if resp.status != 200:
+        return ["%s: llm-router answered %s, expected 200 and the stub's answer" % (label, resp.describe())]
+    problems = []
+    sha = _q_sha(body)
+    if stream:
+        if (resp.header("content-type") or "").split(";")[0] != "text/event-stream":
+            problems.append("%s: Content-Type %r, expected text/event-stream" % (label, resp.header("content-type")))
+        if not resp.body.endswith(b"data: [DONE]\n\n") or resp.body.count(b"data: ") < 2 \
+                or sha.encode("ascii") not in resp.body:
+            problems.append("%s: the stream is not the stub's events for this body ending at [DONE]" % label)
+    else:
+        doc = resp.json()
+        if not isinstance(doc, dict) or doc.get("tf_request_sha256") != sha:
+            problems.append("%s: the answer is not the stub's answer for this body" % label)
+        if (resp.header("content-type") or "").split(";")[0] != P_JSON:
+            problems.append("%s: Content-Type %r, expected %s" % (label, resp.header("content-type"), P_JSON))
+    sends = _q_sends(sandbox, "L", body)
+    if len(sends) != 1:
+        problems.append("%s: the stub received this body %d times, expected once" % (label, len(sends)))
+    else:
+        if sends[0].get("path") != path:
+            problems.append("%s: the stub received it on %r, expected %r" % (label, sends[0].get("path"), path))
+        if "authorization" in (sends[0].get("header_names") or []):
+            problems.append("%s: an Authorization header reached the stub (the bearer was forwarded)" % label)
+    return problems
+
+
+@_q_live
+def e6(mod, sandbox, names, optional):
+    """Stage 3 (SC-4): llm-router (rawllm routes) -> gpu-router -> the LLM stub.  All four POST route families --
+    chat (JSON and SSE), embeddings, rerank, and /v1/messages -- answer through both routers with the body byte-exact
+    at the stub, the bearer chain intact (llm-router's api_key is gpu-router's token, the child sees none of it), the
+    three model ids of the one child started once, and no key in either router's log or in a client answer."""
+    del mod
+    names.append("L")
+    models = {"L": _p_llm_entry(sandbox, "L", "--dump-env")}
+    problems = []
+    with _e_world(sandbox, models, E_RAW_ROUTES, names, config=_e_raw_config) as w:
+        for tag, route, path, extra, stream in (
+                ("chat", "Qwen3.8-Flash-Next", "/v1/chat/completions", {}, False),
+                ("embeddings", "bge-m3", "/v1/embeddings", {}, False),
+                ("rerank", "bge-reranker-v2-m3", "/v1/rerank", {}, False),
+                ("messages", "Qwen3.8-Flash-Next", "/v1/messages", {}, False),
+                ("chat-stream", "Qwen3.8-Flash-Next", "/v1/chat/completions", {"stream": True}, True)):
+            body = _e_raw_body("e6-" + tag, route, path, **extra)
+            resp = _p_exchange(w.llm.port, _p_head(w.llm.port, "POST", path, token=E_LLM_TOKEN, length=len(body),
+                                                   extra=("Connection: close",)) + body)
+            problems += _e_raw_check(tag, resp, body, sandbox, path, stream)
+        models_resp = _p_exchange(w.llm.port, _p_head(w.llm.port, "GET", "/v1/models", token=E_LLM_TOKEN,
+                                                      ctype=None, extra=("Connection: close",)))
+        listed = sorted(e.get("id") for e in (models_resp.json() or {}).get("data", []))
+        if models_resp.status != 200 or listed != sorted(E_RAW_ROUTES):
+            problems.append("llm-router's /v1/models lists %r (status %s), expected the three route keys"
+                            % (listed, models_resp.status))
+        if len(read_starts(sandbox, "L")) != 1:
+            problems.append("the one LLM child started %d times for the five requests, expected once"
+                            % len(read_starts(sandbox, "L")))
+    return problems + w.problems, ["chat, embeddings, rerank, messages and a chat stream through llm-router (rawllm) -> "
+                                   "gpu-router -> one LLM child: bodies byte-exact, no Authorization at the child, one "
+                                   "start, /v1/models lists the three ids, no key in any log or answer"]
+
+
+GE_FUNCS = (e1, e2, e3, e4, e5, e6)
 
 
 def group_e2e(suite, fixture_root):

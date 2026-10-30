@@ -224,12 +224,14 @@ llm_router/ README.md                           provenance table, the no-key rul
             tf_mistral_stream_tool.sse          Mistral one tool call
             tf_mistral_stream_parallel.sse      Mistral two parallel tool calls
             tf_mistral_error_extra_inputs.json  Mistral 422 "Extra inputs are not permitted"
+            tf_rawllm_chat.sse                  rawllm OpenAI chat stream, ends at [DONE]
+            tf_rawllm_messages.sse              rawllm Anthropic stream, ends at message_stop
 ```
 
 Backend wire shapes a scripted loopback peer replays to `Scripts/llm-router.py`;
 read by `tests/test_llm_router.py` groups E (llama.cpp quirks), F (Anthropic ->
-chat-completions translation) and G (chat-completions SSE -> Anthropic SSE);
-nothing imports them. Whether each file is a reduced capture (M4/M5) or
+chat-completions translation), G (chat-completions SSE -> Anthropic SSE) and V
+(the rawllm raw relay's two streams); nothing imports them. Whether each file is a reduced capture (M4/M5) or
 synthetic is recorded per file in `llm_router/README.md`, not here. **No
 fixture holds a key** in any form; case J5 sweeps the directory on every run.
 The `tf` prefix is kept on every file name.

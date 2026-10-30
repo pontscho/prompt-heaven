@@ -8,7 +8,7 @@
 One router instance serves Claude Code. It accepts Anthropic Messages requests
 (/v1/messages, /v1/messages/count_tokens), looks the request's `model` up in
 its JSON config, and forwards the call to the backend that route names. There
-are six backend kinds (the seventh name, anthropic, is reserved and refused):
+are seven backend kinds (the eighth name, anthropic, is reserved and refused):
   passthrough  relayed as-is to an Anthropic-compatible upstream;
   llamacpp     llama-server's own /v1/messages, its quirks repaired;
   mistral      translated to and from the Mistral chat-completions API, with
@@ -23,6 +23,13 @@ are six backend kinds (the seventh name, anthropic, is reserved and refused):
   sdcpp        a stable-diffusion.cpp sd-server, image routes only (no chat; an
                optional api_key goes as a bearer, e.g. to a gpu-router in
                front): the image endpoints below, its answer rebuilt.
+  rawllm       an inferNO-style OpenAI/Anthropic server (typically behind a
+               gpu-router; an optional api_key goes as a bearer), relayed RAW
+               and never translated: POST /v1/chat/completions, /v1/embeddings
+               and /v1/rerank (OpenAI-shaped errors) and /v1/messages to a rawllm
+               route go to a fixed upstream path with the client's bytes
+               untouched; a 2xx JSON answer comes back untouched, an SSE answer
+               as whole events byte for byte. See "Raw LLM relay" below.
 codex and openai share one adapter driven by a profile row per wire dialect;
 they always stream upstream and aggregate for a non-stream client, and carry
 reasoning as thinking blocks signed "lrs1.<backend>.". GET /v1/models and
@@ -53,6 +60,8 @@ Layout: one file, eight units, in file order (each has one reason to change)
   3. InboundRequest, _rt_parse_inbound(), _rt_route() -- validate the Anthropic request once; route lookup;
      _rt_parse_image_inbound(), _rt_image_fields() -- the image endpoints' canonical-only sniffer of
      model and the guard fields (JSON or multipart), the raw bytes kept for the forward;
+     _rt_parse_raw_inbound() -- the strict-JSON check of model and stream on /v1/chat/completions,
+     /v1/embeddings and /v1/rerank (a rawllm route only), the raw bytes kept for the forward;
      _rt_models_list() / _rt_model_entry() -- the GET /v1/models answer shapes.
   4. The SSE toolkit -- _rt_sse_events() (a line parser) and AnthropicSseEncoder (a pure state machine
      that always closes its envelope).
@@ -186,6 +195,30 @@ addendum the limits of the codex/openai kinds, OAuth and Mistral reasoning)
     The upstream error text is relayed (scrubbed, cut) for 400/404/413/422/429
     only. The image_url values of a JSON edit are fetched by OpenAI, outside this router's address
     policy. A header-defect 400 and an unknown-path 404 keep the Anthropic envelope.
+  * Raw LLM relay (kind rawllm): the whole request body is read into memory first (the caps below),
+    and a JSON answer (embeddings, rerank, a non-stream chat or messages answer) is held whole under
+    _UPSTREAM_BODY_LIMIT before one byte is sent, so a truncated body is a 502 and never a partial
+    answer; only SSE streams. The body caps are the router's own numbers, not the upstream's: 16 MiB
+    for /v1/chat/completions, 4 MiB for /v1/embeddings and /v1/rerank, each min(cap, --body-limit);
+    /v1/messages keeps the plain --body-limit. --max-llm-requests (default 8) bounds the requests in
+    flight to every rawllm route, /v1/messages included: a gpu-router in front queues without a wait
+    limit, so an uncapped relay would hand every connection slot to the queue. The upstream path is
+    fixed per endpoint and never comes from the client; no upstream response header is copied (a
+    FIXED Content-Type, Cache-Control and framing are the router's; a digit-only Retry-After on a
+    429 is the one exception). An SSE answer ends at [DONE] (chat) or message_stop (messages): an
+    upstream that ends the stream without one gets an in-band error event, never a clean-looking
+    end; comment lines are dropped (the router's own `: ping` keeps an idle stream alive); an event
+    over 2 MiB, a line over 1 MiB or more than 64 lines in an event is an in-band error. An event
+    that names itself `error` is replaced by a fixed error event. /v1/messages/count_tokens on a
+    rawllm route is refused 400 (the upstream is not asked); a model is a rawllm route only by its
+    exact name (no default route, and a route's model must equal its key: the body is not rewritten).
+    Whether the upstream stops its work when the connection closes is the upstream's behaviour,
+    which this router can not see; and nothing notices a departed client on the buffered (JSON)
+    path -- the upstream call runs to its end and holds its slot (a streamed answer polls for the
+    client each tick and closes the upstream when it leaves). idle_timeout is per read: a request
+    queued behind a long generation at a gpu-router sees no byte, so a rawllm backend in front of
+    one needs an idle_timeout above the longest wait it should survive (config range up to 3600 s;
+    the default is 300 s).
 """
 
 import argparse
@@ -321,6 +354,8 @@ _HTTP_CONNECTION_CAP = 32         # default --max-connections
 _CONNECTION_CAP_RANGE = (1, 1024)  # accepted --max-connections values
 _IMAGE_REQUEST_CAP = 4            # default --max-image-requests: image requests in flight at once (D10b)
 _IMAGE_REQUEST_RANGE = (1, 64)    # accepted --max-image-requests values
+_LLM_REQUEST_CAP = 8              # default --max-llm-requests: requests to a rawllm route in flight at once
+_LLM_REQUEST_RANGE = (1, 64)      # accepted --max-llm-requests values
 _HTTP_HEADER_TIMEOUT_S = 10.0     # TOTAL bound on one request line + headers, and per-recv until auth
 # TOTAL header bound while the connection has never authenticated (V3): an
 # unauthenticated socket gives its slot back sooner; never above the header bound.
@@ -346,6 +381,11 @@ _RT_QUEUE_BYTES = 16 * 1024 * 1024  # pump queue bound, counted in bytes (NFR-2b
 _RT_IMAGE_SSE_LINE_LIMIT = 48 * 1024 * 1024
 _RT_IMAGE_SSE_EVENT_LIMIT = 64 * 1024 * 1024
 _RT_IMAGE_SSE_EVENT_LINES = 256
+# A streamed rawllm answer: whole events byte-exact, so the event cap is the chat default
+# (_SSE_EVENT_LIMIT) and an event has at most this many lines (a chat chunk has one, an Anthropic event two).
+_RT_RAW_SSE_EVENT_LINES = 64
+# A forwarded client header of a rawllm backend (anthropic-version / anthropic-beta): at most this long.
+_RT_RAW_HEADER_LIMIT = 256
 # A data-only image event (no `event:` line) completes the stream when its data JSON's "type" ends in
 # ".completed" within the first _RT_IMAGE_TYPE_WINDOW bytes of the data line.
 _RT_IMAGE_TYPE_WINDOW = 512
@@ -792,6 +832,7 @@ class RouterSettings(NamedTuple):   # from the command line (network)
     debug: bool
     log_file: Optional[str]
     max_image_requests: int = _IMAGE_REQUEST_CAP   # trailing, defaulted: in flight at once (D10b)
+    max_llm_requests: int = _LLM_REQUEST_CAP       # trailing, defaulted: rawllm requests in flight at once (H1)
 
 
 class _DupKey:
@@ -1335,14 +1376,15 @@ def _rt_cfg_backend(name: str, entry: Any, token: str) -> BackendSpec:
         if auth_header not in (None, "authorization"):
             raise ConfigError(f"{where}.auth_header: {owner} uses authorization only")
         auth_header = "authorization"
-    elif kind == "sdcpp" and api_key is not None:
+    elif kind in ("sdcpp", "rawllm") and api_key is not None:
         # D-10: sd-server has no auth of its own; a keyed sdcpp backend is a gpu-router (or another
-        # bearer-checking front), so the key travels only as `Authorization: Bearer`.  This branch
+        # bearer-checking front), so the key travels only as `Authorization: Bearer`.  A rawllm backend
+        # (an inferNO-style server, typically behind the same gpu-router) is the same.  This branch
         # must precede the generic x-api-key default below; V14 and the auth_token rule above have
         # already run.  Without a key the chain falls through: auth_header none, and any other
         # header is refused by the "requires an api_key" rule.
         if auth_header not in (None, "authorization"):
-            raise ConfigError(f"{where}.auth_header: kind sdcpp with an api_key sends it as a bearer; "
+            raise ConfigError(f"{where}.auth_header: kind {kind} with an api_key sends it as a bearer; "
                               f"use authorization or omit it")
         auth_header = "authorization"
     elif auth_header is None:
@@ -1431,6 +1473,9 @@ def _rt_cfg_route(name: str, entry: Any, backends: Mapping[str, BackendSpec],
     sizes (a non-empty list of at most _RT_SIZES_LIMIT unique "auto" / WxH strings) and default_size (one
     such string, a member of sizes when both are set) are allowed on an image route only, advertised by
     GET /v1/models and never enforced or injected;
+    a route of a raw-relay kind (rawllm) is a chat route whose model equals its key, and is not
+    allowed on the default route (the body is relayed untouched, and the OpenAI paths find a route
+    by exact name only);
     options are checked by the backend kind's validators and an unknown option is refused by name.
     """
     if where is None:
@@ -1484,6 +1529,14 @@ def _rt_cfg_route(name: str, entry: Any, backends: Mapping[str, BackendSpec],
     adapter_cls = KIND_CLASSES[kind]
     if modality not in adapter_cls.MODALITIES:
         raise ConfigError(f"{where}.modality: kind {kind} does not serve {modality} routes")
+    if adapter_cls.RAW_RELAY:
+        # A raw relay forwards the client's body untouched, `model` included, and the three OpenAI paths
+        # find the route by exact name only: so the upstream reads the route key as its model id, and no
+        # request can fall back to the default route onto such a backend.
+        if where == "default":
+            raise ConfigError(f"{where}: a {kind} backend serves named routes only (no default route)")
+        if model != name:
+            raise ConfigError(f"{where}.model: a {kind} route's model must equal its route key")
     if modality == "image":
         if kind == "openai" and spec.profile == "openai-oauth":
             raise ConfigError(f"{where}.modality: image generation is not available with Sign in with "
@@ -1830,11 +1883,12 @@ _RT_ROLES = ("user", "assistant", "system")
 
 
 class InboundRequest(NamedTuple):   # unit 3: the validated request, built once
-    """The validated request (Anthropic, or an image request: see raw, content_type, fields below).
+    """The validated request (Anthropic, or an image or raw-relay request: see raw, content_type, fields below).
     Keeps the default repr: body, client_headers, raw and fields are client content, so an
     InboundRequest is NEVER formatted into a log line, an error or an exception text (NFR-3, J43)."""
 
-    endpoint: str               # "messages" | "count_tokens" | "images_generations" | "images_edits"
+    endpoint: str               # "messages" | "count_tokens" | "images_generations" | "images_edits" |
+    #                             "chat_completions" | "embeddings" | "rerank" (the last three: a raw-relay route)
     requested_model: str        # body["model"] as the client sent it; the model echo of KD-16
     body: dict                  # the parsed Anthropic body (validated minimum, rest untouched)
     stream: bool
@@ -1854,7 +1908,9 @@ class InboundRequest(NamedTuple):   # unit 3: the validated request, built once
     # An image request (endpoint images_generations | images_edits; body is then just {"model": ...}):
     # the client's bytes, forwarded as they came, the REBUILT canonical Content-Type (D9, never the
     # client's string) and the sniffed guard fields (text). raw and fields hold prompts and images, so
-    # they are never formatted into a log line, an error or `rec` (J43). Empty for every chat request.
+    # they are never formatted into a log line, an error or `rec` (J43). Empty for every chat request --
+    # except one to a raw-relay (rawllm) route, whose raw is the client's body and content_type
+    # application/json (set by _rt_parse_raw_inbound, or by _post for /v1/messages).
     raw: bytes = b""
     content_type: str = ""
     fields: Mapping[str, str] = types.MappingProxyType({})      # read-only: the shared default can not be mutated
@@ -1928,12 +1984,13 @@ def _rt_models_list(cfg: RouterConfig, created_at: str, created_epoch: int, moda
             "last_id": data[-1]["id"] if data else None, "object": "list"}
 
 
-def _rt_forwarded_headers(headers: Any, allowed: FrozenSet[str]) -> Dict[str, str]:
+def _rt_forwarded_headers(headers: Any, allowed: FrozenSet[str], limit: Optional[int] = None) -> Dict[str, str]:
     """The client headers named in *allowed* (a backend's forward_headers), by lower-case name.
 
     A forwardable header sent more than once is a 400 naming the header, never a value (ADR 0015:
-    ambiguity is the defect), and so is one whose value holds a CR or LF (V29). Shared by the chat
-    and the image parsers."""
+    ambiguity is the defect), and so is one whose value holds a CR or LF (V29) or, when *limit* is set
+    (a raw-relay kind: Adapter.FORWARD_VALUE_LIMIT), is longer than *limit* characters or is not printable
+    ASCII. Shared by the chat and the image parsers."""
     client_headers: Dict[str, str] = {}
     for name, value in headers.items():
         key = name.lower()
@@ -1947,6 +2004,13 @@ def _rt_forwarded_headers(headers: Any, allowed: FrozenSet[str]) -> Dict[str, st
                 # parse and http.client's putheader check; a lenient upstream could
                 # read it as a header of its own (V29). Refused, the value never shown.
                 raise _rt_bad("header %s" % _log_value(key), "must not contain CR or LF")
+            if limit is not None:
+                # A raw-relay kind forwards two version-like headers: short, and printable ASCII only (a control
+                # character, DEL or a non-ASCII byte is a 400, never forwarded).
+                if len(value) > limit:
+                    raise _rt_bad("header %s" % _log_value(key), "must be at most %d characters" % limit)
+                if not all(0x20 <= ord(ch) <= 0x7E for ch in value):
+                    raise _rt_bad("header %s" % _log_value(key), "must be printable ASCII")
             client_headers[key] = value
     return client_headers
 
@@ -2019,7 +2083,8 @@ def _rt_parse_inbound(endpoint: str, body: Any, headers: Any, cfg: RouterConfig)
         raise _rt_bad("model", "route %s is an image model; use /v1/images/generations or /v1/images/edits"
                       % _log_value(route.name))
     backend = cfg.backends[route.backend]
-    client_headers = _rt_forwarded_headers(headers, backend.forward_headers)
+    client_headers = _rt_forwarded_headers(headers, backend.forward_headers,
+                                           KIND_CLASSES[backend.kind].FORWARD_VALUE_LIMIT)
     if not route.vision:
         where = _rt_first_image(body)
         if where is not None:
@@ -2361,6 +2426,65 @@ def _rt_parse_image_inbound(endpoint: str, content_type: str, raw: bytes, header
     return InboundRequest(endpoint=endpoint, requested_model=model, body={"model": model}, stream=stream,
                           route=route, backend=backend, client_headers=client_headers, scrub=cfg.scrub,
                           raw=raw, content_type=_rt_image_canonical_ctype(media, boundary), fields=fields)
+
+
+# The three OpenAI-shaped inbound endpoints of a raw-relay (rawllm) route -> their token. /v1/messages to a
+# rawllm route is not here: it enters through _rt_parse_inbound and is relayed raw by the same adapter.
+_RT_RAW_ENDPOINTS = frozenset({"chat_completions", "embeddings", "rerank"})
+_RT_RAW_STREAM_ENDPOINTS = frozenset({"chat_completions"})      # `stream: true` is accepted on chat only
+_RT_RAW_WATCHED = ("model", "stream")                           # the only keys the router reads
+
+
+def _rt_refuse_case_variants(obj: Mapping[str, Any]) -> None:
+    """Refuse a key that only a case-insensitive reader would take for model or stream ("Model", "STREAM"):
+    the router reads the exact lower-case keys, the upstream may not, and raw bytes are relayed (ADR 0015).
+    Shared by _rt_parse_raw_inbound and the /v1/messages path to a raw-relay route."""
+    for key in obj:
+        low = key.casefold()
+        if low in _RT_RAW_WATCHED and key != low:
+            raise _rt_bad(low, "must be spelled exactly in lower case")
+
+
+def _rt_parse_raw_inbound(endpoint: str, raw: bytes, headers: Any, cfg: RouterConfig) -> InboundRequest:
+    """Validate a raw-relay request (endpoint chat_completions | embeddings | rerank) and build its InboundRequest.
+
+    The body is parsed by the strict _rt_loads (a repeated key, NaN/Infinity, depth and a long integer are
+    refused) for VALIDATION only and never rebuilt: InboundRequest.raw is the client's bytes and goes
+    upstream untouched. It must be a JSON object whose `model` (1-_RT_MODEL_LIMIT characters) names a
+    configured route by exact name -- never the default route -- whose backend kind is a raw-relay kind and
+    whose modality is chat; `stream` is absent or a boolean, and true on chat_completions only. A key that
+    only a case-insensitive reader would take for model or stream ("Model") is the ambiguity refused, not
+    resolved (ADR 0015). No client header is forwarded on these endpoints (anthropic-* belongs to
+    /v1/messages). Every refusal is an ApiError naming the field and the rule, never the content."""
+    try:
+        obj = _rt_loads(raw.decode("utf-8"))
+    except _RtDuplicateKey:
+        raise _rt_bad("body", "a key appears more than once") from None
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        raise ApiError(400, "invalid_request_error", "request body is not valid JSON") from None
+    if not isinstance(obj, dict):
+        raise ApiError(400, "invalid_request_error", "request body must be a JSON object")
+    _rt_refuse_case_variants(obj)
+    model = obj.get("model")
+    if model is None:
+        raise _rt_bad("model", "is required")
+    if not isinstance(model, str):
+        raise _rt_bad("model", "must be a string")
+    if not 1 <= len(model) <= _RT_MODEL_LIMIT:
+        raise _rt_bad("model", "must be 1-%d characters" % _RT_MODEL_LIMIT)
+    stream = obj.get("stream", False)
+    if not isinstance(stream, bool):
+        raise _rt_bad("stream", "must be a boolean")
+    if stream and endpoint not in _RT_RAW_STREAM_ENDPOINTS:
+        raise _rt_bad("stream", "is not supported on this endpoint")
+    route = _rt_route_named(cfg, model)
+    backend = cfg.backends[route.backend]
+    if route.modality != "chat" or not KIND_CLASSES[backend.kind].RAW_RELAY:
+        raise _rt_bad("model", "route %s is not served by a raw LLM backend; use /v1/messages or the image endpoints"
+                      % _log_value(route.name))
+    return InboundRequest(endpoint=endpoint, requested_model=model, body={"model": model}, stream=stream,
+                          route=route, backend=backend, client_headers={}, scrub=cfg.scrub,
+                          raw=raw, content_type="application/json", fields=types.MappingProxyType({}))
 
 
 # ---------------------------------------------------------------------------
@@ -2792,6 +2916,13 @@ class Adapter:
     # SSE is documented; the codex stream is unmeasured and sd-server has none). A kind that sets it also
     # overrides image_stream_policy and image_stream_translator.
     IMAGE_STREAMING: bool = False
+    # The raw relay (the rawllm kind only): the client's bytes go to RAW_PATHS[endpoint] untouched and the
+    # upstream's JSON answer or SSE events come back untouched, so the chat hooks below are never called.
+    # RAW_RELAY also marks the kind whose requests take a --max-llm-requests slot. FORWARD_VALUE_LIMIT is the
+    # longest forwarded client header value the kind accepts (None: no limit).
+    RAW_RELAY: bool = False
+    RAW_PATHS: Mapping[str, str] = {}
+    FORWARD_VALUE_LIMIT: Optional[int] = None
 
     @classmethod
     def validate_options(cls, options: dict, where: str) -> dict:
@@ -2852,6 +2983,14 @@ class Adapter:
     def stream_policy(self, inbound: InboundRequest) -> StreamPolicy:
         """The front's stream limits for this request; the base keeps today's behaviour."""
         return StreamPolicy(_SSE_LINE_LIMIT, True)
+
+    def raw_request(self, inbound: InboundRequest) -> Tuple[str, bytes]:
+        """(path, body_bytes) to POST upstream for a raw-relay request: RAW_PATHS[...] and inbound.raw."""
+        raise NotImplementedError
+
+    def raw_response(self, inbound: InboundRequest, status: int, body: bytes) -> Tuple[int, bytes]:
+        """Map a whole upstream answer of a raw-relay request to (status, body bytes)."""
+        raise NotImplementedError
 
     # The sampling hooks of the handler's learned drop (live finding 2026-10-07). The base
     # never learns, so a kind without them keeps its behaviour: an upstream 400 is relayed.
@@ -5881,6 +6020,167 @@ def _rt_sd_answer(body: bytes, n: int = 1) -> Optional[bytes]:
     return _rt_dumps(out)
 
 
+class RawSseRelay:
+    """The translator of a streamed rawllm answer: whole upstream SSE events, byte for byte, in the upstream's
+    own vocabulary (OpenAI chat chunks ending `data: [DONE]`, or Anthropic events ending `event: message_stop`).
+
+    Sans-IO, the same five methods as EventRelay. feed(line) accumulates lines to the blank line and returns
+    that event's bytes unchanged; a `:` comment line is dropped (the router's own `: ping` is the only
+    keep-alive, and a trickle of comments alone does not reset idle_timeout). The relay is closed, and
+    `completed` set, after an event whose data is exactly `[DONE]` or whose `event:` name is `message_stop`
+    (it is what _relay_loop reads as the clean end): anything the upstream sends after that is never relayed.
+    An event named `error` is replaced by one fixed error event (no upstream text) and closes the relay; an
+    event over _SSE_EVENT_LIMIT bytes or _RT_RAW_SSE_EVENT_LINES lines (checked before the append) is an
+    in-band error. fail() and finish() emit ONE error event -- {"error": {...}} OpenAI-shaped on the OpenAI
+    endpoints, Anthropic's envelope on /v1/messages -- and close; finish() is the upstream EOF, so a stream
+    that ended without its terminal event is never a clean end. Every method returns b"" once closed."""
+
+    def __init__(self, inbound: InboundRequest) -> None:
+        self.backend_name = inbound.backend.name
+        self.anthropic = inbound.endpoint == "messages"
+        self.lines: List[bytes] = []
+        self.size = 0
+        self.started = True             # a ping is due while the first token is still being made
+        self.closed = False
+        self.completed = False          # True only after a real terminal event
+        self.fresh = True               # no line fed yet: a leading BOM is dropped (V30)
+
+    def _raw_error_event(self, status: int, message: str) -> bytes:
+        if self.anthropic:
+            return AnthropicSseEncoder._event("error", _rt_error_body(
+                "overloaded_error" if status == 529 else "api_error", message))
+        return ImageEventRelay.error_event(status, message)
+
+    def begin(self) -> bytes:
+        """Nothing: the upstream's own first event is the first one."""
+        return b""
+
+    def ping(self) -> bytes:
+        """An SSE comment line and a blank line."""
+        return b"" if self.closed else b": ping\n\n"
+
+    def fail(self, err_type: str, message: str) -> bytes:
+        """One error event at once; the half event is discarded. Closes the relay."""
+        if self.closed:
+            return b""
+        self.closed = True
+        self.lines, self.size = [], 0
+        return self._raw_error_event(529 if err_type == "overloaded_error" else 502, message)
+
+    def finish(self) -> bytes:
+        """Upstream EOF: without a relayed terminal event the stream ended early."""
+        if self.closed:
+            return b""
+        return self.fail("api_error", "backend %s ended the stream early" % self.backend_name)
+
+    def feed(self, line: bytes) -> bytes:
+        """One upstream read line -> b"" or whole events' bytes (split at every CRLF, LF and bare CR, as a
+        client's SSE parser splits it; a stream-leading BOM is dropped)."""
+        if self.fresh:
+            self.fresh = False
+            if line.startswith(_SSE_BOM):
+                line = line[len(_SSE_BOM):]
+        return b"".join(self._feed_line(part) for part in _rt_sse_split(line))
+
+    def _feed_line(self, line: bytes) -> bytes:
+        """One SSE line -> b"" or one whole event's bytes."""
+        if self.closed:
+            return b""
+        text = line.rstrip(b"\r\n")
+        if text.startswith(b":"):
+            return b""
+        if text:
+            # The checks come before the append: an event never exceeds the limit by up to one line.
+            if self.size + len(line) > _SSE_EVENT_LIMIT:
+                return self.fail("api_error", "backend %s sent an oversized event" % self.backend_name)
+            if len(self.lines) >= _RT_RAW_SSE_EVENT_LINES:
+                return self.fail("api_error", "backend %s sent an event with too many lines" % self.backend_name)
+            self.lines.append(line)
+            self.size += len(line)
+            return b""
+        if not self.lines:
+            return b""
+        lines, self.lines, self.size = self.lines, [], 0
+        name = ""
+        data: List[bytes] = []
+        for held in lines:
+            field, _sep, value = held.rstrip(b"\r\n").partition(b":")
+            if value.startswith(b" "):
+                value = value[1:]
+            if field == b"event":
+                name = value.decode("utf-8", "replace")
+            elif field == b"data":
+                data.append(value)
+        if name == "error":
+            return self.fail("api_error", "backend %s sent an error" % self.backend_name)
+        if name == "message_stop" or b"\n".join(data) == b"[DONE]":
+            self.closed = self.completed = True
+        lines.append(line)              # the blank line ends the event: one join, one copy
+        return b"".join(lines)
+
+
+class RawllmAdapter(Adapter):
+    """kind rawllm: an inferNO-style OpenAI/Anthropic server (typically behind a gpu-router), relayed RAW.
+
+    No translation, ever (ADR 0028): the client's body goes to RAW_PATHS[endpoint] -- a fixed path, never from
+    client input -- untouched (chat_completions, embeddings and rerank by _rt_parse_raw_inbound; messages through
+    _rt_parse_inbound, whose validation only reads it), a 2xx JSON object comes back as the upstream sent it, an SSE
+    answer through RawSseRelay. MODALITIES is {chat}; RAW_RELAY marks the kind for the --max-llm-requests slot and
+    for the front's raw dispatch. The credential is `Authorization: Bearer <api_key>` or none (the base
+    _rt_upstream_headers rule, auth_header authorization or none); the only client headers that travel are
+    anthropic-version and anthropic-beta, once each, printable ASCII and at most _RT_RAW_HEADER_LIMIT characters,
+    on /v1/messages only. count_tokens is refused (400): the upstream is not asked and nothing is estimated. The chat hooks of
+    the base (upstream_request, json_response) are never called."""
+
+    kind = "rawllm"
+    FORWARDABLE = frozenset({"anthropic-version", "anthropic-beta"})
+    DEFAULT_FORWARD = frozenset({"anthropic-version", "anthropic-beta"})
+    ROUTE_OPTIONS: Mapping[str, _RtOptionValidator] = {}
+    MODALITIES = frozenset({"chat"})
+    RAW_RELAY = True
+    RAW_PATHS = {"messages": "/v1/messages", "chat_completions": "/v1/chat/completions",
+                 "embeddings": "/v1/embeddings", "rerank": "/v1/rerank"}
+    FORWARD_VALUE_LIMIT = _RT_RAW_HEADER_LIMIT
+
+    def raw_request(self, inbound: InboundRequest) -> Tuple[str, bytes]:
+        """The fixed upstream path of the endpoint and the client's bytes."""
+        return self.RAW_PATHS[inbound.endpoint], inbound.raw
+
+    @staticmethod
+    def _raw_error_body(inbound: InboundRequest, status: int, message: str, err_type: Optional[str] = None,
+                        code: Optional[str] = None, param: Optional[str] = None) -> Tuple[int, bytes]:
+        """(status, an error body): the OpenAI envelope on the three OpenAI endpoints, Anthropic's on messages."""
+        if inbound.endpoint in _RT_RAW_ENDPOINTS:
+            return status, _rt_dumps(_rt_openai_error_body(status, message, param=param, code=code, err_type=err_type))
+        return status, _rt_dumps(_rt_error_body(_STATUS_TO_TYPE.get(status, "api_error"), message))
+
+    def raw_response(self, inbound: InboundRequest, status: int, body: bytes) -> Tuple[int, bytes]:
+        """2xx: the body as the upstream sent it when it is a JSON object (a first byte `{` after whitespace),
+        else a 502; non-2xx: the status through _UPSTREAM_STATUS and an error body of the endpoint's shape -- a
+        fixed credential text for 401/403, otherwise _rt_image_error's text (relayed, scrubbed and cut, for
+        400/404/413/422/429 only; else a fixed per-status text)."""
+        name = inbound.backend.name
+        if 200 <= status < 300:
+            lead = _RT_JSON_LEAD_RE.match(body).end()
+            if body[lead:lead + 1] == b"{":
+                return 200, body
+            return self._raw_error_body(inbound, 502, "backend %s answered with a body that is not a JSON object" % name)
+        mapped = _UPSTREAM_STATUS.get(status, 502)
+        if status in (401, 403):
+            log.warning("upstream credential rejected: backend %s", _log_value(name))
+            return self._raw_error_body(inbound, mapped, "backend %s rejected the router's credential" % name)
+        text, up_type, up_code, up_param = _rt_image_error(inbound, status, body)
+        return self._raw_error_body(inbound, mapped, text, up_type, up_code, up_param)
+
+    def count_tokens(self, inbound: InboundRequest) -> Union[Tuple[str, bytes], dict]:
+        """Refused: a raw relay neither asks the upstream nor estimates (the documented answer, R13)."""
+        raise ApiError(400, "invalid_request_error",
+                       "count_tokens is not supported on this route: it is relayed raw and never estimated")
+
+    def stream_translator(self, inbound: InboundRequest) -> RawSseRelay:
+        return RawSseRelay(inbound)
+
+
 class _RtKindRow(NamedTuple):
     """One backend kind of _RT_KIND_TABLE (R-0084, NFR-2)."""
     kind: str                           # the config enum value (backends.<name>.kind)
@@ -5900,6 +6200,7 @@ _RT_KIND_TABLE: Tuple[_RtKindRow, ...] = (
     _RtKindRow("codex", CodexAdapter, {"oauth": "codex"}),
     _RtKindRow("openai", OpenaiAdapter, {"oauth": "openai-oauth", "api_key": "openai-apikey"}),
     _RtKindRow("sdcpp", SdcppAdapter, {}),
+    _RtKindRow("rawllm", RawllmAdapter, {}),
     _RtKindRow("anthropic", None, {}),     # reserved: decided by its own plan (D6)
 )
 
@@ -8226,6 +8527,9 @@ class _RouterHttpServer(ThreadingHTTPServer):
         # Image requests in flight (D10b): taken without blocking once an image route resolves, so a
         # burst of 64 MiB answers can not hold every connection slot; the 429 comes before any upstream contact.
         self.image_sem = threading.BoundedSemaphore(settings.max_image_requests)
+        # Requests to a raw-relay (rawllm) route in flight (H1): the same non-blocking pattern. A gpu-router in
+        # front has no queue wait limit, so queued requests would otherwise hold every connection slot.
+        self.llm_sem = threading.BoundedSemaphore(settings.max_llm_requests)
         self.closing = threading.Event()
         self.loopback = ipaddress.IPv4Address(settings.bind).is_loopback
         # Raw upstream sockets, every one from its connect on -- a model call's
@@ -8400,15 +8704,27 @@ _RT_STDLIB_REFUSAL = {
 # /v1/models/{id} is the one variable path: _rt_front_endpoint names it "model".
 _ENDPOINTS = {"/v1/messages": "messages", "/v1/messages/count_tokens": "count_tokens",
               "/v1/models": "models", "/v1/images/generations": "images_generations",
-              "/v1/images/edits": "images_edits"}
+              "/v1/images/edits": "images_edits", "/v1/chat/completions": "chat_completions",
+              "/v1/embeddings": "embeddings", "/v1/rerank": "rerank"}
 _RT_MODELS_PREFIX = "/v1/models/"
 _RT_GET_ENDPOINTS = frozenset({"models", "model"})     # GET only; every other endpoint is POST only
 # The image endpoints: OpenAI-shaped errors (D2), the Content-Types each takes (D8), no query at all,
 # the in-flight image cap (D10b) and the raw relay (D3). Derived from the unit-3 table the adapters index.
 _RT_IMAGE_ENDPOINTS = frozenset(_RT_IMAGE_KINDS)
+# The raw-relay endpoints (a rawllm route): OpenAI-shaped errors and no query like the image endpoints,
+# JSON bodies only, a request cap per endpoint token (below), the --max-llm-requests slot. The token set is
+# unit 3's (_RT_RAW_ENDPOINTS); /v1/messages to a rawllm route is relayed raw too but keeps its own shape.
+_RT_OPENAI_ENDPOINTS = _RT_IMAGE_ENDPOINTS | _RT_RAW_ENDPOINTS      # whose errors are the OpenAI envelope
 _RT_ENDPOINT_MEDIA = {"messages": ("application/json",), "count_tokens": ("application/json",),
                       "images_generations": ("application/json",),
-                      "images_edits": ("application/json", "multipart/form-data")}
+                      "images_edits": ("application/json", "multipart/form-data"),
+                      "chat_completions": ("application/json",), "embeddings": ("application/json",),
+                      "rerank": ("application/json",)}
+# The request-body caps of the raw-relay endpoints (the router's own numbers, not an upstream's), keyed by endpoint
+# TOKEN, never by path: effective min(cap, --body-limit), checked once the path is known and before any body byte
+# is read. /v1/messages and the image endpoints have no entry and keep the plain --body-limit.
+_RT_RAW_BODY_CAPS = {"chat_completions": 16 * 1024 * 1024, "embeddings": 4 * 1024 * 1024,
+                     "rerank": 4 * 1024 * 1024}
 
 # G-M1 DEFAULT: the query strings a client may send. Replace with exactly the set
 # M1 records once it is measured; anything else is a 404.
@@ -8742,7 +9058,7 @@ class _RouterHandler(BaseHTTPRequestHandler):
         if endpoint is None:
             self._refuse(404, message="not found")
             return None
-        self._rt_image = endpoint in _RT_IMAGE_ENDPOINTS
+        self._rt_image = endpoint in _RT_OPENAI_ENDPOINTS      # the image and the raw-relay paths: OpenAI envelope, no query
         if self.server.loopback:
             hosts = self.headers.get_all("Host") or []
             port = self.server.server_port
@@ -8820,6 +9136,7 @@ class _RouterHandler(BaseHTTPRequestHandler):
             self._refuse(529, message="router shutting down")
             return
         image = endpoint in _RT_IMAGE_ENDPOINTS
+        raw_endpoint = endpoint in _RT_RAW_ENDPOINTS
         ok, ctype = self._single_header("Content-Type")
         media_types = _RT_ENDPOINT_MEDIA[endpoint]
         if not ok or (ctype or "").split(";", 1)[0].strip().lower() not in media_types:
@@ -8836,7 +9153,9 @@ class _RouterHandler(BaseHTTPRequestHandler):
             self._refuse(411, message="exactly one decimal Content-Length is required")
             return
         length = int(lengths[0].strip())
-        if length > srv.settings.body_limit:
+        # A raw-relay endpoint has its own cap (the endpoint is known from the path, the body not yet read);
+        # /v1/messages and the image endpoints have no entry and keep the plain --body-limit.
+        if length > min(_RT_RAW_BODY_CAPS.get(endpoint, srv.settings.body_limit), srv.settings.body_limit):
             self._refuse(413, message="request body too large")
             return
         # V37: the interim answer handle_expect_100 withheld, now that the
@@ -8864,7 +9183,7 @@ class _RouterHandler(BaseHTTPRequestHandler):
             self.close_connection = True   # short body: the peer is gone or lying
             return
         body: Any = None
-        if not image:          # an image body is the parser's: raw bytes in, a JSON object or multipart out
+        if not (image or raw_endpoint):    # an image or raw-relay body is its parser's: raw bytes in
             try:
                 body = _rt_loads(raw.decode("utf-8"))
             except (UnicodeDecodeError, ValueError, RecursionError):
@@ -8879,24 +9198,17 @@ class _RouterHandler(BaseHTTPRequestHandler):
         inbound: Optional[InboundRequest] = None
         adapter: Optional[Adapter] = None
         sent: Any = None                 # the last upstream connection: untracked in finally (R-0095)
-        slot = False                     # an in-flight image slot is held (released in finally, D10b)
+        slot: Optional[threading.BoundedSemaphore] = None   # an in-flight image / raw-relay slot is held (released in finally)
         try:
             if image:
                 inbound = _rt_parse_image_inbound(endpoint, ctype or "", raw, self.headers, srv.cfg)
+            elif raw_endpoint:
+                inbound = _rt_parse_raw_inbound(endpoint, raw, self.headers, srv.cfg)
             else:
                 inbound = _rt_parse_inbound(endpoint, body, self.headers, srv.cfg)
             backend = inbound.backend
             rec["route"], rec["kind"], rec["stream"] = inbound.route.name, backend.kind, int(inbound.stream)
             rec["backend"] = backend.name
-            if image:
-                if not srv.image_sem.acquire(blocking=False):
-                    # Refused at once, before any upstream contact: image traffic (long waits, answers
-                    # up to _UPSTREAM_BODY_LIMIT) can not take every connection slot from chat.
-                    self._send_json(429, self._rt_err(429, "rate_limit_error",
-                                                      "too many image requests in flight; retry shortly"),
-                                    (("retry-after", "1"),))
-                    return
-                slot = True
             adapter = ADAPTERS.get(backend.kind)
             if adapter is None:
                 # Unreachable: ADAPTERS and KIND_CLASSES derive from the same
@@ -8905,6 +9217,31 @@ class _RouterHandler(BaseHTTPRequestHandler):
                 self._send_json(501, self._rt_err(501, "api_error", "backend kind %s is not wired yet"
                                                   % backend.kind))
                 return
+            raw_relay = adapter.RAW_RELAY
+            if raw_relay and not raw_endpoint:
+                # /v1/messages (or count_tokens) to a raw-relay route: validated by _rt_parse_inbound, relayed as
+                # the client's bytes. The retained bytes are the adapter's request; the dict above is not.
+                _rt_refuse_case_variants(body)      # raw bytes go upstream: no key a case-insensitive reader folds onto model/stream
+                inbound = inbound._replace(raw=raw, content_type="application/json")
+            if image:
+                if not srv.image_sem.acquire(blocking=False):
+                    # Refused at once, before any upstream contact: image traffic (long waits, answers
+                    # up to _UPSTREAM_BODY_LIMIT) can not take every connection slot from chat.
+                    self._send_json(429, self._rt_err(429, "rate_limit_error",
+                                                      "too many image requests in flight; retry shortly"),
+                                    (("retry-after", "1"),))
+                    return
+                slot = srv.image_sem
+            elif raw_relay and endpoint != "count_tokens":
+                # Keyed on the BACKEND's kind (known only now), not on the endpoint: /v1/messages routed to a raw
+                # LLM backend takes a slot, /v1/messages to every other kind never does. A gpu-router in front
+                # queues without a wait limit, so queued requests must not hold every connection slot (H1).
+                if not srv.llm_sem.acquire(blocking=False):
+                    self._send_json(429, self._rt_err(429, "rate_limit_error",
+                                                      "too many raw LLM requests in flight; retry shortly"),
+                                    (("retry-after", "1"),))
+                    return
+                slot = srv.llm_sem
             learns = endpoint == "messages" and adapter.learns_sampling(inbound)
             if learns:
                 inbound = self._rt_sampling_inbound(inbound, srv.sampling_learned(backend.name,
@@ -8921,6 +9258,8 @@ class _RouterHandler(BaseHTTPRequestHandler):
                 path, up_body = local
             elif image:
                 path, up_body = adapter.image_request(inbound)
+            elif raw_relay:
+                path, up_body = adapter.raw_request(inbound)
             else:
                 path, up_body = adapter.upstream_request(inbound)
             # The credential, then the ONE send; an OAuth profile's first 401 closes the
@@ -8993,6 +9332,8 @@ class _RouterHandler(BaseHTTPRequestHandler):
                 self._answer_upstream_json(adapter, inbound, *read)
             elif image:
                 self._relay_image(conn, resp, adapter, inbound)
+            elif raw_relay:
+                self._relay_raw(conn, resp, adapter, inbound)
             elif inbound.stream and endpoint == "messages":
                 self._relay_stream(conn, resp, adapter.stream_translator(inbound), inbound)
             else:
@@ -9024,8 +9365,8 @@ class _RouterHandler(BaseHTTPRequestHandler):
             if not self._rt_head_sent:
                 self._send_json(500, self._rt_err(500, "api_error", "internal error"))
         finally:
-            if slot:
-                srv.image_sem.release()
+            if slot is not None:
+                slot.release()
             # F27: an exit that never reached stream_translator -- a 400 answered from the
             # learn path's read, a failed send, a refusal after upstream_request -- leaves
             # this request's _pending entry; popped while the inbound is alive, so its id
@@ -9077,6 +9418,28 @@ class _RouterHandler(BaseHTTPRequestHandler):
         extra = ()
         if status == 429 and re.fullmatch(r"[0-9]{1,10}", retry_after):
             extra = (("retry-after", retry_after),)
+        self._rt_rec["end"] = "json"
+        self._send_raw_json(status, body, extra)
+
+    def _relay_raw(self, conn: Any, resp: Any, adapter: Adapter, inbound: InboundRequest) -> None:
+        """A raw-relay (rawllm) answer: nothing of the upstream's head is copied. A streaming request whose
+        upstream answered 2xx goes to _relay_stream with the adapter's RawSseRelay (whole events byte-exact; a
+        2xx whose Content-Type is not text/event-stream is the 502 of _relay_stream, before any SSE head).
+        Everything else -- a JSON answer, a stream request's non-2xx -- is read whole under
+        _UPSTREAM_BODY_LIMIT (_rt_read_upstream), so a truncated body is an error status and never a partial
+        answer, mapped by adapter.raw_response and sent as the bytes it returns with a FIXED Content-Type
+        (_send_raw_json) and a router-fixed Cache-Control; a 429's Retry-After is relayed when it is all
+        digits. The handler owns conn and resp on the buffered path: closed in finally."""
+        if inbound.stream and 200 <= resp.status < 300:
+            self._relay_stream(conn, resp, adapter.stream_translator(inbound), inbound)
+            return
+        up_status, retry_after, up_body = self._rt_read_upstream(conn, resp, inbound)
+        status, body = adapter.raw_response(inbound, up_status, up_body)
+        if status >= 400:
+            self._log_upstream_failure(status, "upstream_status" if not 200 <= up_status < 300 else "bad_body")
+        extra = [("Cache-Control", "no-store")]
+        if status == 429 and re.fullmatch(r"[0-9]{1,10}", retry_after):
+            extra.append(("retry-after", retry_after))
         self._rt_rec["end"] = "json"
         self._send_raw_json(status, body, extra)
 
@@ -9201,7 +9564,8 @@ class _RouterHandler(BaseHTTPRequestHandler):
                     try:
                         chunk = translator.fail("api_error", "internal error")
                     except Exception:  # noqa: BLE001 -- a broken translator still closes the envelope
-                        chunk = ImageEventRelay.error_event(500, "internal error") if image \
+                        chunk = ImageEventRelay.error_event(500, "internal error") \
+                            if inbound.endpoint in _RT_OPENAI_ENDPOINTS \
                             else AnthropicSseEncoder("", "").error("api_error", "internal error")
                     write(chunk)
                 except OSError:
@@ -9485,6 +9849,7 @@ def _rt_settings(args: argparse.Namespace) -> RouterSettings:
     _rt_cli_range("--body-limit", args.body_limit, _BODY_LIMIT_RANGE)
     _rt_cli_range("--max-connections", args.max_connections, _CONNECTION_CAP_RANGE)
     _rt_cli_range("--max-image-requests", args.max_image_requests, _IMAGE_REQUEST_RANGE)
+    _rt_cli_range("--max-llm-requests", args.max_llm_requests, _LLM_REQUEST_RANGE)
     origins = frozenset(_rt_cli_origin(value) for value in (args.allowed_origin or ()))
     if args.ready_file is not None and not args.ready_file:
         raise ConfigError("--ready-file: must not be empty")
@@ -9499,6 +9864,7 @@ def _rt_settings(args: argparse.Namespace) -> RouterSettings:
         debug=bool(args.debug),
         log_file=args.log_file,
         max_image_requests=args.max_image_requests,
+        max_llm_requests=args.max_llm_requests,
     )
 
 
@@ -9516,7 +9882,9 @@ example config (chmod 600; token: python3 -c 'import secrets;print(secrets.token
       "codex":    {"kind": "codex", "oauth": {}},
       "openai":   {"kind": "openai", "api_key": "<sk-...>"},
       "openai-siwc": {"kind": "openai", "oauth": {}},
-      "sd":       {"kind": "sdcpp", "base_url": "http://192.168.2.245:8082", "allow_private": true}
+      "sd":       {"kind": "sdcpp", "base_url": "http://192.168.2.245:8082", "allow_private": true},
+      "gpu-llm":  {"kind": "rawllm", "base_url": "http://192.168.2.245:8082/m/llm", "allow_private": true,
+                   "api_key": "<the gpu-router's token, 16+ chars>"}
     },
     "routes": {
       "claude-opus-4-5":   {"backend": "codex", "model": "gpt-5-codex"},
@@ -9526,7 +9894,9 @@ example config (chmod 600; token: python3 -c 'import secrets;print(secrets.token
       "claude-haiku-4-5":  {"backend": "llama", "model": "qwen3-coder"},
       "gpt-image-1":       {"backend": "openai", "model": "gpt-image-1", "modality": "image"},
       "sd-cpp-local":      {"backend": "sd", "model": "sd-cpp-local", "modality": "image",
-                            "options": {"max_n": 4, "max_pixels": 4194304}}
+                            "options": {"max_n": 4, "max_pixels": 4194304}},
+      "Qwen3.8-Flash-Next": {"backend": "gpu-llm", "model": "Qwen3.8-Flash-Next"},
+      "bge-m3":            {"backend": "gpu-llm", "model": "bge-m3"}
     },
     "default": {"backend": "infernox", "model": "local-model"}
   }
@@ -9570,6 +9940,18 @@ example config (chmod 600; token: python3 -c 'import secrets;print(secrets.token
   with a field but event: and data:, a second event:, over 256 lines, or a bare CR in a line over
   64 KiB ends the stream with an in-band error); codex and sdcpp image routes answer stream true
   with a 400.
+  A rawllm backend (an inferNO-style OpenAI/Anthropic server, typically a gpu-router in front; loopback
+  needs allow_private AND allow_loopback, a LAN host allow_private; an optional api_key goes as
+  `Authorization: Bearer <key>`, auth_header omitted or authorization) is relayed RAW and never
+  translated. Its routes are chat routes keyed by the upstream model id (route key == model, no options,
+  not the default route). POST /v1/chat/completions, /v1/embeddings and /v1/rerank take a JSON body whose
+  `model` names such a route (errors there are the OpenAI envelope; `stream: true` on chat only), and
+  POST /v1/messages to such a route goes to the same upstream; the client's bytes reach a FIXED upstream
+  path untouched and a 2xx JSON answer comes back untouched, an SSE answer as whole events byte for
+  byte (ending at [DONE] or message_stop; an upstream that ends sooner gets an in-band error event).
+  No upstream response header is copied. Request bodies are capped at 16 MiB (chat) and 4 MiB
+  (embeddings, rerank), each below --body-limit; --max-llm-requests caps these requests in flight.
+  anthropic-version and anthropic-beta travel on /v1/messages only; count_tokens is refused 400.
   A mistral route's option tool_result_images (boolean, default true): an image inside a
   tool_result goes upstream as image_url parts in the tool message; false sends "[image omitted]".
   Route options temperature (0-2) / top_p (0-1) override the client's; one a backend cannot take
@@ -9638,6 +10020,13 @@ def _rt_parser() -> argparse.ArgumentParser:
                              f"one more is refused at once with 429 and Retry-After: 1, so long image "
                              f"waits can not take every --max-connections slot from chat -- only while this "
                              f"is below --max-connections (a startup WARNING says so when it is not)")
+    parser.add_argument("--max-llm-requests", type=_rt_cli_int, default=_LLM_REQUEST_CAP,
+                        help=f"Requests to a rawllm route (/v1/chat/completions, /v1/embeddings, /v1/rerank and "
+                             f"/v1/messages to a rawllm route) in flight at once, "
+                             f"{_LLM_REQUEST_RANGE[0]}-{_LLM_REQUEST_RANGE[1]} (default {_LLM_REQUEST_CAP}); "
+                             f"one more is refused at once with 429 and Retry-After: 1, so requests queued "
+                             f"behind a gpu-router can not take every --max-connections slot from chat -- "
+                             f"only while this is below --max-connections (a startup WARNING says so when it is not)")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging to stderr")
     parser.add_argument("--log-file", default=None, help="Log to file, mode 0600 (implies --debug)")
     return parser
@@ -9982,6 +10371,10 @@ def main() -> None:
         # below the connection cap never refuses anything: the 429 protection for chat is then void.
         log.warning("--max-image-requests %d is not below --max-connections %d: the image cap can not "
                     "keep chat connections free", settings.max_image_requests, settings.max_connections)
+    if settings.max_llm_requests >= settings.max_connections:
+        # The same, for the raw-relay endpoints: queued requests behind a gpu-router hold a connection each.
+        log.warning("--max-llm-requests %d is not below --max-connections %d: the raw LLM cap can not "
+                    "keep chat connections free", settings.max_llm_requests, settings.max_connections)
 
     # KD-20: sweep stale writer temps under the config flock (a no-op without an
     # OAuth backend, R2-L5; a refusal is one WARNING), then the token store that

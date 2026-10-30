@@ -1,0 +1,6 @@
+data: {"id":"chatcmpl-tfv","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"tf"}}]}
+
+data: {"id":"chatcmpl-tfv","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":" ok"},"finish_reason":"stop"}]}
+
+data: [DONE]
+

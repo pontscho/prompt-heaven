@@ -64,6 +64,15 @@ Groups:
   T  image streaming     -- stream true on an openai image route: the Images API's SSE relayed byte-exact
                              (partial images, completed), line and event limits, end detection, `: ping`
                              comments, the in-flight slot, idle stall, leaks, non-2xx as OpenAI JSON
+  U  image sizes         -- the optional declarative `sizes` / `default_size` of an image route
+  V  raw LLM relay       -- the rawllm kind (an inferNO-style server, typically behind a gpu-router):
+                             POST /v1/chat/completions, /v1/embeddings, /v1/rerank and /v1/messages
+                             relayed raw to a fixed upstream path: response-head allow-list, truncation
+                             never read as complete, body caps and 411, bearer/method/media gates,
+                             strict JSON and model checks, --max-llm-requests, the exact upstream
+                             request (path, bearer, anthropic-* headers), non-SSE answers to a stream
+                             request, SSE limits and slot release, upstream errors, config, listing
+                             and count_tokens, log hygiene
   I  secret leak         -- no sentinel in stderr, the log, a body or a wrong peer
   J  static and hygiene   -- AST over the router source, writes, bytecode, tree
 """
@@ -187,9 +196,10 @@ TF_ID_TOKEN = tf_jwt({"iss": "https://auth.openai.com", "aud": "oaiapp_tf-Client
 TF_AUTH_CODE = "tf-auth-code-SENTINEL-" + secrets.token_hex(16)
 TF_KEY_OPENAI = "tfkey-openai-SENTINEL-" + secrets.token_hex(16)
 TF_TOKEN_ERRDESC = "tf-token-errdesc-SENTINEL-" + secrets.token_hex(16)
+TF_KEY_RAWLLM = "tfkey-rawllm-SENTINEL-" + secrets.token_hex(16)     # group V: a rawllm backend's api_key
 SENTINELS = (TF_ROUTER_TOKEN, TF_KEY_MISTRAL, TF_KEY_PASS, TF_CLIENT_XKEY,
              TF_REFRESH_CODEX, TF_REFRESH_OPENAI, TF_ACCESS_CODEX, TF_ACCESS_OPENAI,
-             TF_ID_TOKEN, TF_AUTH_CODE, TF_KEY_OPENAI, TF_TOKEN_ERRDESC)
+             TF_ID_TOKEN, TF_AUTH_CODE, TF_KEY_OPENAI, TF_TOKEN_ERRDESC, TF_KEY_RAWLLM)
 
 
 # ---------------------------------------------------------------------------
@@ -21562,6 +21572,1114 @@ def group_u(suite, fixture_root):
 
 
 # ---------------------------------------------------------------------------
+# Group V: the rawllm kind (stage 3 of the gpu-router work, Plan Steps 15-16)
+# ---------------------------------------------------------------------------
+
+# A rawllm backend is an inferNO-style OpenAI/Anthropic server (typically a gpu-router in front of it) that the
+# router does NOT translate for: POST /v1/chat/completions, /v1/embeddings and /v1/rerank (and /v1/messages to a
+# rawllm route) go to a FIXED upstream path with the client's bytes untouched, a 2xx JSON answer comes back
+# untouched (buffered whole), an SSE answer is relayed whole events byte-exact, and the router answers its own
+# errors (the OpenAI envelope on the three OpenAI paths, Anthropic's on /v1/messages).  The cases are the plan's
+# threat table (R7-R10, R13, R21-R23, H1, M1), written before the code: V1 is the response-head allow-list.
+
+GV = "V. raw LLM relay"
+GV_CASES = (
+    "response head allow-list",          # V1 (R21)
+    "truncated upstream never complete", # V2 (R22)
+    "body caps, 411 never 413",          # V3 (R10)
+    "bearer, method, media type, query", # V4
+    "strict JSON, model, stream rules",  # V5
+    "in-flight cap: 429 at once",        # V6 (H1, R23)
+    "upstream request: path, bearer",    # V7 (R8, R9)
+    "anthropic-* headers",               # V8 (R7)
+    "stream request, non-SSE answer",    # V9 (M1)
+    "SSE relay: exact, limits, slot",    # V10
+    "upstream errors, 3xx, Retry-After", # V11
+    "rawllm config rules",               # V12
+    "models listing, count_tokens",      # V13 (R13)
+    "no secret or payload in a log",     # V14
+    "messages: case-variant keys",       # V15 (F1)
+)
+GV_IDS = ("V1", "V2", "V3", "V4", "V5", "V6", "V7", "V8", "V9", "V10", "V11", "V12", "V13", "V14", "V15")
+
+GV_CHAT = "tf-v-chat"                # rawllm routes (route key == model: the body is relayed as it came)
+GV_EMB = "tf-v-embed"
+GV_RANK = "tf-v-rerank"
+GV_NOKEY = "tf-v-nokey"              # a rawllm backend without an api_key
+GV_FAST = "tf-v-fast"                # idle_timeout 1
+GV_PASS = "tf-v-pass"                # a passthrough chat route (the existing kinds must be unaffected)
+GV_CHAT_P = "/v1/chat/completions"
+GV_EMB_P = "/v1/embeddings"
+GV_RANK_P = "/v1/rerank"
+GV_MSG_P = "/v1/messages"
+GV_NEW_PATHS = (GV_CHAT_P, GV_EMB_P, GV_RANK_P)
+GV_MODEL_OF = {GV_CHAT_P: GV_CHAT, GV_EMB_P: GV_EMB, GV_RANK_P: GV_RANK, GV_MSG_P: GV_CHAT}
+GV_PREFIX = "/m/tfv"                 # the rawllm backends' base path: the fixed path is appended to it
+GV_CAPS = {GV_CHAT_P: 16 << 20, GV_EMB_P: 4 << 20, GV_RANK_P: 4 << 20}     # written here, not read from the module
+GV_PAYLOAD = "tf-v-payload-SENTINEL-" + secrets.token_hex(8)    # in every request body; never in a log
+# The upstream answers carry a whitespace and key-order quirk: a router that re-dumps them changes the bytes.
+GV_CHAT_OK = (b'{ "id" : "chatcmpl-tfv",\n  "object":"chat.completion", "choices":[{"index":0,"message":'
+              b'{"role":"assistant","content":"tf \\u00e9 ok"},"finish_reason":"stop"}] }')
+GV_EMB_OK = (b'{ "object" : "list", "data" : [ {"object":"embedding","index":0,"embedding":[0.1,0.2]} ],\n'
+             b'  "model":"tf-v-embed" }')
+GV_RANK_OK = b'{ "results" : [ {"index":1,"relevance_score":0.9}, {"index":0,"relevance_score":0.1} ] }'
+GV_MSG_OK = (b'{ "id":"msg_tfv", "type":"message", "role":"assistant", "content":[{"type":"text","text":"tf ok"}],'
+             b' "stop_reason":"end_turn", "usage":{"input_tokens":1,"output_tokens":1} }')
+GV_OK_OF = {GV_CHAT_P: GV_CHAT_OK, GV_EMB_P: GV_EMB_OK, GV_RANK_P: GV_RANK_OK, GV_MSG_P: GV_MSG_OK}
+
+
+def gv_fixture_lines(name):
+    """The lines of a tests/files/llm_router SSE fixture (blank lines kept; the file ends in one blank line)."""
+    with open(os.path.join(FIXTURES, name), "rb") as fh:
+        return fh.read().split(b"\n")[:-1]
+
+
+# Two events and the terminal one each: OpenAI chat chunks ending `data: [DONE]`, Anthropic events ending message_stop.
+GV_CHAT_SSE = gv_fixture_lines("tf_rawllm_chat.sse")
+GV_MSG_SSE = gv_fixture_lines("tf_rawllm_messages.sse")
+# The response header names a client may see on a relayed answer: the router's own, never the upstream's.
+GV_HEAD_OK = frozenset({"content-type", "content-length", "cache-control", "server", "date", "connection"})
+
+
+def gv_wire(lines):
+    """The bytes ScriptedPeer's respond_sse writes for *lines* (each newline-terminated)."""
+    return b"".join(line + b"\n" for line in lines)
+
+
+def gv_chunk(data):
+    return b"%x\r\n" % len(data) + data + b"\r\n"
+
+
+def gv_config(peer_url):
+    """The V router's config: rawllm backends (keyed, keyless, idle_timeout 1) under a base path, a
+    passthrough chat route, and a passthrough default (a fallback to it would be visible at the peer)."""
+    raw = {"kind": "rawllm", "base_url": peer_url + GV_PREFIX, "api_key": TF_KEY_RAWLLM, "idle_timeout": 20}
+    return {
+        "auth_token": TF_ROUTER_TOKEN,
+        "backends": {
+            "tfv": dict(raw),
+            "tfv-nokey": {"kind": "rawllm", "base_url": peer_url + GV_PREFIX, "idle_timeout": 20},
+            "tfv-fast": dict(raw, idle_timeout=1),
+            "tfv-pass": {"kind": "passthrough", "base_url": peer_url, "api_key": TF_KEY_PASS,
+                         "auth_header": "x-api-key", "idle_timeout": 30},
+        },
+        "routes": {
+            GV_CHAT: {"backend": "tfv", "model": GV_CHAT},
+            GV_EMB: {"backend": "tfv", "model": GV_EMB},
+            GV_RANK: {"backend": "tfv", "model": GV_RANK},
+            GV_NOKEY: {"backend": "tfv-nokey", "model": GV_NOKEY},
+            GV_FAST: {"backend": "tfv-fast", "model": GV_FAST},
+            GV_PASS: {"backend": "tfv-pass", "model": "tf-v-pass-up"},
+        },
+        "default": {"backend": "tfv-pass", "model": "tf-v-default-up"},
+    }
+
+
+def gv_body(path, stream=None, pad=None, model=None):
+    """A request body for *path* in a deliberately odd spelling (spaces, key order, a \\u escape): byte-exactness
+    is only visible if the router does not re-serialise it.  *pad* adds a "pad" string of that many bytes."""
+    parts = []
+    if path in (GV_CHAT_P, GV_MSG_P):
+        parts.append('"messages" : [ {"role" : "user", "content" : "%s \\u00e9"} ]' % GV_PAYLOAD)
+    if path == GV_MSG_P:
+        parts.append('"max_tokens" : 16')
+    if path == GV_EMB_P:
+        parts.append('"input" : [ "%s" ]' % GV_PAYLOAD)
+    if path == GV_RANK_P:
+        parts.append('"query" : "%s", "documents" : [ "a", "b" ]' % GV_PAYLOAD)
+    parts.append('"model" : "%s"' % (model or GV_MODEL_OF[path]))
+    if stream is not None:
+        parts.append('"stream" : %s' % ("true" if stream else "false"))
+    if pad is not None:
+        parts.append('"pad" : "%s"' % ("x" * pad))
+    return ("{ " + " , ".join(parts) + " }").encode("utf-8")
+
+
+def gv_sized(path, size, **kw):
+    """gv_body(path) padded to exactly *size* bytes."""
+    return gv_body(path, pad=size - len(gv_body(path, pad=0, **kw)), **kw)
+
+
+def gv_default(_index, request):
+    """The peer's default answer by upstream path (a base path or none) and the request's stream flag."""
+    path = request["line"].split(" ")[1]
+    stream = b'"stream" : true' in request["body"]
+    if path.endswith("/count_tokens"):
+        return [("respond_json", 200, {"input_tokens": 5})]
+    if path.endswith(GV_CHAT_P):
+        return [("respond_sse", GV_CHAT_SSE)] if stream else [("respond_json", 200, GV_CHAT_OK)]
+    if path.endswith(GV_MSG_P):
+        return [("respond_sse", GV_MSG_SSE)] if stream else [("respond_json", 200, GV_MSG_OK)]
+    if path.endswith(GV_EMB_P):
+        return [("respond_json", 200, GV_EMB_OK)]
+    if path.endswith(GV_RANK_P):
+        return [("respond_json", 200, GV_RANK_OK)]
+    return [("respond_json", 404, {"error": "tf no such path"})]
+
+
+def gv_post(client, path, body, content_type="application/json", headers=None, timeout=HTTP_TIMEOUT_S, record=True):
+    """(status, [(lower-case name, value)] in wire order, body) of one POST; the answer is recorded for the
+    sentinel sweeps unless *record* is False."""
+    conn = client.connect(timeout)
+    try:
+        merged = {"Content-Type": content_type}
+        merged.update(headers or {})
+        conn.putrequest("POST", path, skip_host=True, skip_accept_encoding=True)
+        for key, value in client.headers(merged).items():
+            conn.putheader(key, value)
+        conn.putheader("Content-Length", str(len(body)))
+        conn.endheaders(body)
+        resp = conn.getresponse()
+        data = resp.read()
+        pairs = [(k.lower(), v) for k, v in resp.getheaders()]
+        if record:
+            RESPONSE_BODIES.append(("POST %s" % path, data))
+        return resp.status, pairs, data
+    finally:
+        conn.close()
+
+
+def gv_vals(pairs, name):
+    return [v for k, v in pairs if k == name]
+
+
+def gv_raw_post(client, path, pairs, body=b"", length=True, timeout=RAW_TIMEOUT_S):
+    """(status, headers, body, closed) of a POST on a raw socket with exactly the header *pairs*."""
+    status, headers, got, _first, closed = gb_raw(client, gb_request(client, path=path, pairs=pairs, body=body,
+                                                                     length=length), timeout=timeout)
+    return status, headers, got, closed
+
+
+def gv_check_head(label, status, pairs, got, want, ctype, cache):
+    """Problems unless a relayed 200 carries exactly the router's own head (the allow-list) and *want* byte for byte."""
+    if status != 200:
+        return ["%s: status %r, expected 200" % (label, status)]
+    problems = []
+    names = [k for k, _v in pairs]
+    stray = sorted(set(names) - GV_HEAD_OK)
+    if stray:
+        problems.append("%s: upstream header(s) %s reached the client" % (label, ", ".join(stray)))
+    if gv_vals(pairs, "content-type") != [ctype]:
+        problems.append("%s: Content-Type %r, expected exactly %r" % (label, gv_vals(pairs, "content-type"), ctype))
+    if gv_vals(pairs, "cache-control") != [cache]:
+        problems.append("%s: Cache-Control %r, expected the router's %r" % (label, gv_vals(pairs, "cache-control"), cache))
+    if any(v.lower() != "close" for v in gv_vals(pairs, "connection")):
+        problems.append("%s: a Connection header that is not the router's close: %r" % (label, gv_vals(pairs, "connection")))
+    if ctype == "application/json" and gv_vals(pairs, "content-length") != [str(len(want))]:
+        problems.append("%s: Content-Length %r, expected the router's own %d" % (label, gv_vals(pairs, "content-length"), len(want)))
+    if got != want:
+        problems.append("%s: the body is not the upstream's bytes (%d byte(s) back, expected %d)" % (label, len(got), len(want)))
+    return problems
+
+
+def gv_oai(label, status, body, want, needle=None, absent=()):
+    """gq_expect for a V answer: the OpenAI envelope on the three OpenAI paths."""
+    return gq_expect(label, status, body, want, needle, absent)
+
+
+def gv_anth(label, status, body, want, needle=None):
+    """Problems unless the answer is a *want* Anthropic envelope holding *needle* (the /v1/messages shape)."""
+    if status != want:
+        return ["%s: status %r, expected %d" % (label, status, want)]
+    _t, msg, why = gb_envelope(body)
+    if why:
+        return ["%s: %s" % (label, why)]
+    if needle and needle not in msg:
+        return ["%s: message %r does not hold %r" % (label, ga_redact(msg)[:120], needle)]
+    return []
+
+
+def gv_v1(ctx):
+    """V1 (R21, the FIRST red test): the upstream's response head is never relayed.  A peer that sends Set-Cookie,
+    Location, hop-by-hop and framing headers, a lying Content-Length beside Transfer-Encoding, an obs-fold and a
+    foreign Content-Type: the client sees only the router's own head -- a FIXED Content-Type (application/json, or
+    text/event-stream for a stream), a router-fixed Cache-Control, and framing the router computed."""
+    client, state = ctx["client"], ctx["state"]
+    smug = [("Set-Cookie", "tfv=1; Path=/"), ("Location", "http://evil.invalid/x"), ("X-Evil", "tf"),
+            ("Keep-Alive", "timeout=5"), ("Upgrade", "h2c"), ("Trailer", "X-T"),
+            ("WWW-Authenticate", "Basic realm=tf"), ("Proxy-Authenticate", "Basic")]
+    problems = []
+    try:
+        for path in GV_NEW_PATHS + (GV_MSG_P,):
+            ok = GV_OK_OF[path]
+            head = (b"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=evil\r\nTransfer-Encoding: chunked\r\n"
+                    b"Content-Length: 5\r\nConnection: keep-alive\r\n"
+                    + b"".join(("%s: %s\r\n" % kv).encode("latin-1") for kv in smug) + b"X-Fold: a\r\n b\r\n\r\n")
+            state["script"] = lambda _i, _r, raw=head + gv_chunk(ok) + b"0\r\n\r\n": [("respond_raw", raw)]
+            status, pairs, got = gv_post(client, path, gv_body(path))
+            problems += gv_check_head("JSON %s" % path, status, pairs, got, ok, "application/json", "no-store")
+        for path, lines in ((GV_CHAT_P, GV_CHAT_SSE), (GV_MSG_P, GV_MSG_SSE)):
+            extra = smug + [("Content-Type", "text/event-stream; charset=evil"), ("X-Fold", "a")]
+            state["script"] = lambda _i, _r, ls=lines, ex=extra: [("respond_sse", ls, (), ex)]
+            status, hdrs, got = gq_post_raw(client, path, gv_body(path, stream=True))
+            pairs = sorted(hdrs.items())
+            problems += gv_check_head("SSE %s" % path, status, pairs, got, gv_wire(lines), "text/event-stream",
+                                      "no-cache")
+    finally:
+        state["script"] = None
+    return problems, ["json        : chat, embeddings, rerank and messages answers: only Content-Type application/json, "
+                      "Cache-Control no-store and the router's own Content-Length",
+                      "sse         : chat and messages streams: Content-Type text/event-stream, Cache-Control no-cache, "
+                      "events byte-exact",
+                      "dropped     : Set-Cookie, Location, Keep-Alive, Upgrade, Trailer, *-Authenticate, an obs-fold, "
+                      "a Transfer-Encoding beside a lying Content-Length"]
+
+
+def gv_v2(ctx):
+    """V2 (R22): a truncated upstream is never relayed as complete.  An SSE body cut mid-stream (a chunked body with
+    no last chunk; a close-delimited one with no [DONE]) gets one in-band error event and no terminal event; a JSON
+    body cut short (Content-Length not reached, a chunked body with no last chunk) is a 502 envelope and never a
+    byte of the partial body."""
+    client, state = ctx["client"], ctx["state"]
+    problems = []
+    sse_head = (b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n"
+                b"Connection: close\r\n\r\n")
+    try:
+        rows = (
+            ("chunked SSE cut after one event", GV_CHAT_P, [("respond_raw", sse_head + gv_chunk(gv_wire(GV_CHAT_SSE[:2])))],
+             b"[DONE]", b'"error"'),
+            ("close-delimited SSE, no [DONE]", GV_CHAT_P, [("respond_sse", GV_CHAT_SSE[:2])], b"[DONE]", b'"error"'),
+            ("messages SSE cut before message_stop", GV_MSG_P, [("respond_sse", GV_MSG_SSE[:6])], b"message_stop",
+             b'"type":"error"'),
+        )
+        for label, path, script, absent, present in rows:
+            state["script"] = lambda _i, _r, s=script: s
+            status, _h, raw = gq_post_raw(client, path, gv_body(path, stream=True))
+            if status != 200:
+                problems.append("%s: status %r, expected the 200 SSE head" % (label, status))
+                continue
+            if b"event: error" not in raw or present not in raw:
+                problems.append("%s: no in-band error event after the cut: %r" % (label, raw[-120:]))
+            if absent in raw:
+                problems.append("%s: %s reached the client: a truncated stream read as complete" % (label, absent.decode()))
+            if not raw.startswith(b"data: " if path == GV_CHAT_P else b"event: message_start"):
+                problems.append("%s: the first event was not relayed whole: %r" % (label, raw[:60]))
+            if path == GV_CHAT_P and b'"type":"server_error"' not in raw:
+                problems.append("%s: the chat error event is not OpenAI-shaped: %r" % (label, raw[-160:]))
+        partial = b'{"partial":"TFPARTIAL"'
+        json_head = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n%s\r\nConnection: close\r\n\r\n"
+        for label, script in (
+                ("JSON short of its Content-Length", [("respond_raw", json_head % b"Content-Length: 400" + partial)]),
+                ("chunked JSON with no last chunk", [("respond_raw", json_head % b"Transfer-Encoding: chunked"
+                                                      + gv_chunk(partial))])):
+            for path in (GV_CHAT_P, GV_EMB_P):
+                state["script"] = lambda _i, _r, s=script: s
+                status, _h, body = gq_post_raw(client, path, gv_body(path))
+                problems += gv_oai("%s on %s" % (label, path), status, body, 502, absent=("TFPARTIAL",))
+        state["script"] = lambda _i, _r: [("respond_raw", json_head % b"Content-Length: 400" + partial)]
+        status, _h, body = gq_post_raw(client, GV_MSG_P, gv_body(GV_MSG_P))
+        problems += gv_anth("messages JSON short of its Content-Length", status, body, 502)
+        if b"TFPARTIAL" in body:
+            problems.append("messages: a byte of the partial body reached the client")
+    finally:
+        state["script"] = None
+    return problems, ["sse         : cut chunked body, EOF without [DONE], messages without message_stop -> one in-band "
+                      "error event, never the terminal event",
+                      "json        : short Content-Length and unterminated chunked body -> 502 envelope, no partial byte"]
+
+
+def gv_v3(ctx):
+    """V3 (R10): the per-route request caps (16 MiB chat, 4 MiB embeddings and rerank; effective min(cap, --body-limit)),
+    the order 411 -> 413, and no regression for /v1/messages (plain --body-limit)."""
+    client, peer, fixture_root = ctx["client"], ctx["peer"], ctx["fixture_root"]
+    problems = []
+    auth = gb_auth_pairs(client)
+    for path in GV_NEW_PATHS:
+        cap = GV_CAPS[path]
+        before = len(peer.requests)
+        status, _h, body = gv_post(client, path, gv_sized(path, cap), record=False)
+        if status != 200:
+            problems.append("%s: a body of exactly %d bytes answered %r, expected 200" % (path, cap, status))
+        if len(peer.requests) != before + 1:
+            problems.append("%s: the cap-sized body reached the peer %d time(s)" % (path, len(peer.requests) - before))
+        before = len(peer.requests)
+        # cap + 1 is refused from the head alone: the body is never sent, and nothing reaches the peer.
+        status, _hd, got, _closed = gv_raw_post(client, path, auth, length=cap + 1)
+        problems += gv_oai("%s at cap + 1" % path, status, got, 413)
+        if len(peer.requests) != before:
+            problems.append("%s: cap + 1 reached the peer" % path)
+        # Transfer-Encoding is a 411 before the length is looked at: never a 413, in any spelling of the name.
+        for label, pairs, length, body_bytes in (
+                ("chunked", auth + [("Transfer-Encoding", "chunked")], None, b"0\r\n\r\n"),
+                ("lower-case name", auth + [("transfer-encoding", "chunked")], None, b"0\r\n\r\n"),
+                ("CL + TE", auth + [("transfer-encoding", "chunked")], True, b"0\r\n\r\n"),
+                ("CL over the cap + TE", auth + [("TRANSFER-ENCODING", "chunked")], cap + 1, b""),
+                ("a non-numeric Content-Length", auth, "abc", b""),
+                ("two Content-Length headers", auth + [("Content-Length", "5")], True, b"{}")):
+            status, _hd, got, _closed = gv_raw_post(client, path, pairs, body=body_bytes, length=length)
+            problems += gv_oai("%s, %s" % (path, label), status, got, 411)
+    # The cap is the SMALLER of the table and --body-limit; /v1/messages keeps the plain --body-limit.
+    box = new_sandbox(fixture_root, "v3")
+    lp = RouterProc(box, write_config(box, gv_config(peer.url())), ("--body-limit", 1 << 20), label="v3")
+    try:
+        if lp.wait_ready() is None:
+            return problems + [gb_not_ready(lp)], []
+        lc = lp.client()
+        before = len(peer.requests)
+        status, _h, body = gv_post(lc, GV_CHAT_P, gv_sized(GV_CHAT_P, 1 << 20), record=False)
+        if status != 200:
+            problems.append("--body-limit 1 MiB: a chat body of exactly 1 MiB answered %r, expected 200" % status)
+        status, _hd, got, _closed = gv_raw_post(lc, GV_CHAT_P, gb_auth_pairs(lc), length=(1 << 20) + 1)
+        problems += gv_oai("--body-limit 1 MiB, chat at 1 MiB + 1", status, got, 413)
+        status, _hd, got, _closed = gv_raw_post(lc, GV_MSG_P, gb_auth_pairs(lc), length=(1 << 20) + 1)
+        problems += gv_anth("--body-limit 1 MiB, messages at 1 MiB + 1", status, got, 413)
+    finally:
+        lp.close()
+    # /v1/messages (to an existing kind) is NOT capped at 16 MiB: a 17 MiB body is still accepted.
+    before = len(peer.requests)
+    status, _h, body = gv_post(client, GV_MSG_P, gv_sized(GV_MSG_P, 17 << 20, model=GV_PASS), record=False,
+                               timeout=60.0)
+    if status != 200:
+        problems.append("/v1/messages to a passthrough route with a 17 MiB body answered %r, expected 200" % status)
+    return problems, ["caps        : chat %d, embeddings and rerank %d bytes accepted exactly; +1 -> 413 from the head, "
+                      "nothing sent upstream" % (GV_CAPS[GV_CHAT_P], GV_CAPS[GV_EMB_P]),
+                      "411         : chunked, lower-case and upper-case header name, CL + TE (also over the cap), a "
+                      "non-numeric and a repeated Content-Length -> 411, never 413",
+                      "limit       : --body-limit 1 MiB wins over the table; /v1/messages keeps the plain limit and "
+                      "accepts 17 MiB to an existing kind"]
+
+
+def gv_v4(ctx):
+    """V4: the gates before the body -- bearer (401 before any body byte), the methods (405, Allow: POST), the media
+    type (application/json only, once) and the query (404) -- OpenAI-shaped on the three new paths, with the
+    peer untouched throughout."""
+    client, peer = ctx["client"], ctx["peer"]
+    problems = []
+    before = len(peer.requests)
+    auth = gb_auth_pairs(client)
+    for path in GV_NEW_PATHS:
+        for label, pairs in (("no bearer", [("Content-Type", "application/json"), ("Connection", "close")]),
+                             ("wrong bearer", [("Authorization", "Bearer tf-wrong-" + "x" * 40),
+                                               ("Content-Type", "application/json"), ("Connection", "close")]),
+                             ("Basic scheme", [("Authorization", "Basic dGY6dGY="), ("Content-Type", "application/json"),
+                                               ("Connection", "close")])):
+            t0 = time.monotonic()
+            status, hdrs, got, _closed = gv_raw_post(client, path, pairs, length=100)     # 100 body bytes never sent
+            problems += gv_oai("%s %s" % (path, label), status, got, 401)
+            if hdrs.get("www-authenticate") != "Bearer":
+                problems.append("%s %s: WWW-Authenticate %r" % (path, label, hdrs.get("www-authenticate")))
+            if time.monotonic() - t0 > 3.5:
+                problems.append("%s %s: refused only after %.1f s: the body was waited for" % (path, label, time.monotonic() - t0))
+        for method in ("GET", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"):
+            status, hdrs, got, _f, _c = gb_raw(client, gb_request(client, method=method, path=path, pairs=auth[:1] + auth[2:],
+                                                                  length=None))
+            if status != 405 or hdrs.get("allow") != "POST":
+                problems.append("%s %s: status %r Allow %r, expected 405 and POST" % (method, path, status, hdrs.get("allow")))
+            elif method != "HEAD":
+                problems += gv_oai("%s %s" % (method, path), status, got, 405)
+        body = gv_body(path)
+        for label, ctype in (("text/plain", "text/plain"), ("xml", "application/xml"),
+                             ("form", "application/x-www-form-urlencoded"), ("empty", "")):
+            status, _h, got = gv_post(client, path, body, content_type=ctype)
+            problems += gv_oai("%s Content-Type %s" % (path, label or "empty"), status, got, 415)
+        status, _hd, got, _closed = gv_raw_post(client, path, [auth[0], ("Content-Type", "application/json"),
+                                                               ("Content-Type", "application/json"), auth[2]], body=body)
+        problems += gv_oai("%s two Content-Type headers" % path, status, got, 415)
+        status, _hd, got, _closed = gv_raw_post(client, path, [auth[0], auth[2]], body=body)
+        problems += gv_oai("%s no Content-Type" % path, status, got, 415)
+        for query in ("?x=1", "?stream=true"):
+            status, _h, got = gv_post(client, path + query, body)
+            problems += gv_oai("%s%s" % (path, query), status, got, 404)
+        status, _h, got = gv_post(client, path, body, content_type="application/json; charset=utf-8")
+        if status != 200:
+            problems.append("%s: application/json; charset=utf-8 answered %r, expected 200" % (path, status))
+    # Paths that are not the table's: nothing is routed, nothing reaches the peer (R8).
+    for label, odd in (("absolute-URI request line", "http://127.0.0.1:1" + GV_CHAT_P),
+                       ("trailing slash", GV_CHAT_P + "/"), ("dot segments", GV_CHAT_P + "/../embeddings"),
+                       ("encoded slash", "/v1%2fchat/completions"), ("a model-looking suffix", GV_CHAT_P + "/" + GV_CHAT)):
+        status, _h, got, _f, _c = gb_raw(client, gb_request(client, path=odd, pairs=auth, body=gv_body(GV_CHAT_P)))
+        if status != 404:
+            problems.append("%s: status %r, expected 404" % (label, status))
+    accepted = 3
+    if len(peer.requests) != before + accepted:
+        problems.append("the peer saw %d request(s), expected only the %d accepted charset=utf-8 ones"
+                        % (len(peer.requests) - before, accepted))
+    return problems, ["401         : no bearer, a wrong one and a Basic scheme -> 401 + WWW-Authenticate before any body byte",
+                      "405         : GET PUT DELETE PATCH OPTIONS HEAD -> 405, Allow: POST",
+                      "415 / 404   : text/plain, multipart, form, empty, repeated or missing Content-Type -> 415; a query "
+                      "-> 404; odd paths -> 404; the peer untouched"]
+
+
+def gv_v5(ctx):
+    """V5: strict JSON (a repeated key, NaN/Infinity, depth, a non-object, bad UTF-8), `model` (required, a string,
+    1-256 characters, spelled exactly, an exact configured route of a rawllm backend -- never the default, never a
+    route of another kind) and `stream` (a boolean, chat only), all OpenAI-shaped 400/404 with the peer untouched."""
+    client, peer = ctx["client"], ctx["peer"]
+    problems = []
+    before = len(peer.requests)
+    for path in GV_NEW_PATHS:
+        m = GV_MODEL_OF[path].encode()
+        rows = (
+            ("a repeated key", b'{"model":"%s","model":"%s"}' % (m, m), 400, "more than once"),
+            ("a repeated nested key", b'{"model":"%s","o":{"a":1,"a":2}}' % m, 400, "more than once"),
+            ("NaN", b'{"model":"%s","v":NaN}' % m, 400, "valid JSON"),
+            ("-Infinity", b'{"model":"%s","v":-Infinity}' % m, 400, "valid JSON"),
+            ("1e999", b'{"model":"%s","v":1e999}' % m, 400, "valid JSON"),
+            ("depth", b'{"model":"%s","v":' % m + b"[" * 200000 + b"]" * 200000 + b"}", 400, "valid JSON"),
+            ("a long integer", b'{"model":"%s","v":%s}' % (m, b"9" * 5000), 400, "valid JSON"),
+            ("an array", b"[1]", 400, "JSON object"),
+            ("a string", b'"x"', 400, "JSON object"),
+            ("an empty body", b"", 400, "valid JSON"),
+            ("invalid UTF-8", b"\xff\xfe{}", 400, "valid JSON"),
+            ("no model", b'{"input":"x"}', 400, "model"),
+            ("a non-string model", b'{"model":7}', 400, "model"),
+            ("an empty model", b'{"model":""}', 400, "model"),
+            ("a 257-character model", b'{"model":"%s"}' % (b"m" * 257), 400, "model"),
+            ("a Model key beside model", b'{"Model":"x","model":"%s"}' % m, 400, "lower case"),
+            ("an unknown model", b'{"model":"tf-v-nope"}', 404, "not routed"),
+            ("a traversal model", b'{"model":"../../etc/passwd"}', 404, "not routed"),
+            ("a passthrough route's model", b'{"model":"%s"}' % GV_PASS.encode(), 400, "raw"),
+            ("stream not a boolean", b'{"model":"%s","stream":"yes"}' % m, 400, "stream"),
+            ("stream null", b'{"model":"%s","stream":null}' % m, 400, "stream"),
+        )
+        for label, body, want, needle in rows:
+            status, _h, got = gv_post(client, path, body)
+            problems += gv_oai("%s %s" % (path, label), status, got, want, needle)
+        err, _why = gq_err(gv_post(client, path, b'{"model":"tf-v-nope"}')[2])
+        if err is None or err.get("code") != "model_not_found":
+            problems.append("%s: an unknown model's error code is %r, expected model_not_found"
+                            % (path, (err or {}).get("code")))
+    if len(peer.requests) != before:
+        problems.append("a refused request reached the peer (%d)" % (len(peer.requests) - before))
+    # stream: chat only.
+    for path in (GV_EMB_P, GV_RANK_P):
+        status, _h, got = gv_post(client, path, gv_body(path, stream=True))
+        problems += gv_oai("%s stream true" % path, status, got, 400, "stream")
+        status, _h, got = gv_post(client, path, gv_body(path, stream=False))
+        if status != 200:
+            problems.append("%s: stream false answered %r, expected 200" % (path, status))
+    status, _h, got = gq_post_raw(client, GV_CHAT_P, gv_body(GV_CHAT_P, stream=True))
+    if status != 200 or got != gv_wire(GV_CHAT_SSE):
+        problems.append("chat stream true: status %r, %d byte(s); expected the peer's stream" % (status, len(got)))
+    return problems, ["json        : repeated key (top and nested), NaN, Infinity, 1e999, depth, a 5000-digit integer, "
+                      "non-object, empty, invalid UTF-8 -> 400 (OpenAI envelope), peer untouched",
+                      "model       : missing, wrong type, empty, 257 characters, Model/model -> 400; unknown or traversal "
+                      "-> 404 model_not_found (never the default route); another kind's route -> 400",
+                      "stream      : non-boolean and null -> 400; true on embeddings and rerank -> 400; false anywhere "
+                      "and true on chat -> 200"]
+
+
+def gv_hold(client, path, body, results, key):
+    """A daemon thread that POSTs and stores the status (or the exception's type name) under *key*."""
+    def run():
+        try:
+            results[key] = gv_post(client, path, body, timeout=30.0, record=False)[0]
+        except Exception as exc:  # noqa: BLE001 -- recorded as the result
+            results[key] = type(exc).__name__
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    return thread
+
+
+def gv_v6(ctx):
+    """V6 (H1, R23): --max-llm-requests N.  With N held open by a stalled peer, request N+1 to ANY rawllm route --
+    chat, embeddings, rerank, and /v1/messages routed to a rawllm backend -- is a 429 with Retry-After: 1 at once
+    and no upstream connection; /v1/messages to an existing kind never takes a slot; the slot is released on a
+    success, an upstream error and a client that left."""
+    peer, state, fixture_root = ctx["peer"], ctx["state"], ctx["fixture_root"]
+    problems = []
+    box = new_sandbox(fixture_root, "v6")
+    lp = RouterProc(box, write_config(box, gv_config(peer.url())), ("--max-llm-requests", 2), label="v6")
+    try:
+        if lp.wait_ready() is None:
+            return [gb_not_ready(lp)], []
+        lc = lp.client()
+        stall = {"s": 2.5, "status": 200}
+
+        def script(index, request):
+            if GV_PREFIX in request["line"]:
+                steps = [("stall", stall["s"])] if stall["s"] else []
+                if stall["status"] != 200:
+                    return steps + [("respond_json", stall["status"], {"error": {"message": "tf v6"}})]
+                return steps + gv_default(index, request)
+            return gv_default(index, request)
+
+        state["script"] = script
+        before = len(peer.requests)
+        results = {}
+        holders = [gv_hold(lc, GV_CHAT_P, gv_body(GV_CHAT_P), results, "h1"),
+                   gv_hold(lc, GV_EMB_P, gv_body(GV_EMB_P), results, "h2")]
+        deadline = time.monotonic() + 8.0
+        while len(peer.requests) < before + 2 and time.monotonic() < deadline:
+            time.sleep(0.05)
+        if len(peer.requests) != before + 2:
+            return ["the two held requests did not reach the peer (%d)" % (len(peer.requests) - before)], []
+        for path in GV_NEW_PATHS + (GV_MSG_P,):
+            t0 = time.monotonic()
+            status, pairs, got = gv_post(lc, path, gv_body(path), record=True)
+            took = time.monotonic() - t0
+            problems += (gv_anth if path == GV_MSG_P else gv_oai)("N+1 on %s" % path, status, got, 429)
+            if gv_vals(pairs, "retry-after") != ["1"]:
+                problems.append("N+1 on %s: Retry-After %r, expected 1" % (path, gv_vals(pairs, "retry-after")))
+            if took > 1.5:
+                problems.append("N+1 on %s: refused after %.1f s, expected at once" % (path, took))
+        status, _pairs, _got = gv_post(lc, GV_MSG_P, gv_body(GV_MSG_P, model=GV_PASS), record=False)
+        if status != 200:
+            problems.append("/v1/messages to a passthrough route while the cap is full answered %r, expected 200 "
+                            "(an existing kind never takes a slot)" % status)
+        if len(peer.requests) != before + 3:
+            problems.append("the peer saw %d request(s) during the refusals, expected the 2 held and 1 passthrough"
+                            % (len(peer.requests) - before))
+        for thread in holders:
+            thread.join(10.0)
+        if results != {"h1": 200, "h2": 200}:
+            problems.append("the held requests ended %r, expected both 200" % (results,))
+        # Release on an upstream error: three failures with the cap at 2 would leak a slot each.
+        stall["s"], stall["status"] = 0, 500
+        for i in range(3):
+            status, _p, got = gv_post(lc, GV_CHAT_P, gv_body(GV_CHAT_P))
+            problems += gv_oai("upstream 500 #%d" % (i + 1), status, got, 502)
+        stall["status"] = 200
+        status, _p, got = gv_post(lc, GV_CHAT_P, gv_body(GV_CHAT_P))
+        if status != 200:
+            problems.append("after three upstream errors the next request answered %r: a slot leaked" % status)
+        # Release when the client left: each abandoned request holds its slot until the upstream answer, then frees it.
+        stall["s"] = 0.6
+        for _i in range(4):
+            with socket.create_connection((lc.host, lc.port), timeout=5) as sock:
+                sock.sendall(gb_request(lc, path=GV_CHAT_P, pairs=gb_auth_pairs(lc), body=gv_body(GV_CHAT_P)))
+            time.sleep(0.9)
+        stall["s"] = 0
+        status, _p, got = gv_post(lc, GV_CHAT_P, gv_body(GV_CHAT_P))
+        if status != 200:
+            problems.append("after four abandoned requests the next one answered %r: a slot leaked" % status)
+    finally:
+        state["script"] = None
+        lp.close()
+    return problems, ["cap         : --max-llm-requests 2, two held: chat, embeddings, rerank and messages-to-rawllm -> 429 "
+                      "+ Retry-After 1 within 1.5 s, no upstream connection",
+                      "unaffected  : /v1/messages to a passthrough route answered 200 while the cap was full",
+                      "released    : after a success, three upstream 500s and four abandoned requests the cap still admits"]
+
+
+def gv_v7(ctx):
+    """V7 (R8, R9): the upstream request.  The path is the fixed one under the base path (never from the client), the
+    body is the client's bytes, the credential is exactly `Authorization: Bearer <api_key>` (none for a keyless
+    backend) and never the client's key, the router token or a cookie; Accept follows the stream flag."""
+    client, peer = ctx["client"], ctx["peer"]
+    problems = []
+    foreign = {"X-Api-Key": TF_CLIENT_XKEY, "Cookie": "tf=" + TF_CLIENT_XKEY, "Proxy-Authorization": "Basic dGY6dGY=",
+               "X-Forwarded-For": "10.9.9.9", "Origin": None}
+    for path in GV_NEW_PATHS + (GV_MSG_P,):
+        for stream in (False, True):
+            if stream and path in (GV_EMB_P, GV_RANK_P):
+                continue
+            body = gv_body(path, stream=stream)
+            before = len(peer.requests)
+            status, _h, got = gq_post_raw(client, path, body, headers=foreign)
+            label = "%s stream=%s" % (path, stream)
+            if status != 200:
+                problems.append("%s: status %r, expected 200" % (label, status))
+            if len(peer.requests) != before + 1:
+                problems.append("%s: the peer saw %d request(s)" % (label, len(peer.requests) - before))
+                continue
+            req = peer.requests[-1]
+            hdrs = gq_hdrs(req)
+            if req["line"] != "POST %s%s HTTP/1.1" % (GV_PREFIX, path):
+                problems.append("%s: request line %r, expected the fixed path under the base path" % (label, req["line"]))
+            if req["body"] != body:
+                problems.append("%s: the body reached the peer altered (%d byte(s) for %d)" % (label, len(req["body"]), len(body)))
+            if hdrs.get("authorization") != ["Bearer " + TF_KEY_RAWLLM]:
+                problems.append("%s: upstream authorization is not exactly Bearer <api_key>" % label)
+            for bad in ("x-api-key", "cookie", "proxy-authorization", "x-forwarded-for", "origin", "anthropic-version"):
+                if bad in hdrs:
+                    problems.append("%s: the client's %s reached the peer" % (label, bad))
+            if hdrs.get("content-type") != ["application/json"]:
+                problems.append("%s: Content-Type %r" % (label, hdrs.get("content-type")))
+            want_accept = "text/event-stream" if stream else "application/json"
+            if hdrs.get("accept") != [want_accept]:
+                problems.append("%s: Accept %r, expected %s" % (label, hdrs.get("accept"), want_accept))
+            blob = json.dumps(req["headers"]) + req["line"]
+            if TF_ROUTER_TOKEN in blob or TF_CLIENT_XKEY in blob:
+                problems.append("%s: the router token or the client's key reached the peer's head" % label)
+    # A keyless backend sends no credential at all.
+    body = gv_body(GV_CHAT_P, model=GV_NOKEY)
+    status, _h, got = gv_post(client, GV_CHAT_P, body, headers=foreign)
+    hdrs = gq_hdrs(peer.requests[-1])
+    if status != 200 or any(name in hdrs for name in ("authorization", "x-api-key", "cookie")):
+        problems.append("keyless backend: status %r, credential headers %r" % (
+            status, sorted(set(hdrs) & {"authorization", "x-api-key", "cookie"})))
+    return problems, ["request     : POST <base path><fixed path>, the client's body byte-exact, Content-Type "
+                      "application/json, Accept by the stream flag",
+                      "credential  : exactly Authorization: Bearer <api_key>; never x-api-key, a cookie, the client's "
+                      "Authorization or the router token; none without an api_key"]
+
+
+def gv_raw_pairs(client, extra, ctype="application/json"):
+    return [("Authorization", "Bearer " + client.token), ("Content-Type", ctype), ("Connection", "close")] + list(extra)
+
+
+def gv_v8(ctx):
+    """V8 (R7): anthropic-version and anthropic-beta go upstream on /v1/messages to a rawllm route only (once each,
+    length-capped); never on the three OpenAI paths; a repeated or oversize value is a 400 with nothing forwarded;
+    the existing kinds keep their own rules."""
+    client, peer = ctx["client"], ctx["peer"]
+    problems = []
+    fine = [("anthropic-version", "2023-06-01"), ("anthropic-beta", "tf-beta-1,tf-beta-2")]
+    body = gv_body(GV_MSG_P)
+    before = len(peer.requests)
+    status, _h, got, _c = gv_raw_post(client, GV_MSG_P, gv_raw_pairs(client, fine), body=body)
+    hdrs = gq_hdrs(peer.requests[-1]) if len(peer.requests) == before + 1 else {}
+    if status != 200 or hdrs.get("anthropic-version") != ["2023-06-01"] or hdrs.get("anthropic-beta") != ["tf-beta-1,tf-beta-2"]:
+        problems.append("/v1/messages: status %r, upstream anthropic-version %r anthropic-beta %r"
+                        % (status, hdrs.get("anthropic-version"), hdrs.get("anthropic-beta")))
+    for path in GV_NEW_PATHS:
+        before = len(peer.requests)
+        status, _h, got, _c = gv_raw_post(client, path, gv_raw_pairs(client, fine), body=gv_body(path))
+        hdrs = gq_hdrs(peer.requests[-1]) if len(peer.requests) == before + 1 else {"missing": 1}
+        if status != 200 or "anthropic-version" in hdrs or "anthropic-beta" in hdrs:
+            problems.append("%s: status %r, anthropic-* forwarded: %r" % (path, status, sorted(hdrs)))
+    for label, extra in (("a repeated anthropic-version", [("anthropic-version", "2023-06-01"), ("anthropic-version", "2024-01-01")]),
+                         ("a repeated anthropic-beta", [("anthropic-beta", "a"), ("anthropic-beta", "b")]),
+                         ("an oversize anthropic-version", [("anthropic-version", "v" * 5000)]),
+                         ("an oversize anthropic-beta", [("anthropic-beta", "b" * 5000)]),
+                         ("a control character in anthropic-version", [("anthropic-version", "2023\x01x")]),
+                         ("a DEL in anthropic-beta", [("anthropic-beta", "b\x7fb")]),
+                         ("a non-ASCII anthropic-beta", [("anthropic-beta", "béta")])):
+        before = len(peer.requests)
+        status, _h, got, _c = gv_raw_post(client, GV_MSG_P, gv_raw_pairs(client, extra), body=body)
+        problems += gv_anth(label, status, got, 400, "header")
+        if len(peer.requests) != before:
+            problems.append("%s: reached the peer" % label)
+    # The cap belongs to the rawllm kind: a passthrough route still forwards a long anthropic-beta.
+    before = len(peer.requests)
+    status, _h, got, _c = gv_raw_post(client, GV_MSG_P, gv_raw_pairs(client, [("anthropic-beta", "b" * 1500)]),
+                                      body=gv_body(GV_MSG_P, model=GV_PASS))
+    if status != 200 or gq_hdrs(peer.requests[-1]).get("anthropic-beta") != ["b" * 1500]:
+        problems.append("a 1500-character anthropic-beta to a passthrough route: status %r (the cap must not reach other kinds)" % status)
+    return problems, ["forwarded   : anthropic-version and anthropic-beta once each on /v1/messages to a rawllm route",
+                      "withheld    : never on /v1/chat/completions, /v1/embeddings or /v1/rerank",
+                      "400         : a repeated, 5000-character, control-character, DEL or non-ASCII value, nothing "
+                      "forwarded; passthrough keeps its own rule"]
+
+
+def gv_v9(ctx):
+    """V9 (M1): a `stream: true` request whose upstream answer is not an event stream is never a 200 SSE head and never
+    the upstream's text: a non-2xx is the mapped status with a fixed JSON error, a 2xx with another Content-Type is a
+    502 (both OpenAI-shaped on chat, Anthropic-shaped on /v1/messages)."""
+    client, state = ctx["client"], ctx["state"]
+    problems = []
+    note = "tf v9 boom %s" % TF_KEY_RAWLLM
+    try:
+        for label, script, want, absent in (
+                ("upstream 500", [("respond_json", 500, {"error": {"message": note, "type": "server_error"}})], 502, ("tf v9 boom",)),
+                ("upstream 503", [("respond_json", 503, {"error": {"message": note}})], 529, ("tf v9 boom",)),
+                ("upstream 404", [("respond_json", 404, {"error": {"message": "tf v9 nothing"}})], 404, ()),
+                ("200 application/json", [("respond_json", 200, GV_CHAT_OK)], 502, ("tf \\u00e9 ok", "chatcmpl")),
+                ("200 text/plain", [("respond_json", 200, b"tf plain", [("Content-Type", "text/plain")])], 502, ("tf plain",))):
+            state["script"] = lambda _i, _r, s=script: s
+            status, hdrs, got = gq_post_raw(client, GV_CHAT_P, gv_body(GV_CHAT_P, stream=True))
+            problems += gv_oai("chat stream, %s" % label, status, got, want, absent=absent + (TF_KEY_RAWLLM,))
+            ctype = hdrs.get("content-type", "")
+            if ctype.split(";")[0] != "application/json":
+                problems.append("chat stream, %s: Content-Type %r, expected application/json (no SSE head)" % (label, ctype))
+        state["script"] = lambda _i, _r: [("respond_json", 500, {"error": {"message": note}})]
+        status, hdrs, got = gq_post_raw(client, GV_MSG_P, gv_body(GV_MSG_P, stream=True))
+        problems += gv_anth("messages stream, upstream 500", status, got, 502)
+        if "tf v9 boom" in gb_text(got) or hdrs.get("content-type", "").startswith("text/event-stream"):
+            problems.append("messages stream, upstream 500: the upstream text or an SSE head reached the client")
+    finally:
+        state["script"] = None
+    return problems, ["non-2xx      : 500 -> 502, 503 -> 529, 404 -> 404, a fixed JSON envelope, the upstream text never echoed",
+                      "2xx         : application/json and text/plain answers to a stream request -> 502, never a 200 SSE head"]
+
+
+def gv_event_names(raw):
+    return [ln[len(b"event:"):].strip() for ln in raw.split(b"\n") if ln.startswith(b"event:")]
+
+
+def gv_v10(ctx):
+    """V10: the SSE relay.  Whole events byte-exact (a comment line is dropped), closed after [DONE] / message_stop (a
+    later event never reaches the client), an event over 2 MiB and a line over 1 MiB are in-band errors, an idle
+    stall past idle_timeout is `stalled`, and a client that hangs up frees the single --max-llm-requests slot."""
+    client, peer, state, fixture_root = ctx["client"], ctx["peer"], ctx["state"], ctx["fixture_root"]
+    problems = []
+    try:
+        with_comment = [b": tf keepalive"] + GV_CHAT_SSE[:3] + [b": again"] + GV_CHAT_SSE[3:]
+        state["script"] = lambda _i, _r: [("respond_sse", with_comment)]
+        status, _h, raw = gq_post_raw(client, GV_CHAT_P, gv_body(GV_CHAT_P, stream=True))
+        if status != 200 or raw != gv_wire(GV_CHAT_SSE):
+            problems.append("comments: status %r, %r; expected the events byte-exact without the comments" % (status, raw[:80]))
+        after = GV_CHAT_SSE + [b'data: {"id":"c1","after":"done"}', b""]
+        state["script"] = lambda _i, _r: [("respond_chunked_sse", after)]
+        status, _h, raw = gq_post_raw(client, GV_CHAT_P, gv_body(GV_CHAT_P, stream=True))
+        if status != 200 or raw != gv_wire(GV_CHAT_SSE):
+            problems.append("chunked, [DONE] then more: the client got %r, expected the stream up to [DONE] only" % raw[-80:])
+        after = GV_MSG_SSE + [b"event: ping", b'data: {"type":"ping"}', b""]
+        state["script"] = lambda _i, _r: [("respond_sse", after)]
+        status, _h, raw = gq_post_raw(client, GV_MSG_P, gv_body(GV_MSG_P, stream=True))
+        if status != 200 or raw != gv_wire(GV_MSG_SSE):
+            problems.append("messages, message_stop then more: the client got %r" % raw[-80:])
+        # Limits: one event of 3 MiB (30 lines of 100 KiB, no blank line yet), one line over 1 MiB.
+        big = [b"data: " + b"A" * 100000] * 30 + [b""]
+        state["script"] = lambda _i, _r: [("respond_sse", GV_CHAT_SSE[:2] + big)]
+        status, _h, raw = gq_post_raw(client, GV_CHAT_P, gv_body(GV_CHAT_P, stream=True), timeout=30.0)
+        if status != 200 or b"event: error" not in raw or b"oversized" not in raw or b"AAAA" in raw:
+            problems.append("an event over the 2 MiB limit: not an in-band 'oversized' error (%d byte(s))" % len(raw))
+        state["script"] = lambda _i, _r: [("respond_sse", GV_CHAT_SSE[:2] + [b"data: " + b"B" * ((1 << 20) + 10), b""])]
+        status, _h, raw = gq_post_raw(client, GV_CHAT_P, gv_body(GV_CHAT_P, stream=True), timeout=30.0)
+        if status != 200 or b"event: error" not in raw or b"SSE line" not in raw or b"BBBB" in raw:
+            problems.append("a line over 1 MiB: not an in-band 'SSE line' error (%d byte(s))" % len(raw))
+        # An idle stall (idle_timeout 1 on the fast backend): the first event, then silence.
+        state["script"] = lambda _i, _r: [("respond_sse", GV_CHAT_SSE[:2] + [b"data: late", b""], (0, 0, 5, 0))]
+        t0 = time.monotonic()
+        status, _h, raw = gq_post_raw(client, GV_CHAT_P, gv_body(GV_CHAT_P, stream=True, model=GV_FAST), timeout=30.0)
+        took = time.monotonic() - t0
+        if status != 200 or b"event: error" not in raw or b"stalled" not in raw or b"late" in raw:
+            problems.append("an idle stall: not an in-band 'stalled' error (%r)" % raw[-100:])
+        if took > 4.5:
+            problems.append("an idle stall ended after %.1f s, expected about idle_timeout 1 s" % took)
+    finally:
+        state["script"] = None
+    # A client that hangs up mid-stream frees the only slot.
+    box = new_sandbox(fixture_root, "v10")
+    lp = RouterProc(box, write_config(box, gv_config(peer.url())), ("--max-llm-requests", 1), label="v10")
+    try:
+        if lp.wait_ready() is None:
+            return problems + [gb_not_ready(lp)], []
+        lc = lp.client()
+        slow = [b'data: {"n":%d}' % i for i in range(40)]
+        lines = []
+        for line in slow:
+            lines += [line, b""]
+        state["script"] = lambda _i, _r: [("respond_sse", lines, [0.4] * len(lines))]
+        peer.closed_event.clear()
+        conn, resp = lc.post(GV_CHAT_P, raw_body=gv_body(GV_CHAT_P, stream=True), stream=True)
+        try:
+            first = resp.readline()
+            if not first.startswith(b"data: "):
+                problems.append("the live stream did not start: %r" % first[:60])
+        finally:
+            resp.close()         # the response's file object keeps the socket open (a Connection: close answer)
+            conn.close()
+        if not peer.closed_event.wait(8.0):
+            problems.append("the upstream was not closed within 8 s of the client hanging up")
+        state["script"] = None
+        t0 = time.monotonic()
+        status = None
+        while time.monotonic() - t0 < 6.0:
+            status, _h, _g = gv_post(lc, GV_CHAT_P, gv_body(GV_CHAT_P), record=False)
+            if status == 200:
+                break
+            time.sleep(0.3)
+        if status != 200:
+            problems.append("after the hang-up the single slot was still held (last status %r)" % status)
+    finally:
+        state["script"] = None
+        lp.close()
+    return problems, ["relay       : events byte-exact (comments dropped), closed after [DONE] / message_stop",
+                      "limits      : a 3 MiB event and a 1 MiB + 10 line -> in-band errors; an idle stall at idle_timeout 1 -> "
+                      "'stalled'",
+                      "slot        : a client hang-up closes the upstream and frees --max-llm-requests 1"]
+
+
+def gv_v11(ctx):
+    """V11 (R8): upstream errors.  A 3xx is a 502 and never followed (a second peer sees nothing); a declared body over
+    64 MiB is a 502; an error text is relayed only as a scrubbed, secret-stripped message and the upstream status is
+    mapped (KD-14); a 429's Retry-After is relayed when it is all digits; a 401/403 is a fixed 502 text."""
+    client, peer, peer2, state = ctx["client"], ctx["peer"], ctx["peer2"], ctx["state"]
+    problems = []
+    try:
+        before2 = len(peer2.requests)
+        for stream in (False, True):
+            state["script"] = lambda _i, _r: [("redirect", peer2.url() + "/stolen")]
+            status, _h, got = gq_post_raw(client, GV_CHAT_P, gv_body(GV_CHAT_P, stream=stream))
+            problems += gv_oai("a 307, stream=%s" % stream, status, got, 502, absent=(peer2.url(),))
+        if len(peer2.requests) != before2:
+            problems.append("a redirect was followed: the second peer saw %d request(s)" % (len(peer2.requests) - before2))
+        state["script"] = lambda _i, _r: [("respond_raw", b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                                           b"Content-Length: %d\r\nConnection: close\r\n\r\n" % (70 << 20))]
+        status, _h, got = gq_post_raw(client, GV_EMB_P, gv_body(GV_EMB_P))
+        problems += gv_oai("a declared 70 MiB body", status, got, 502)
+        echo = "tf v11 %s Bearer sk-abcdef123456 ****abcd %s" % (TF_KEY_RAWLLM, TF_ROUTER_TOKEN)
+        state["script"] = lambda _i, _r: [("respond_json", 400, {"error": {"message": echo, "type": "invalid_request_error",
+                                                                          "code": "tf_code"}})]
+        status, _h, got = gq_post_raw(client, GV_CHAT_P, gv_body(GV_CHAT_P))
+        problems += gv_oai("a 400 that echoes secrets", status, got, 400, "tf v11",
+                           absent=(TF_KEY_RAWLLM, TF_ROUTER_TOKEN, "sk-abcdef", "abcd"))
+        for upstream, want in ((401, 502), (403, 502), (404, 404), (413, 413), (422, 400), (500, 502), (502, 529),
+                               (503, 529), (504, 529)):
+            state["script"] = lambda _i, _r, s=upstream: [("respond_json", s, {"error": {"message": "tf v11 " + TF_KEY_RAWLLM}})]
+            status, _h, got = gq_post_raw(client, GV_RANK_P, gv_body(GV_RANK_P))
+            problems += gv_oai("upstream %d" % upstream, status, got, want, absent=(TF_KEY_RAWLLM,))
+        for header, relayed in (("7", "7"), ("7, 8", None), ("Wed, 21 Oct 2026 07:28:00 GMT", None), ("", None)):
+            state["script"] = lambda _i, _r, h=header: [("respond_json", 429, {"error": {"message": "tf v11"}}, [("Retry-After", h)])]
+            status, hdrs, got = gq_post_raw(client, GV_CHAT_P, gv_body(GV_CHAT_P))
+            problems += gv_oai("429 Retry-After %r" % header, status, got, 429)
+            if hdrs.get("retry-after") != relayed:
+                problems.append("429 Retry-After %r: the client got %r, expected %r" % (header, hdrs.get("retry-after"), relayed))
+        state["script"] = lambda _i, _r: [("respond_json", 200, b"<html>tf not json</html>")]
+        status, _h, got = gq_post_raw(client, GV_CHAT_P, gv_body(GV_CHAT_P))
+        problems += gv_oai("a 200 body that is not a JSON object", status, got, 502, absent=("tf not json",))
+    finally:
+        state["script"] = None
+    return problems, ["redirect    : a 307 is a 502 and the Location is never contacted (non-stream and stream)",
+                      "bounded     : a declared 70 MiB body -> 502; a non-object 2xx -> 502",
+                      "sanitised   : secrets, a Bearer value and a key tail stripped from a relayed 400; statuses mapped "
+                      "401/403/500 -> 502, 502/503/504 -> 529",
+                      "Retry-After : digits only, on a 429"]
+
+
+def gv_v12(fixture_root, mod):
+    """V12: the rawllm kind in the config and on the command line (in-process for the loader)."""
+    if mod is None or not hasattr(mod, "load_config"):
+        return ["cannot import the router (load_config)"], []
+    box = new_sandbox(fixture_root, "v12")
+    counter = [0]
+
+    def write(mutate=None):
+        cfg = {"auth_token": TF_ROUTER_TOKEN,
+               "backends": {"rl": {"kind": "rawllm", "base_url": "http://127.0.0.1:8082/m/llm", "allow_private": True,
+                                   "allow_loopback": True},
+                            "pt": {"kind": "passthrough", "base_url": "https://pt.example.invalid", "api_key": TF_KEY_PASS,
+                                   "auth_header": "x-api-key"}},
+               "routes": {GV_CHAT: {"backend": "rl", "model": GV_CHAT}, "tf-v-other": {"backend": "pt", "model": "up"}}}
+        if mutate is not None:
+            mutate(cfg)
+        counter[0] += 1
+        return write_config(box, cfg, filename="v12-%d.json" % counter[0])
+
+    problems = []
+    cfg, more = ga_accepted(mod, write(), "a keyless rawllm backend with a base path")
+    problems += more
+    if cfg is not None:
+        spec = cfg.backends.get("rl")
+        if spec is None or spec.kind != "rawllm" or spec.base_path != "/m/llm" or spec.auth_header != "none" \
+                or spec.api_key is not None:
+            problems.append("keyless rawllm: kind/base_path/auth_header/api_key are %r"
+                            % ((getattr(spec, "kind", None), getattr(spec, "base_path", None),
+                                getattr(spec, "auth_header", None), getattr(spec, "api_key", None)),))
+        if getattr(cfg.routes.get(GV_CHAT), "modality", None) != "chat":
+            problems.append("the rawllm route's modality is not chat")
+    for label, mutate in (("an api_key", lambda c: c["backends"]["rl"].update(api_key=TF_KEY_RAWLLM)),
+                          ("an api_key and auth_header authorization",
+                           lambda c: c["backends"]["rl"].update(api_key=TF_KEY_RAWLLM, auth_header="authorization")),
+                          ("forward_headers anthropic-version",
+                           lambda c: c["backends"]["rl"].update(forward_headers=["anthropic-version"]))):
+        cfg, more = ga_accepted(mod, write(mutate), "rawllm with " + label)
+        problems += more
+        if cfg is not None and label.startswith("an api_key"):
+            spec = cfg.backends["rl"]
+            if spec.auth_header != "authorization" or spec.api_key != TF_KEY_RAWLLM or TF_KEY_RAWLLM in repr(spec):
+                problems.append("rawllm with %s: auth_header %r, key kept %s, repr %s" % (
+                    label, spec.auth_header, spec.api_key == TF_KEY_RAWLLM,
+                    "leaks the key" if TF_KEY_RAWLLM in repr(spec) else "redacted"))
+    for label, mutate, needles in (
+            ("an api_key with auth_header none", lambda c: c["backends"]["rl"].update(api_key=TF_KEY_RAWLLM, auth_header="none"),
+             ["backends.rl.auth_header", "rawllm"]),
+            ("an api_key with auth_header x-api-key",
+             lambda c: c["backends"]["rl"].update(api_key=TF_KEY_RAWLLM, auth_header="x-api-key"), ["backends.rl.auth_header"]),
+            ("auth_header authorization without a key", lambda c: c["backends"]["rl"].update(auth_header="authorization"),
+             ["backends.rl.auth_header", "api_key"]),
+            ("a short api_key", lambda c: c["backends"]["rl"].update(api_key="short"), ["backends.rl.api_key"]),
+            ("an api_key equal to auth_token", lambda c: c["backends"]["rl"].update(api_key=TF_ROUTER_TOKEN),
+             ["backends.rl.api_key", "auth_token"]),
+            ("a forward header outside the kind's table", lambda c: c["backends"]["rl"].update(forward_headers=["x-tf"]),
+             ["backends.rl.forward_headers"]),
+            ("plain http without allow_private",
+             lambda c: c["backends"]["rl"].update(allow_private=False, allow_loopback=False),
+             ["backends.rl.base_url", "allow_private"]),
+            ("a route model that differs from its key", lambda c: c["routes"][GV_CHAT].update(model="other"),
+             ["routes.%s.model" % GV_CHAT, "rawllm"]),
+            ("a route option", lambda c: c["routes"][GV_CHAT].update(options={"max_n": 2}),
+             ["routes.%s.options" % GV_CHAT, "max_n"]),
+            ("an image route", lambda c: c["routes"][GV_CHAT].update(modality="image"),
+             ["routes.%s.modality" % GV_CHAT, "rawllm"]),
+            ("the default route", lambda c: c.__setitem__("default", {"backend": "rl", "model": "up"}),
+             ["default", "rawllm"])):
+        problems += ga_refused(mod, write(mutate), needles, label, absent=(TF_KEY_RAWLLM,))
+    kinds = getattr(mod, "_KINDS", ())
+    if tuple(kinds[-2:]) != ("rawllm", "anthropic") or "rawllm" in getattr(mod, "RESERVED_KINDS", ()):
+        problems.append("_KINDS ends %r, expected rawllm before the reserved anthropic" % (tuple(kinds[-2:]),))
+    # The command line: the new flag's range, its help, and the startup warning.
+    cfgpath = write()
+    for value in ("0", "65", "x", "-1"):
+        run = subprocess.run(router_argv(cfgpath, os.path.join(box, "v12.ready"), "--max-llm-requests", value),
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, cwd=box,
+                             env=H.child_env(), timeout=20)
+        err = run.stderr.decode("utf-8", "replace").strip().splitlines()
+        if run.returncode != 2 or len(err) != 1 or "--max-llm-requests" not in err[0]:
+            problems.append("--max-llm-requests %s: exit %r, stderr %r; expected exit 2 and one line naming the flag"
+                            % (value, run.returncode, err[:2]))
+    run = subprocess.run([sys.executable, "-B", SERVER, "--help"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                         stderr=subprocess.DEVNULL, cwd=box, env=H.child_env(), timeout=20)
+    helptext = run.stdout.decode("utf-8", "replace")
+    for needle in ("--max-llm-requests", "rawllm", "/v1/chat/completions", "/v1/embeddings", "/v1/rerank"):
+        if needle not in helptext:
+            problems.append("--help does not mention %s" % needle)
+    lp = RouterProc(box, cfgpath, ("--max-llm-requests", 40, "--max-connections", 32), label="v12warn")
+    try:
+        if lp.wait_ready() is None:
+            problems.append(gb_not_ready(lp))
+        else:
+            time.sleep(0.3)
+            if "--max-llm-requests 40" not in lp.stderr_text():
+                problems.append("no startup WARNING for a --max-llm-requests not below --max-connections")
+    finally:
+        lp.close()
+    return problems, ["accepted    : a keyless backend with a base path, an api_key (auth_header authorization), the two "
+                      "anthropic-* forward headers; _KINDS holds rawllm before the reserved anthropic",
+                      "refused     : none/x-api-key with a key, a key-less authorization, a short key, key == auth_token, a "
+                      "foreign forward header, http without allow_private, model != key, an option, an image route and "
+                      "the default route",
+                      "command line: --max-llm-requests 0, 65, x, -1 exit 2 naming the flag; --help documents the kind and "
+                      "the paths; a cap not below --max-connections warns"]
+
+
+def gv_v13(ctx):
+    """V13 (R13): GET /v1/models lists rawllm routes as modality chat; /v1/messages/count_tokens on a rawllm route is a
+    clear, documented refusal (400, Anthropic envelope naming count_tokens) with nothing sent upstream -- never a silent
+    pass-through; the same call on an existing kind still reaches its peer."""
+    client, peer = ctx["client"], ctx["peer"]
+    problems = []
+    status, hdrs, body = gb_get(client, "/v1/models")
+    obj, bad = gb_json_200("GET /v1/models", status, hdrs, body)
+    problems += bad
+    if obj is not None:
+        entries = {e.get("id"): e for e in obj.get("data", [])}
+        for key in (GV_CHAT, GV_EMB, GV_RANK, GV_NOKEY, GV_FAST, GV_PASS):
+            if entries.get(key, {}).get("modality") != "chat":
+                problems.append("GET /v1/models: %s is %r, expected an entry of modality chat" % (key, entries.get(key)))
+    status, hdrs, body = gb_get(client, "/v1/models?modality=image")
+    obj, bad = gb_json_200("GET /v1/models?modality=image", status, hdrs, body)
+    problems += bad
+    if obj is not None and obj.get("data"):
+        problems.append("?modality=image lists %r, expected none" % [e.get("id") for e in obj["data"]])
+    before = len(peer.requests)
+    body = json.dumps({"model": GV_CHAT, "messages": [{"role": "user", "content": GV_PAYLOAD}]}).encode()
+    status, _h, got = gv_post(client, "/v1/messages/count_tokens", body)
+    problems += gv_anth("count_tokens on a rawllm route", status, got, 400, "count_tokens")
+    if len(peer.requests) != before:
+        problems.append("count_tokens on a rawllm route reached the peer")
+    body = json.dumps({"model": GV_PASS, "messages": [{"role": "user", "content": "tf v13"}]}).encode()
+    status, _h, got = gv_post(client, "/v1/messages/count_tokens", body)
+    if status != 200 or len(peer.requests) != before + 1 or not peer.requests[-1]["line"].startswith("POST /v1/messages/count_tokens "):
+        problems.append("count_tokens on a passthrough route: status %r, peer saw %d request(s)" % (status, len(peer.requests) - before))
+    return problems, ["listing     : every rawllm route is a chat entry; ?modality=image lists none",
+                      "count_tokens: a rawllm route -> 400 naming count_tokens, nothing upstream; passthrough unchanged"]
+
+
+def gv_v14(ctx):
+    """V14: the debug log and stderr of the V router hold no secret in any KD-9 form and no request payload byte; the
+    `req` summary lines name the endpoint tokens and the kind; every upstream failure line is structure only."""
+    log_path, proc = ctx["log_path"], ctx["proc"]
+    problems = []
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+    except OSError as exc:
+        return ["cannot read the V router's log: %s" % type(exc).__name__], []
+    text += "\n" + proc.stderr_text()
+    for form in GI_SECRET_FORMS:
+        if form and form in text:
+            problems.append("the log holds a sentinel form")
+            break
+    if GV_PAYLOAD in text or "tf-v-payload" in text:
+        problems.append("the log holds a request payload")
+    reqs = [ln for ln in text.splitlines() if " req endpoint=" in ln and "kind='rawllm'" in ln]
+    seen = {re.search(r"endpoint=(\S+)", ln).group(1) for ln in reqs}
+    for token in ("'chat_completions'", "'embeddings'", "'rerank'", "'messages'"):
+        if token not in seen:
+            problems.append("no req summary line with endpoint=%s and kind='rawllm' (saw %s)" % (token, sorted(seen)))
+    failed = [ln for ln in text.splitlines() if "upstream failed:" in ln and "kind='rawllm'" in ln]
+    if not failed:
+        problems.append("no structure-only `upstream failed` line for a rawllm kind")
+    for ln in failed:
+        if "reason=" not in ln:
+            problems.append("an upstream failed line without a reason: %r" % ln[:120])
+        if any(w in ln for w in ("tf v", "boom", "Bearer")):
+            problems.append("an upstream failed line carries upstream text: %r" % ln[:160])
+    return problems, ["log         : %d line(s) swept for every sentinel form and the payload; %d req line(s) of kind rawllm, "
+                      "%d upstream failed line(s)" % (len(text.splitlines()), len(reqs), len(failed))]
+
+
+def gv_v15(ctx):
+    """V15 (F1, CWE-444, ADR 0015): /v1/messages to a rawllm route relays the client's bytes, so a key that only a
+    case-insensitive upstream would fold onto model or stream ("Model", "Stream") is refused 400 in the Anthropic
+    envelope -- nothing reaches the peer and no llm slot is taken (a clean request still answers 200 after them).
+    The same bodies to a passthrough route are not refused for that reason (other kinds unchanged)."""
+    client, peer = ctx["client"], ctx["peer"]
+    problems = []
+    m = GV_CHAT.encode()
+    rows = (
+        ("a Model key beside model", b'{"model":"%s","Model":"other","max_tokens":16,"messages":[{"role":"user","content":"x"}]}' % m),
+        ("a Stream key beside stream", b'{"model":"%s","stream":false,"Stream":true,"max_tokens":16,"messages":[{"role":"user","content":"x"}]}' % m),
+        ("an upper-case MODEL key alone", b'{"model":"%s","MODEL":"%s","max_tokens":16,"messages":[{"role":"user","content":"x"}]}' % (m, m)),
+    )
+    before = len(peer.requests)
+    for label, body in rows:
+        status, _h, got = gv_post(client, GV_MSG_P, body)
+        problems += gv_anth("%s on a rawllm route" % label, status, got, 400, "lower case")
+    if len(peer.requests) != before:
+        problems.append("a case-variant key on a rawllm route reached the peer (%d)" % (len(peer.requests) - before))
+    status, _h, got = gv_post(client, GV_MSG_P, gv_body(GV_MSG_P))
+    if status != 200:
+        problems.append("a clean /v1/messages after the refusals answered %r, expected 200 (a slot leaked?)" % status)
+    before = len(peer.requests)
+    body = b'{"model":"%s","Model":"other","max_tokens":16,"messages":[{"role":"user","content":"x"}]}' % GV_PASS.encode()
+    status, _h, got = gv_post(client, GV_MSG_P, body)
+    if status == 400 and b"lower case" in got:
+        problems.append("a passthrough route refused a case-variant key: the rule must be rawllm only")
+    elif len(peer.requests) != before + 1:
+        problems.append("a passthrough route with a Model key: status %r, the peer saw %d request(s), expected 1"
+                        % (status, len(peer.requests) - before))
+    return problems, ["refused     : Model beside model, Stream beside stream, MODEL -> 400 naming lower case on a rawllm "
+                      "/v1/messages; the peer untouched; a clean request still 200",
+                      "unchanged   : the same Model body on a passthrough route reaches its peer"]
+
+
+def group_v(suite, fixture_root):
+    """V. the rawllm kind (stage 3).  One router in front of one scripted peer (and a second peer that must never be
+    contacted) serves most cases, with a debug log V14 sweeps last; V3, V6, V10 and V12 start routers of their own
+    (a body limit, an in-flight cap); V12 runs in-process on the loaded module."""
+    results = {}
+    setup = "case did not run"
+    try:
+        mod = H.load_module_from_path("ph_llm_router_v", SERVER)
+    except Exception:  # noqa: BLE001 -- the in-process case then fails with the reason
+        mod = None
+    state = {"script": None}
+    peer = ScriptedPeer(script=lambda i, r: (state["script"] or gv_default)(i, r))
+    peer2 = ScriptedPeer(script=lambda _i, _r: [("respond_json", 200, {"stolen": True})])
+    proc = None
+    try:
+        sandbox = new_sandbox(fixture_root, "rawllm")
+        log_path = os.path.join(sandbox, "rawllm.log")
+        proc = RouterProc(sandbox, write_config(sandbox, gv_config(peer.url())), ("--log-file", log_path), label="rawllm")
+        port = proc.wait_ready()
+        router_why = None
+        if port is None:
+            router_why = "the router did not start: %s" % gi_redact(
+                proc.stderr_text().strip().splitlines()[-1] if proc.stderr_text().strip() else "(no stderr)")[:200]
+        with peer, peer2:
+            ctx = {"mod": mod, "peer": peer, "peer2": peer2, "state": state, "fixture_root": fixture_root,
+                   "client": proc.client() if port is not None else None, "log_path": log_path, "proc": proc}
+            fns = (gv_v1, gv_v2, gv_v3, gv_v4, gv_v5, gv_v6, gv_v7, gv_v8, gv_v9, gv_v10, gv_v11, None, gv_v13, gv_v14, gv_v15)
+            for cid, fn in zip(GV_CASES, fns):
+                try:
+                    if fn is None:
+                        results[cid] = gv_v12(fixture_root, mod)
+                    elif router_why is not None:
+                        results[cid] = ([router_why], [])
+                    else:
+                        results[cid] = fn(ctx)
+                except Exception as exc:  # noqa: BLE001 -- a broken case fails, never aborts the group
+                    results[cid] = (["case raised %s: %s" % (type(exc).__name__, gi_redact(str(exc))[:200])], [])
+                finally:
+                    state["script"] = None
+    except Exception as exc:  # noqa: BLE001 -- a setup failure fails every case not yet run
+        setup = "the group setup raised %s: %s" % (type(exc).__name__, gi_redact(str(exc))[:200])
+    finally:
+        if proc is not None:
+            proc.close()
+        peer.close()
+        peer2.close()
+    for cid, vid in zip(GV_CASES, GV_IDS):
+        problems, detail = results.get(cid, ([setup], []))
+        suite.record(GV, cid, problems, detail=["case        : " + vid] + list(detail))
+
+
+# ---------------------------------------------------------------------------
 # Group I: secret leak
 # ---------------------------------------------------------------------------
 
@@ -22740,9 +23858,9 @@ GJ_CASES = (
     "duplicate key -> ValueError",       # J34
     "role refusal logs type name only",  # J35
     "kind registry values pinned",       # J39 (R-0084)
-    "image hooks: chat kinds inherit",   # J42
+    "image/raw hooks: who overrides",    # J42
     "no format receives the request",    # J43
-    "image path only from IMAGE_PATHS",  # J44
+    "upstream path only from a table",   # J44 (IMAGE_PATHS, RAW_PATHS)
 )
 
 # J34 (F10): a key that appears twice in one object, at any depth, is a ValueError from
@@ -22788,7 +23906,7 @@ GJ_TF_CLASS = '\n\nclass _TfAdapter(ResponsesAdapter):\n    kind = "%s"\n' % GJ_
 # J29 (Plan Step 17, FR-6): the access and ID tokens are never on disk.
 GJ_PERSIST_FORBIDDEN = ("access", "id_token")
 
-GJ_KINDS = ("codex", "llamacpp", "mistral", "openai", "passthrough", "sdcpp")   # J12: KIND_CLASSES must hold all six
+GJ_KINDS = ("codex", "llamacpp", "mistral", "openai", "passthrough", "rawllm", "sdcpp")   # J12: KIND_CLASSES must hold all seven
 
 # J39 (R-0084, NFR-2): the registry half of "a new kind is one row".  The five per-kind
 # names, pinned at their pre-R-0084 values -- type, order and content -- and written
@@ -22796,17 +23914,17 @@ GJ_KINDS = ("codex", "llamacpp", "mistral", "openai", "passthrough", "sdcpp")   
 GJ_REG_TABLE = "_RT_KIND_TABLE"
 GJ_REG_CHECK = "_rt_check_kind_table"
 GJ_REG_DERIVED = ("_KINDS", "RESERVED_KINDS", "_RT_KIND_AUTH_PROFILES", "KIND_CLASSES", "ADAPTERS")
-GJ_REG_KINDS = ("passthrough", "llamacpp", "mistral", "codex", "openai", "sdcpp", "anthropic")
+GJ_REG_KINDS = ("passthrough", "llamacpp", "mistral", "codex", "openai", "sdcpp", "rawllm", "anthropic")
 GJ_REG_RESERVED = ("anthropic",)
 GJ_REG_AUTH = (("codex", (("oauth", "codex"),)),
                ("openai", (("oauth", "openai-oauth"), ("api_key", "openai-apikey"))))
 GJ_REG_CLASSES = (("passthrough", "PassthroughAdapter"), ("llamacpp", "LlamacppAdapter"),
                   ("mistral", "MistralAdapter"), ("codex", "CodexAdapter"), ("openai", "OpenaiAdapter"),
-                  ("sdcpp", "SdcppAdapter"))
+                  ("sdcpp", "SdcppAdapter"), ("rawllm", "RawllmAdapter"))
 # The A14 refusals, byte for byte: the unknown-kind list keeps the table's order.
 GJ_REG_REFUSALS = (
-    ({"kind": "tf-no-such-kind"}, "backends.tf.kind: must be one of passthrough, llamacpp, mistral, codex, openai, sdcpp"),
-    ({"kind": 7}, "backends.tf.kind: must be one of passthrough, llamacpp, mistral, codex, openai, sdcpp"),
+    ({"kind": "tf-no-such-kind"}, "backends.tf.kind: must be one of passthrough, llamacpp, mistral, codex, openai, sdcpp, rawllm"),
+    ({"kind": 7}, "backends.tf.kind: must be one of passthrough, llamacpp, mistral, codex, openai, sdcpp, rawllm"),
     ({"kind": "anthropic"}, 'backends.tf.kind: "anthropic" is reserved and not implemented'),
 )
 
@@ -23852,30 +24970,34 @@ def rule_j43(source):
 
 def rule_j44(source):
     """J44: every image_request implementation (a function with a return) returns a tuple whose first
-    element is an `IMAGE_PATHS[...]` subscript with no f-string or `+` / `%` in the index, so the upstream
-    path never comes from client input; at least one implementation exists (no vacuous pass)."""
+    element is an `IMAGE_PATHS[...]` subscript, and every raw_request implementation one whose first element
+    is a `RAW_PATHS[...]` subscript, with no f-string or `+` / `%` in the index, so the upstream
+    path never comes from client input; at least one implementation of each exists (no vacuous pass)."""
     tree, found = gj_parse(source)
     if tree is None:
         return found
-    implementations = 0
+    implementations = {"image_request": 0, "raw_request": 0}
+    tables = {"image_request": "IMAGE_PATHS", "raw_request": "RAW_PATHS"}
     for node in ast.walk(tree):
-        if not (isinstance(node, ast.FunctionDef) and node.name == "image_request"):
+        if not (isinstance(node, ast.FunctionDef) and node.name in tables):
             continue
         returns = [n for n in ast.walk(node) if isinstance(n, ast.Return)]
         if not returns:
             continue                      # the base hook raises
-        implementations += 1
+        implementations[node.name] += 1
+        want = tables[node.name]
         for ret in returns:
             value = ret.value
             first = value.elts[0] if isinstance(value, ast.Tuple) and value.elts else None
             table = first.value if isinstance(first, ast.Subscript) else None
-            named = (isinstance(table, ast.Attribute) and table.attr == "IMAGE_PATHS") or gj_is_name(table, "IMAGE_PATHS")
+            named = (isinstance(table, ast.Attribute) and table.attr == want) or gj_is_name(table, want)
             if not named:
-                found.append("%d: image_request returns a path that is not an IMAGE_PATHS[...] subscript" % ret.lineno)
+                found.append("%d: %s returns a path that is not an %s[...] subscript" % (ret.lineno, node.name, want))
             elif isinstance(first.slice, (ast.JoinedStr, ast.BinOp)):
-                found.append("%d: image_request builds its IMAGE_PATHS index with a format or an operator" % ret.lineno)
-    if not implementations:
-        found.append("no image_request implementation returns a path: the rule would pass vacuously")
+                found.append("%d: %s builds its %s index with a format or an operator" % (ret.lineno, node.name, want))
+    for name, count in implementations.items():
+        if not count:
+            found.append("no %s implementation returns a path: the rule would pass vacuously" % name)
     return found
 
 
@@ -24885,16 +26007,54 @@ def group_j(suite, fixture_root, pyc_before, tree_before):
             for hook in ("upstream_request", "count_tokens", "json_response", "stream_translator"):
                 if getattr(sd, hook, None) is not getattr(base, hook, None):
                     problems.append("sdcpp overrides the chat hook %s" % hook)
+        # Stage 3: rawllm is the one raw-relay kind (RAW_RELAY), a chat kind that serves four fixed upstream paths,
+        # relays the client's bytes (raw_request) and the upstream's (raw_response, an SSE translator), refuses
+        # count_tokens, forwards the two anthropic-* headers only and keeps the base image hooks; no other kind
+        # sets RAW_RELAY or overrides a raw hook.
+        raw_hooks = ("raw_request", "raw_response")
+        if getattr(base, "RAW_RELAY", None) is not False or any(not hasattr(base, h) for h in raw_hooks + ("RAW_PATHS",)):
+            problems.append("Adapter lacks RAW_RELAY False, RAW_PATHS or the raw hooks")
+        for kind, cls in sorted((k, type(a)) for k, a in mod.ADAPTERS.items()):
+            if bool(getattr(cls, "RAW_RELAY", False)) is not (kind == "rawllm"):
+                problems.append("%s.RAW_RELAY is %r, expected %r" % (kind, getattr(cls, "RAW_RELAY", None), kind == "rawllm"))
+            for hook in raw_hooks:
+                if (getattr(cls, hook, None) is not getattr(base, hook, None)) is not (kind == "rawllm"):
+                    problems.append("%s %s the base %s hook" % (kind, "keeps" if kind != "rawllm" else "overrides", hook))
+        rl = type(mod.ADAPTERS["rawllm"]) if "rawllm" in mod.ADAPTERS else None
+        if rl is None:
+            problems.append("ADAPTERS holds no rawllm")
+        else:
+            if rl.MODALITIES != frozenset({"chat"}):
+                problems.append("rawllm.MODALITIES is %r, expected {'chat'}" % (set(rl.MODALITIES),))
+            if dict(rl.RAW_PATHS) != {"messages": "/v1/messages", "chat_completions": "/v1/chat/completions",
+                                      "embeddings": "/v1/embeddings", "rerank": "/v1/rerank"}:
+                problems.append("rawllm RAW_PATHS %r" % (dict(rl.RAW_PATHS),))
+            if frozenset(rl.FORWARDABLE) != frozenset({"anthropic-version", "anthropic-beta"}):
+                problems.append("rawllm FORWARDABLE %r, expected the two anthropic-* names" % (sorted(rl.FORWARDABLE),))
+            for hook in GJ_IMG_HOOKS + GJ_IMG_STREAM_HOOKS:
+                if getattr(rl, hook, None) is not getattr(base, hook, None):
+                    problems.append("rawllm overrides the image hook %s" % hook)
+            for hook in ("count_tokens", "stream_translator"):
+                if getattr(rl, hook, None) is getattr(base, hook, None):
+                    problems.append("rawllm does not override %s" % hook)
+            for hook in ("upstream_request", "json_response"):
+                if getattr(rl, hook, None) is not getattr(base, hook, None):
+                    problems.append("rawllm overrides the chat hook %s: the raw relay never translates" % hook)
         with open(SERVER, "r", encoding="utf-8") as fh:
             tree, findings = gj_parse(fh.read())
         problems += findings
         post = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "_post"] if tree else []
         if len(post) != 1:
             problems.append("_post is defined %d time(s), expected once" % len(post))
-        elif not any(isinstance(n, ast.Name) and n.id == "_RT_IMAGE_ENDPOINTS" for n in ast.walk(post[0])):
-            problems.append("_post never references _RT_IMAGE_ENDPOINTS: the image endpoints are not dispatched there")
+        else:
+            names = {n.id for n in ast.walk(post[0]) if isinstance(n, ast.Name)}
+            for needed in ("_RT_IMAGE_ENDPOINTS", "_RT_RAW_ENDPOINTS", "_rt_parse_raw_inbound"):
+                if needed not in names:
+                    problems.append("_post never references %s: that endpoint family is not dispatched there" % needed)
         return problems, ["kinds       : %s keep the base image hooks and MODALITIES {'chat'}" % ", ".join(shown),
-                          "modalities  : openai and codex chat+image, sdcpp image only; _post references _RT_IMAGE_ENDPOINTS"]
+                          "modalities  : openai and codex chat+image, sdcpp image only; _post references _RT_IMAGE_ENDPOINTS",
+                          "raw relay   : only rawllm sets RAW_RELAY and overrides the raw hooks; chat modality, four fixed "
+                          "RAW_PATHS, anthropic-* forwardable; _post dispatches _RT_RAW_ENDPOINTS through _rt_parse_raw_inbound"]
 
     def gj_control_hits(rule, planted_tail, needles):
         """Problems unless *rule* is silent on the live source and names each needle once *planted_tail* is appended."""
@@ -24917,8 +26077,14 @@ def group_j(suite, fixture_root, pyc_before, tree_before):
 
     def j44():
         tail = ("\n\nclass _TfPlant:\n    def image_request(self, inbound):\n"
-                "        return '/v1/images/' + inbound.endpoint, inbound.raw\n")
-        problems, got = gj_control_hits(rule_j44, tail, ("not an IMAGE_PATHS[...] subscript",))
+                "        return '/v1/images/' + inbound.endpoint, inbound.raw\n"
+                "    def raw_request(self, inbound):\n"
+                "        return '/v1/' + inbound.endpoint, inbound.raw\n"
+                "class _TfPlant2:\n    def raw_request(self, inbound):\n"
+                "        return self.RAW_PATHS[inbound.endpoint + '/x'], inbound.raw\n")
+        problems, got = gj_control_hits(rule_j44, tail, ("not an IMAGE_PATHS[...] subscript",
+                                                         "raw_request returns a path that is not an RAW_PATHS[...] subscript",
+                                                         "raw_request builds its RAW_PATHS index"))
         return problems, ["planted     : %d finding(s) on a doctored copy" % len(got)]
 
     try:
@@ -25346,6 +26512,7 @@ def group_j_hygiene(suite, fixture_root, pyc_before, tree_before):
 GROUP_ORDER = ("group_a", "group_b", "group_c", "group_d", "group_e",
                "group_f", "group_g", "group_h", "group_k", "group_l",
                "group_m", "group_n", "group_o", "group_p", "group_q", "group_r", "group_s", "group_t", "group_u",
+               "group_v",
                "group_i",
                "group_j")
 
@@ -25354,7 +26521,7 @@ def run(opts=None):
     opts = opts or H.Options()
     suite = H.Suite(NAME,
                     title="llm-router routes by model and translates at the edge: "
-                          "config, front, outbound, six backend kinds, "
+                          "config, front, outbound, seven backend kinds, "
                           "timeouts and secret hygiene against scripted peers",
                     opts=opts, mode="grouped", cid_width=30)
     pyc_before = H.pycache_snapshot()

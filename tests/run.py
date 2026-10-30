@@ -952,7 +952,7 @@ SUITES = [
      95),
     # TYPED: a fixed case table (A 50, B 32, C 16, D 17, E 15, F 31, G 23,
     # H 6 x 4 kinds + H7 + H8-H9 = 27, I 16, J 44, K 29, L 20, M 23, N 42,
-    # O 18, P 4, Q 18, R 14, S 5, T 13, U 3 = 460), so a count that moves is the alarm, not noise.
+    # O 18, P 4, Q 18, R 14, S 5, T 13, U 3, V 15 = 475), so a count that moves is the alarm, not noise.
     ("llm_router", run_llm_router,
      "llm-router, the Anthropic Messages router: config refusals (0600, "
      "duplicate keys), bearer/Host/Origin/misplaced token, GET /v1/models, "
@@ -964,10 +964,12 @@ SUITES = [
      "stable-diffusion.cpp sd-server with an optional bearer api_key, and "
      "the experimental codex ones), "
      "streamed image answers (openai), advertised image sizes, "
+     "the raw LLM relay (rawllm: /v1/chat/completions, /v1/embeddings, "
+     "/v1/rerank and /v1/messages relayed untouched), "
      "secret leaks, static rules, "
-     "hygiene", 460),
+     "hygiene", 475),
     # TYPED: a fixed case table (A 18, L 45, R 23, D 26, S 22, Q-sched 16,
-    # Q-http 6, T 17, P 46, U 21, G 6, E2E 5 = 251), so a count that moves is
+    # Q-http 6, T 17, P 46, U 21, G 6, E2E 6 = 252), so a count that moves is
     # the alarm.
     ("gpu_router", run_gpu_router,
      "gpu-router, the supervisor and proxy for stable-diffusion.cpp "
@@ -979,8 +981,8 @@ SUITES = [
      "and readiness probe, streamed llm answers (incremental, chunked, an "
      "allow-listed head, no kill on a client abort, a truncated end that "
      "never looks complete), OpenAI-shaped refusals, bearer auth, "
-     "structure-only logs, static rules, end-to-end through llm-router and "
-     "across the two app kinds", 251),
+     "structure-only logs, static rules, end-to-end through llm-router "
+     "(sdcpp and rawllm routes) and across the two app kinds", 252),
     # TYPED: a fixed case table (A 7, E 3), so a count that moves is the alarm.
     ("tshark_fields", run_tshark_fields,
      "mcp-tshark analyze's `fields` parameter, in-process with tshark "

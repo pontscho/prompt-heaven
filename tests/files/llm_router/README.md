@@ -3,8 +3,9 @@
 **Fixtures, not real code, and never a secret.** These files are what a
 scripted loopback peer replays to `Scripts/llm-router.py` in
 `tests/test_llm_router.py`: group E (llama.cpp request and event quirks), group
-F (Anthropic -> chat-completions translation, the 422 rewrite) and group G
-(chat-completions SSE -> Anthropic SSE translation). Nothing imports them; a
+F (Anthropic -> chat-completions translation, the 422 rewrite), group G
+(chat-completions SSE -> Anthropic SSE translation) and group V (the rawllm raw
+relay: the two streams an inferNO-style upstream sends). Nothing imports them; a
 case reads one by name and hands its lines to `ScriptedPeer`.
 
 ## Provenance — captured or synthetic
@@ -33,6 +34,8 @@ shape a real backend was seen to send.
 | `tf_responses_parallel.sse` | synthetic (Responses contract, pending checkpoint) | M7, M19: two `function_call` items in output order (`Read` at `output_index` 0, `Bash` at 1), each added, two argument deltas, done; `response.completed` with `usage` (32 cached) |
 | `tf_responses_failed.sse` | synthetic (Responses contract, pending checkpoint) | M10, M19: a `message` item with one text delta, then `response.failed` whose `response.error.code` is `usage_limit_reached` (no terminal `response.completed`) |
 | `tf_responses_reasoning.sse` | synthetic (Responses contract; checkpoint C, 2026-10-07, ran live through the router -- thinking, redacted_thinking and replay all 200 -- but captured no raw SSE, so the fixture stays hand-typed) | M2: a `reasoning` item at `output_index` 0 with two summary parts (`response.reasoning_summary_part.added`, `response.reasoning_summary_text.delta` -- two deltas, one non-ASCII, then one -- `.text.done`, `.part.done`), its `response.output_item.done` carrying an invented placeholder `encrypted_content`; then a `message` item at 1 (`response.content_part.added`, two `response.output_text.delta`, `response.output_text.done`, done) and `response.completed` with `usage` (40 cached, 64 `reasoning_tokens`) |
+| `tf_rawllm_chat.sse` | synthetic (OpenAI chat-completions streaming shape; no inferNO capture yet) | V1, V2, V5, V7, V10: two `chat.completion.chunk` events (the second with `finish_reason: "stop"`), then `data: [DONE]` -- the stream a rawllm route relays whole events byte for byte and ends at `[DONE]` |
+| `tf_rawllm_messages.sse` | synthetic (Anthropic Messages streaming shape; no inferNO capture yet) | V1, V2, V10: `message_start`, one `content_block_delta`, `message_stop` -- the `/v1/messages` stream of a rawllm route, ended at `message_stop` |
 
 The three stream fixtures carry no Mistral-specific key beyond the OpenAI chunk
 shape: the A-7 quirks (an unknown `p` key, `delta.content` as a list of typed
