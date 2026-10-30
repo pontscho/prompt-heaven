@@ -38,7 +38,7 @@ Usage:
 Exit code 0 iff every non-informational case passes.
 
 Groups:
-  A  config               -- load_config refusals and defaults, in-process and CLI (A50: route vision)
+  A  config               -- load_config refusals and defaults, in-process and CLI (A50: route vision; A51-A54: listener keys)
   B  front                -- bind, auth, Host/Origin, framing refusals, caps, GET /v1/models
                              (B32: a vision-false route refuses any image block with a 400)
   C  outbound             -- address policy, TLS verification, upstream refusals
@@ -999,6 +999,10 @@ GA_CASES = (
     "reasoning_effort_map refused",      # A48
     "cleartext oauth bearer refused",    # A49
     "route vision boolean",              # A50
+    "listener keys in the config",       # A51
+    "CLI flag beats the config key",     # A52
+    "listener key refusals",             # A53
+    "write-back keeps listener keys",    # A54
 )
 
 # (label, text, is_config_error) of every exception group A provoked and every
@@ -1418,7 +1422,7 @@ def group_a(suite, fixture_root):
     def a9():
         problems = []
         for key, value in (("tf_bogus_top", 1), ("allowed_origins", ["http://localhost"]),
-                           ("body_limit", 1 << 20)):
+                           ("max_requests", 4)):
             path = cfg_with("unknown-top-%s.json" % key,
                             lambda cfg, k=key, v=value: cfg.__setitem__(k, v))
             problems += ga_refused(mod, path, [key], "top key %s" % key)
@@ -1429,7 +1433,7 @@ def group_a(suite, fixture_root):
         path = cfg_with("unknown-route-key.json",
                         lambda cfg: cfg["routes"]["claude-haiku-4-5"].__setitem__("tf_bogus_route", 1))
         problems += ga_refused(mod, path, ["tf_bogus_route"], "route key tf_bogus_route")
-        return problems, ["top keys    : tf_bogus_top, allowed_origins, body_limit (CLI settings)",
+        return problems, ["top keys    : tf_bogus_top, allowed_origins, max_requests (near misses of the listener keys)",
                           "nested      : a backend key and a route key"]
 
     def a10():
@@ -2298,6 +2302,138 @@ def group_a(suite, fixture_root):
         return problems, ["accepted    : true and false on a route and the default; absent -> true",
                           "refused     : 0, 1, 1.0, \"false\", null, a list -- naming the path and boolean"]
 
+    def a51_settings(path, *argv):
+        """RouterSettings from the config at *path* merged with the flags *argv* (the real order)."""
+        cfg = mod.load_config(path)
+        return mod._rt_settings(mod._rt_parser().parse_args(["--config", path] + [str(a) for a in argv]), cfg)
+
+    def a51():
+        # The listener / process options may live in the config as top-level keys: with no flag the
+        # key applies, with neither the built-in default.
+        problems = []
+        body = mod._BODY_LIMIT_RANGE[0] + 10
+        ready = os.path.join(sandbox, "a51.ready.json")
+        logf = os.path.join(sandbox, "a51.log")
+        WRITES.extend((ready, logf))
+
+        def keys(cfg):
+            cfg.update({"bind": "127.0.0.2", "port": 8123, "allow_remote": False,
+                        "allowed_origin": ["http://localhost:3000", "https://app.example:8443"],
+                        "ready_file": ready, "log_file": logf, "debug": True, "body_limit": body,
+                        "max_connections": 5, "max_image_requests": 2, "max_llm_requests": 3})
+        try:
+            got = a51_settings(cfg_with("lk-all.json", keys))
+            want = {"bind": "127.0.0.2", "port": 8123, "allow_remote": False,
+                    "origins": frozenset(("http://localhost:3000", "https://app.example:8443")),
+                    "ready_file": ready, "log_file": logf, "debug": True, "body_limit": body,
+                    "max_connections": 5, "max_image_requests": 2, "max_llm_requests": 3}
+            for field, value in want.items():
+                if getattr(got, field, "<missing>") != value:
+                    problems.append("config key %s: RouterSettings.%s is %r, expected %r"
+                                    % (field, field, getattr(got, field, "<missing>"), value))
+            got = a51_settings(cfg_with("lk-none.json"))
+            want = {"bind": "127.0.0.1", "port": 0, "allow_remote": False, "origins": frozenset(),
+                    "ready_file": None, "log_file": None, "debug": False, "body_limit": mod._ROUTER_BODY_LIMIT,
+                    "max_connections": mod._HTTP_CONNECTION_CAP, "max_image_requests": mod._IMAGE_REQUEST_CAP,
+                    "max_llm_requests": mod._LLM_REQUEST_CAP}
+            for field, value in want.items():
+                if getattr(got, field, "<missing>") != value:
+                    problems.append("no key, no flag: RouterSettings.%s is %r, expected the default %r"
+                                    % (field, getattr(got, field, "<missing>"), value))
+        except Exception as exc:  # noqa: BLE001
+            problems.append("raised %s: %s" % (type(exc).__name__, ga_redact(str(exc))[:200]))
+        return problems, ["accepted    : all eleven keys applied without a flag; absent keys give the built-in defaults"]
+
+    def a52():
+        # Precedence: an explicit flag beats the config key (also a flag that equals the default or
+        # is zero); the non-loopback rule runs on the merged result.
+        problems = []
+        lo = mod._BODY_LIMIT_RANGE[0]
+
+        def keys(cfg):
+            cfg.update({"bind": "127.0.0.2", "port": 8123, "allowed_origin": ["http://localhost:3000"],
+                        "ready_file": "/cfg/ready", "log_file": "/cfg/log", "debug": False,
+                        "body_limit": lo + 10, "max_connections": 5, "max_image_requests": 2,
+                        "max_llm_requests": 3})
+        path = cfg_with("lk-flags.json", keys)
+        try:
+            got = a51_settings(path, "--bind", "127.0.0.3", "--port", 0, "--allowed-origin", "http://b.example",
+                               "--ready-file", "/flag/ready", "--log-file", "/flag/log", "--debug",
+                               "--body-limit", lo + 20, "--max-connections", 9, "--max-image-requests", 6,
+                               "--max-llm-requests", 7)
+            want = {"bind": "127.0.0.3", "port": 0, "origins": frozenset(("http://b.example",)),
+                    "ready_file": "/flag/ready", "log_file": "/flag/log", "debug": True,
+                    "body_limit": lo + 20, "max_connections": 9, "max_image_requests": 6,
+                    "max_llm_requests": 7}
+            for field, value in want.items():
+                if getattr(got, field, "<missing>") != value:
+                    problems.append("flag over key %s: RouterSettings.%s is %r, expected %r"
+                                    % (field, field, getattr(got, field, "<missing>"), value))
+        except Exception as exc:  # noqa: BLE001
+            problems.append("flags over keys raised %s: %s" % (type(exc).__name__, ga_redact(str(exc))[:200]))
+        # the rule on the merged result: a config bind needs the config (or flag) allow_remote
+        for index, (label, top, argv, refused) in enumerate((
+                ("config bind 10.0.0.1, no allow_remote", {"bind": "10.0.0.1"}, (), True),
+                ("config bind 10.0.0.1 + config allow_remote", {"bind": "10.0.0.1", "allow_remote": True}, (), False),
+                ("config bind 10.0.0.1 + flag --allow-remote", {"bind": "10.0.0.1"}, ("--allow-remote",), False),
+                ("config bind 10.0.0.1, --bind 127.0.0.1 flag", {"bind": "10.0.0.1"}, ("--bind", "127.0.0.1"), False),
+                ("config allow_remote, config bind 0.0.0.0", {"bind": "0.0.0.0", "allow_remote": True}, (), True))):
+            try:
+                a51_settings(cfg_with("lk-merge-%d.json" % index, lambda cfg, t=top: cfg.update(t)), *argv)
+            except mod.ConfigError as exc:
+                if not refused:
+                    problems.append("%s: refused: %s" % (label, exc))
+                elif not all(n in str(exc) for n in ("--bind", "--allow-remote")):
+                    problems.append("%s: ConfigError %r does not name --bind and --allow-remote" % (label, str(exc)))
+            else:
+                if refused:
+                    problems.append("%s: accepted, expected a ConfigError" % label)
+        return problems, ["flag beats key: every option, --port 0 included; the --allow-remote rule on the merged result"]
+
+    def a53():
+        # A config key of the wrong type or range is refused naming the key; an unknown key still is.
+        problems = []
+        lo, hi = mod._BODY_LIMIT_RANGE
+        rows = (("bind", (5, "", None, ["127.0.0.1"], "a\0b")), ("port", ("80", True, -1, 65536, 1.5, None)),
+                ("allow_remote", (1, "true", None)), ("debug", (0, "false", None)),
+                ("allowed_origin", ("http://a.example", [5], ["http://a.example/path"], ["ftp://a.example"], None)),
+                ("ready_file", (5, "", None, "a\0b")), ("log_file", (5, "", [], "a\0b")),
+                ("body_limit", (lo - 1, hi + 1, True, "1024", 1.5)), ("max_connections", (0, 1025, True, "8")),
+                ("max_image_requests", (0, 65, False)), ("max_llm_requests", (0, 65, None)))
+        n = 0
+        for key, bad in rows:
+            for value in bad:
+                n += 1
+                path = cfg_with("lk-bad-%d.json" % n, lambda cfg, k=key, v=value: cfg.__setitem__(k, v))
+                problems += ga_refused(mod, path, [key], "%s=%r" % (key, value))
+        path = cfg_with("lk-unknown.json", lambda cfg: cfg.__setitem__("tf_unknown_top", 1))
+        problems += ga_refused(mod, path, ["tf_unknown_top"], "unknown top-level key")
+        return problems, ["refused     : %d wrong types and ranges across the eleven keys, plus an unknown top-level key" % n]
+
+    def a54():
+        # The OAuth write-back leaves the listener keys (and their order) untouched.
+        guard = gl_guard_problems()
+        if guard:
+            return None, [GL_GUARD_SKIP]
+        cfg = gl_config()
+        extra = {"bind": "127.0.0.1", "port": 8082, "allow_remote": False, "allowed_origin": ["http://localhost:3000"],
+                 "debug": True, "body_limit": mod._BODY_LIMIT_RANGE[0] + 10, "max_connections": 5,
+                 "max_image_requests": 2, "max_llm_requests": 3}
+        cfg.update(extra)
+        _box, path = gl_setup(fixture_root, "a54", text=gl_text(cfg))
+        before = json.loads(gl_bytes(path).decode("utf-8"))
+        gl_update(mod, path, GL_OAUTH_NEW, gl_digest(gl_bytes(path)))
+        after, problems = gl_disk_oauth("A54", gl_bytes(path))
+        if after is not None:
+            for key, value in extra.items():
+                if after.get(key, "<absent>") != value:
+                    problems.append("the write-back changed or dropped the top-level key %s" % key)
+            if gl_key_order(after) != gl_key_order(before):
+                problems.append("the key order changed")
+            _cfg, ctl = ga_accepted(mod, path, "the rewritten config loads again")
+            problems += ctl
+        return problems, ["rewrite     : only backends.%s.oauth changed; %d listener keys intact" % (GL_CODEX, len(extra))]
+
     def a12():
         problems = []
 
@@ -2334,6 +2470,7 @@ def group_a(suite, fixture_root):
         GA_CASES[38]: a39, GA_CASES[39]: a40, GA_CASES[40]: a41, GA_CASES[41]: a42,
         GA_CASES[42]: a43, GA_CASES[43]: a44, GA_CASES[44]: a45, GA_CASES[45]: a46,
         GA_CASES[46]: a47, GA_CASES[47]: a48, GA_CASES[48]: a49, GA_CASES[49]: a50,
+        GA_CASES[50]: a51, GA_CASES[51]: a52, GA_CASES[52]: a53, GA_CASES[53]: a54,
         GA_CASES[11]: a12,    # last: it sweeps every message the others provoked
     }
     results = {}

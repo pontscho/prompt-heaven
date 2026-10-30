@@ -94,6 +94,17 @@ llama.cpp quirks -- delete a row when its upstream fix is the minimum supported 
     event    tool-use-input      llama.cpp #22960         tool_use block start gets "input": {}
     event    error-shape         llama.cpp error format   {code,message,type} -> Anthropic envelope
 
+Listener and process options in the config
+------------------------------------------
+  Optional top-level config keys, each the twin of one flag with the same range and
+  rule: bind, port, allow_remote, allowed_origin (a list of strings, each an exact
+  scheme://host[:port]), ready_file, log_file, debug (a real bool), body_limit,
+  max_connections, max_image_requests, max_llm_requests. Precedence: an explicit
+  command-line flag, then the config key, then the built-in default (--allowed-origin
+  given on the command line replaces the config list). The non-loopback rule (--bind
+  needs allow_remote) runs on the merged result. An unknown top-level key is refused.
+  The OAuth write-back leaves these keys untouched (only backends.<n>.oauth changes).
+
 The login subcommand, and where the tokens live
 -----------------------------------------------
   llm-router.py login --config FILE --backend NAME [--device] [--open-browser]
@@ -808,6 +819,9 @@ class _RouterConfigBase(NamedTuple):    # from --config (routing + secrets)
     scrub: Callable[[str], str]  # _rt_make_scrubber(secrets), built once by load_config (unit 1, KD-9)
     # scrub is an _RtScrubber: besides the call it also has .add(raw) and .pin(key, raws) (KD-13).
     source_digest: str = ""     # sha256 hex of the text load_config parsed (the write-back's re-check)
+    # The optional listener keys the config carried, validated, only the keys present (see
+    # _RT_LISTENER_KEYS); _rt_settings lets an explicit flag win. None: built by hand, no keys.
+    listener: Optional[Mapping[str, Any]] = None
 
 
 class RouterConfig(_RouterConfigBase):
@@ -1078,7 +1092,11 @@ _RT_TOP_P = _rt_opt_float(0.0, 1.0)
 # Each kind's header table (KD-3) and option list live as class attributes on its
 # adapter class in unit 5; the loader reads them through KIND_CLASSES at call time.
 
-_RT_TOP_KEYS = frozenset({"auth_token", "backends", "routes", "default"})
+# The optional listener / process keys (explicit flag > config key > built-in default).
+_RT_LISTENER_KEYS = ("bind", "port", "allow_remote", "allowed_origin", "ready_file", "log_file",
+                     "debug", "body_limit", "max_connections", "max_image_requests",
+                     "max_llm_requests")
+_RT_TOP_KEYS = frozenset({"auth_token", "backends", "routes", "default"}) | frozenset(_RT_LISTENER_KEYS)
 _RT_BACKEND_KEYS = frozenset({"kind", "base_url", "allow_private", "allow_loopback", "ca_file",
                               "api_key", "auth_header", "forward_headers", "connect_timeout",
                               "idle_timeout", "allow_cleartext_api_key", "oauth", "identity",
@@ -1583,6 +1601,41 @@ def _rt_cfg_token(token: str) -> bytes:
     return token_bytes
 
 
+def _rt_cfg_listener(data: dict) -> Dict[str, Any]:
+    """The optional listener / process top-level keys, validated as the flags are; only the
+    keys the config holds. A refusal names the key and the rule, never the value."""
+    out: Dict[str, Any] = {}
+    int_ranges = {"port": _RT_PORT_RANGE, "body_limit": _BODY_LIMIT_RANGE,
+                  "max_connections": _CONNECTION_CAP_RANGE,
+                  "max_image_requests": _IMAGE_REQUEST_RANGE,
+                  "max_llm_requests": _LLM_REQUEST_RANGE}
+    for key in _RT_LISTENER_KEYS:
+        if key not in data:
+            continue
+        value = data[key]
+        if key in int_ranges:
+            lo, hi = int_ranges[key]
+            if isinstance(value, bool) or not isinstance(value, int) or not lo <= value <= hi:
+                raise ConfigError(f"config: {key}: must be an integer in [{lo}, {hi}]")
+        elif key in ("allow_remote", "debug"):
+            if not isinstance(value, bool):
+                raise ConfigError(f"config: {key}: must be a boolean (true or false)")
+        elif key == "allowed_origin":
+            if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+                raise ConfigError("config: allowed_origin: must be a list of strings")
+            try:
+                value = tuple(_rt_cli_origin(item) for item in value)
+            except ConfigError:
+                raise ConfigError("config: allowed_origin: each entry must be an exact "
+                                  "scheme://host[:port] (http or https, no path, query or "
+                                  "trailing slash, port in [1, 65535])") from None
+        else:   # bind, ready_file, log_file: a non-empty string without a NUL
+            if not isinstance(value, str) or not value or "\0" in value:
+                raise ConfigError(f"config: {key}: must be a non-empty string without a NUL")
+        out[key] = value
+    return out
+
+
 def load_config(path: str) -> RouterConfig:
     """Read, parse and validate the --config file into a RouterConfig (Step 4, FR-3/FR-7/FR-10).
 
@@ -1602,6 +1655,7 @@ def load_config(path: str) -> RouterConfig:
     if not isinstance(data, dict):
         raise ConfigError("config: the top level must be a JSON object")
     _rt_unknown_keys(data, _RT_TOP_KEYS, "config")
+    listener = _rt_cfg_listener(data)
 
     token = data.get("auth_token")
     if not isinstance(token, str):
@@ -1648,7 +1702,8 @@ def load_config(path: str) -> RouterConfig:
     # The write-back's re-check (Step 7): a UTF-8 round trip of a valid UTF-8 file is byte-exact.
     source_digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
     return RouterConfig(token=token_bytes, backends=backends, routes=routes, default=default,
-                        secrets=secrets_, scrub=_rt_make_scrubber(secrets_), source_digest=source_digest)
+                        secrets=secrets_, scrub=_rt_make_scrubber(secrets_), source_digest=source_digest,
+                        listener=types.MappingProxyType(listener))
 
 
 # The atomic write-back (Plan Step 7, KD-10). Steps 0-0b (directory check, the
@@ -9825,13 +9880,29 @@ def _rt_cli_origin(value: str) -> str:
     return value
 
 
-def _rt_settings(args: argparse.Namespace) -> RouterSettings:
+def _rt_settings(args: argparse.Namespace, cfg: Optional[RouterConfig] = None) -> RouterSettings:
     """Validate the network flags into RouterSettings (refuse-to-start rules, P6).
 
+    Each option is an explicit flag (not None), else the config's top-level key of the same
+    name, else the built-in default; the rules below run on that merged result.
     Bind is an IPv4 literal only; a non-loopback bind needs --allow-remote, and
     even then never 0.0.0.0 or a global address (V2).
     Every refusal is a ConfigError naming the flag and the rule.
     """
+    from_cfg = (cfg.listener if cfg is not None else None) or {}
+
+    def pick(name: str, default: Any) -> Any:
+        flag = getattr(args, name, None)
+        return flag if flag is not None else from_cfg.get(name, default)
+
+    args = argparse.Namespace(
+        bind=pick("bind", "127.0.0.1"), port=pick("port", 0),
+        allow_remote=pick("allow_remote", False), allowed_origin=pick("allowed_origin", None),
+        ready_file=pick("ready_file", None), log_file=pick("log_file", None),
+        debug=pick("debug", False), body_limit=pick("body_limit", _ROUTER_BODY_LIMIT),
+        max_connections=pick("max_connections", _HTTP_CONNECTION_CAP),
+        max_image_requests=pick("max_image_requests", _IMAGE_REQUEST_CAP),
+        max_llm_requests=pick("max_llm_requests", _LLM_REQUEST_CAP))
     try:
         addr = ipaddress.IPv4Address(args.bind)
     except ValueError:
@@ -9884,6 +9955,7 @@ example config (chmod 600; token: python3 -c 'import secrets;print(secrets.token
       "openai-siwc": {"kind": "openai", "oauth": {}},
       "sd":       {"kind": "sdcpp", "base_url": "http://192.168.2.245:8082", "allow_private": true},
       "gpu-llm":  {"kind": "rawllm", "base_url": "http://192.168.2.245:8082/m/llm", "allow_private": true,
+                   "allow_cleartext_api_key": true,
                    "api_key": "<the gpu-router's token, 16+ chars>"}
     },
     "routes": {
@@ -9898,8 +9970,14 @@ example config (chmod 600; token: python3 -c 'import secrets;print(secrets.token
       "Qwen3.8-Flash-Next": {"backend": "gpu-llm", "model": "Qwen3.8-Flash-Next"},
       "bge-m3":            {"backend": "gpu-llm", "model": "bge-m3"}
     },
-    "default": {"backend": "infernox", "model": "local-model"}
+    "default": {"backend": "infernox", "model": "local-model"},
+    "bind": "127.0.0.1", "port": 8082, "allow_remote": false, "allowed_origin": [],
+    "ready_file": "/run/llm-router.json", "log_file": "/var/log/llm-router.log", "debug": false,
+    "body_limit": 33554432, "max_connections": 32, "max_image_requests": 4, "max_llm_requests": 8
   }
+  the last two lines are optional: each key is the config twin of the flag of the same name
+  (bind -> --bind, allowed_origin -> --allowed-origin, ...); an explicit flag beats the key,
+  the key beats the built-in default.
   routes are keyed by the exact model string Claude Code sends; "default" takes the rest.
   A route's optional max_input_tokens / max_tokens (integers 1-100000000) are only
   advertised by GET /v1/models (context_window too, = max_input_tokens), never enforced.
@@ -9998,37 +10076,50 @@ def _rt_parser() -> argparse.ArgumentParser:
     # No --config-json: argv is visible in ps and every config carries a secret (FR-11).
     parser.add_argument("--config", required=True,
                         help="Path to the JSON config (must be owned by you, mode 0600)")
-    parser.add_argument("--bind", default="127.0.0.1",
-                        help="IPv4 literal to listen on (default 127.0.0.1); non-loopback needs --allow-remote")
-    parser.add_argument("--port", type=_rt_cli_int, default=0, help="TCP port (default 0 = ephemeral)")
-    parser.add_argument("--allow-remote", action="store_true",
-                        help="Allow a non-loopback --bind (a VPN interface; never a public one)")
+    # Every option below defaults to None (absent): an explicit flag beats the config's
+    # top-level key of the same name (bind, port, allow_remote, allowed_origin, ...), which
+    # beats the built-in default (_rt_settings resolves it).
+    parser.add_argument("--bind", default=None,
+                        help="IPv4 literal to listen on (default: the config `bind`, else 127.0.0.1); "
+                             "non-loopback needs --allow-remote")
+    parser.add_argument("--port", type=_rt_cli_int, default=None,
+                        help="TCP port (default: the config `port`, else 0 = ephemeral)")
+    parser.add_argument("--allow-remote", action="store_const", const=True, default=None,
+                        help="Allow a non-loopback --bind (a VPN interface; never a public one) "
+                             "(default: the config `allow_remote`, else off)")
     parser.add_argument("--allowed-origin", action="append", default=None,
-                        help="Allowed Origin header, exact scheme://host[:port] (repeatable)")
+                        help="Allowed Origin header, exact scheme://host[:port] (repeatable; "
+                             "default: the config `allowed_origin` list, else none)")
     parser.add_argument("--ready-file", default=None,
                         help="Written 0600 after bind: {\"port\": N, \"pid\": P}; removed on shutdown "
-                             "while it still holds this pid")
-    parser.add_argument("--body-limit", type=_rt_cli_int, default=_ROUTER_BODY_LIMIT,
+                             "while it still holds this pid (default: the config `ready_file`)")
+    parser.add_argument("--body-limit", type=_rt_cli_int, default=None,
                         help=f"Largest accepted request body in bytes, {_BODY_LIMIT_RANGE[0]}-"
-                             f"{_BODY_LIMIT_RANGE[1]} (default {_ROUTER_BODY_LIMIT})")
-    parser.add_argument("--max-connections", type=_rt_cli_int, default=_HTTP_CONNECTION_CAP,
+                             f"{_BODY_LIMIT_RANGE[1]} (default: the config `body_limit`, else "
+                             f"{_ROUTER_BODY_LIMIT})")
+    parser.add_argument("--max-connections", type=_rt_cli_int, default=None,
                         help=f"Concurrent TCP connections, {_CONNECTION_CAP_RANGE[0]}-"
-                             f"{_CONNECTION_CAP_RANGE[1]} (default {_HTTP_CONNECTION_CAP})")
-    parser.add_argument("--max-image-requests", type=_rt_cli_int, default=_IMAGE_REQUEST_CAP,
+                             f"{_CONNECTION_CAP_RANGE[1]} (default: the config `max_connections`, else "
+                             f"{_HTTP_CONNECTION_CAP})")
+    parser.add_argument("--max-image-requests", type=_rt_cli_int, default=None,
                         help=f"Image requests (/v1/images/...) in flight at once, "
-                             f"{_IMAGE_REQUEST_RANGE[0]}-{_IMAGE_REQUEST_RANGE[1]} (default {_IMAGE_REQUEST_CAP}); "
+                             f"{_IMAGE_REQUEST_RANGE[0]}-{_IMAGE_REQUEST_RANGE[1]} (default: the config "
+                             f"`max_image_requests`, else {_IMAGE_REQUEST_CAP}); "
                              f"one more is refused at once with 429 and Retry-After: 1, so long image "
                              f"waits can not take every --max-connections slot from chat -- only while this "
                              f"is below --max-connections (a startup WARNING says so when it is not)")
-    parser.add_argument("--max-llm-requests", type=_rt_cli_int, default=_LLM_REQUEST_CAP,
+    parser.add_argument("--max-llm-requests", type=_rt_cli_int, default=None,
                         help=f"Requests to a rawllm route (/v1/chat/completions, /v1/embeddings, /v1/rerank and "
                              f"/v1/messages to a rawllm route) in flight at once, "
-                             f"{_LLM_REQUEST_RANGE[0]}-{_LLM_REQUEST_RANGE[1]} (default {_LLM_REQUEST_CAP}); "
+                             f"{_LLM_REQUEST_RANGE[0]}-{_LLM_REQUEST_RANGE[1]} (default: the config "
+                             f"`max_llm_requests`, else {_LLM_REQUEST_CAP}); "
                              f"one more is refused at once with 429 and Retry-After: 1, so requests queued "
                              f"behind a gpu-router can not take every --max-connections slot from chat -- "
                              f"only while this is below --max-connections (a startup WARNING says so when it is not)")
-    parser.add_argument("--debug", action="store_true", help="Enable debug logging to stderr")
-    parser.add_argument("--log-file", default=None, help="Log to file, mode 0600 (implies --debug)")
+    parser.add_argument("--debug", action="store_const", const=True, default=None,
+                        help="Enable debug logging to stderr (default: the config `debug`, else off)")
+    parser.add_argument("--log-file", default=None,
+                        help="Log to file, mode 0600 (implies --debug) (default: the config `log_file`)")
     return parser
 
 
@@ -10356,16 +10447,18 @@ def main() -> None:
         sys.exit(_rt_login(_rt_login_parser().parse_args(sys.argv[2:])))
     args = _rt_parser().parse_args()
 
+    # The config is read first: debug and log_file may come from it (a refusal goes to
+    # stderr through _rt_refuse, which needs no logging).
     try:
-        _configure_logging(args.debug, args.log_file)
-    except OSError as exc:
-        _rt_refuse(f"--log-file: cannot open it for append ({type(exc).__name__})")
-
-    try:
-        settings = _rt_settings(args)
         cfg = load_config(args.config)
+        settings = _rt_settings(args, cfg)
     except ConfigError as exc:
         _rt_refuse(str(exc))
+
+    try:
+        _configure_logging(settings.debug, settings.log_file)
+    except OSError as exc:
+        _rt_refuse(f"--log-file: cannot open it for append ({type(exc).__name__})")
     if settings.max_image_requests >= settings.max_connections:
         # Structure only (two integers). Every image request holds a connection, so a cap that is not
         # below the connection cap never refuses anything: the 429 protection for chat is then void.

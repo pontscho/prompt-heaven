@@ -651,6 +651,9 @@ GL_CASES = (
     "L43 deadlines, per-kind caps",
     "L44 child_port, listener clash",
     "L45 new keys listed, in repr",
+    "L46 ready_file, log_file, debug accepted",
+    "L47 process key types refused",
+    "L48 CLI beats config (process keys)",
 )
 
 L_NAMES_CONFIG = ("ConfigError", "ModelSpec", "Settings", "parse_config", "load_config",
@@ -1684,10 +1687,71 @@ def l45(mod, sandbox):
                       "repr(Settings) shows model_index (ids and names), never the token or an env value"]
 
 
+def l46(mod, sandbox):
+    """ready_file, log_file and debug: optional top-level keys, carried by Settings."""
+    problems = []
+    top = {"ready_file": "/tmp/tf-ready.json", "log_file": "/tmp/tf-gpu.log", "debug": True}
+    kind, val = _l_top(mod, sandbox, top)
+    if kind != "ok":
+        return ["the three keys: %s (%s)" % (kind, str(val)[:160])], []
+    for key, want in top.items():
+        problems += _l_same("Settings.%s" % key, getattr(val, key, "<missing>"), want)
+    kind, val = _l_top(mod, sandbox, {})
+    if kind == "ok":
+        for key, want in (("ready_file", None), ("log_file", None), ("debug", False)):
+            problems += _l_same("absent key: Settings.%s" % key, getattr(val, key, "<missing>"), want)
+    kind, val = _l_top(mod, sandbox, top)
+    text = repr(val) + str(val)
+    for key in top:
+        if key + "=" not in text:
+            problems.append("repr(Settings) does not show %s" % key)
+    return problems, ["ready_file and log_file are non-empty path strings, debug a real bool; all three "
+                      "default to absent/off and show in repr"]
+
+
+def l47(mod, sandbox):
+    """A wrong type per process key is refused naming the key, never the value."""
+    problems = []
+    rows = (("ready_file", (5, "", None, ["/a"], True, "/a\0b")),
+            ("log_file", (5, "", None, ["/a"], True, "/a\0b")),
+            ("debug", (1, 0, "true", None, [True], L_UNKNOWN_VALUE)))
+    for key, bad in rows:
+        for value in bad:
+            problems += _l_refused(mod, "%s=%r" % (key, value if value != L_UNKNOWN_VALUE else "<sentinel>"),
+                                   mod.parse_config, (_l_raw(dict(_l_doc(sandbox), **{key: value})),),
+                                   needles=(key,), absent=(L_UNKNOWN_VALUE, TF_TOKEN))
+    return problems, ["ready_file/log_file must be a non-empty string without a NUL, debug a real bool (never 0/1)"]
+
+
+def l48(mod, sandbox):
+    """An explicit flag beats the process keys; with no flag the key applies."""
+    problems = []
+    if not callable(getattr(mod, "_sd_settings", None)):
+        return ["the module defines no _sd_settings"], []
+    _p, ns = _l_cli_parsed(mod, "defaults", ["--config", _l_config_file(sandbox, _l_doc(sandbox), name="l48-d.json")])
+    if ns is not None:
+        for attr in ("ready_file", "log_file", "debug"):
+            if getattr(ns, attr, "<missing>") is not None:
+                problems.append("parser default %s is %r, expected None (absent)" % (attr, getattr(ns, attr, "<missing>")))
+    top = {"ready_file": "/cfg/ready", "log_file": "/cfg/log", "debug": False}
+    kind, val = _l_merge(mod, sandbox, top, [], "l48-a.json")
+    if kind != "ok":
+        return problems + ["config only: %s (%s)" % (kind, str(val)[:120])], []
+    for key, want in top.items():
+        problems += _l_same("config only: %s" % key, getattr(val, key, "<missing>"), want)
+    kind, val = _l_merge(mod, sandbox, top, ["--ready-file", "/flag/ready", "--log-file", "/flag/log", "--debug"],
+                         "l48-b.json")
+    if kind != "ok":
+        return problems + ["flags over keys: %s (%s)" % (kind, str(val)[:120])], []
+    for key, want in (("ready_file", "/flag/ready"), ("log_file", "/flag/log"), ("debug", True)):
+        problems += _l_same("flag over key: %s" % key, getattr(val, key, "<missing>"), want)
+    return problems, ["flag > config > default for ready_file, log_file and debug (--debug over debug false)"]
+
+
 GL_FUNCS = (l1, l2, l3, l4, l5, l6, l7, l8, l9, l10, l11, l12, l13, l14, l15, l16, l17, l18,
             l19, l20, l21, l22, l23, l24, l25, l26, l27, l28, l29, l30, l31, l32,
-            l33, l34, l35, l36, l37, l38, l39, l40, l41, l42, l43, l44, l45)
-GL_CLI = frozenset(("L23", "L25", "L26", "L27", "L28", "L32", "L37", "L38", "L39", "L44"))
+            l33, l34, l35, l36, l37, l38, l39, l40, l41, l42, l43, l44, l45, l46, l47, l48)
+GL_CLI = frozenset(("L23", "L25", "L26", "L27", "L28", "L32", "L37", "L38", "L39", "L44", "L48"))
 
 
 def group_l(suite, fixture_root):

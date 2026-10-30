@@ -53,13 +53,16 @@ Config grammar (one 0600 JSON file owned by you, read through --config)
     "insecure_cleartext": false,          optional; a real bool, as --insecure-cleartext
     "max_connections": 8,                 optional; 1..1024, as --max-connections
     "body_limit": 33554432,               optional; 1 KiB..1 GiB, as --body-limit
+    "ready_file": "/run/gpu-router.json", optional; a non-empty path, as --ready-file (0600)
+    "log_file": "/var/log/gpu-router.log",optional; a non-empty path, as --log-file (0600)
+    "debug": false,                       optional; a real bool, as --debug
     "response_limit": 67108864            optional; the buffered answer cap; 1..1 GiB
   }
-  Precedence for bind, port, allow_remote, insecure_cleartext, max_connections and
-  body_limit: an explicit command-line flag, then the config key, then the built-in
-  default. The listener rules (a non-loopback bind needs allow_remote AND
-  insecure_cleartext) run on the merged result. response_limit is config-only;
-  --ready-file, --log-file and --debug are command-line only.
+  Precedence for bind, port, allow_remote, insecure_cleartext, max_connections,
+  body_limit, ready_file, log_file and debug: an explicit command-line flag, then the
+  config key, then the built-in default. The listener rules (a non-loopback bind needs
+  allow_remote AND insecure_cleartext) run on the merged result. response_limit is
+  config-only.
   Duplicate keys and unknown keys are refused; a refusal names the key and the
   rule, never the value. A NUL in command, args, env or cwd is refused. {port} and {host} are substituted by an explicit
   replace (never str.format: sd args may hold braces).
@@ -307,7 +310,8 @@ _SD_PLACEHOLDERS = ("{port}", "{host}")
 _SD_PORT_HOST_FLAGS = ("--port", "-p", "--listen-port", "--listen-ip", "--host")
 
 _SD_TOP_KEYS = ("token", "models", "bind", "port", "allow_remote", "insecure_cleartext",
-                "max_connections", "body_limit", "response_limit")
+                "max_connections", "body_limit", "ready_file", "log_file", "debug",
+                "response_limit")
 _SD_DEFAULT_BIND = "127.0.0.1"
 _SD_DEFAULT_PORT = 0
 _SD_MODEL_KEYS = ("command", "args", "env", "cwd", "start_timeout", "stop_grace", "retries",
@@ -415,6 +419,10 @@ class Settings:
     port: int = _SD_DEFAULT_PORT
     allow_remote: bool = False
     insecure_cleartext: bool = False
+    # Process files and logging: config or absent; an explicit flag wins (_sd_settings).
+    ready_file: Optional[str] = None
+    log_file: Optional[str] = None
+    debug: bool = False
     # model id (or app name) -> app name, built and checked by parse_config; read at the edges
     # only (routing, unload, /v1/models). Names and ids only: never a token or an env value.
     model_index: Mapping[str, str] = dataclasses.field(
@@ -423,10 +431,11 @@ class Settings:
     def __repr__(self) -> str:
         return ("Settings(token=<redacted>, models=[%s], model_index=%r, bind=%r, port=%r, "
                 "allow_remote=%r, insecure_cleartext=%r, body_limit=%r, max_connections=%r, "
-                "response_limit=%r)"
+                "response_limit=%r, ready_file=%r, log_file=%r, debug=%r)"
                 % (", ".join(repr(name) for name in self.models), dict(self.model_index), self.bind,
                    self.port, self.allow_remote, self.insecure_cleartext, self.body_limit,
-                   self.max_connections, self.response_limit))
+                   self.max_connections, self.response_limit, self.ready_file, self.log_file,
+                   self.debug))
 
     __str__ = __repr__
 
@@ -485,6 +494,13 @@ def _sd_cfg_bind(value: Any, where: str) -> str:
     """`bind`: a non-empty string without a NUL (an IP literal or hostname, as --bind takes)."""
     if not isinstance(value, str) or not value:
         raise ConfigError(f"{where}: must be a non-empty string (an address to listen on)")
+    return _sd_cfg_no_nul(value, where)
+
+
+def _sd_cfg_path(value: Any, where: str) -> str:
+    """`ready_file` / `log_file`: a non-empty string without a NUL (the flag takes any path)."""
+    if not isinstance(value, str) or not value:
+        raise ConfigError(f"{where}: must be a non-empty string (a file path)")
     return _sd_cfg_no_nul(value, where)
 
 
@@ -694,11 +710,15 @@ def parse_config(raw: object, where: str = "config") -> Settings:
     if "max_connections" in raw:
         max_connections = _sd_cfg_int_range(raw["max_connections"], f"{where}: max_connections",
                                             *_SD_CONNECTIONS_RANGE)
+    ready_file = _sd_cfg_path(raw["ready_file"], f"{where}: ready_file") if "ready_file" in raw else None
+    log_file = _sd_cfg_path(raw["log_file"], f"{where}: log_file") if "log_file" in raw else None
+    debug = _sd_cfg_bool(raw["debug"], f"{where}: debug") if "debug" in raw else False
     index = _sd_cfg_index(models, where)
     _sd_cfg_child_ports(models, port, where)
     return Settings(token=token, models=types.MappingProxyType(models), body_limit=body_limit,
                     max_connections=max_connections, response_limit=response_limit, bind=bind,
                     port=port, allow_remote=allow_remote, insecure_cleartext=insecure_cleartext,
+                    ready_file=ready_file, log_file=log_file, debug=debug,
                     model_index=types.MappingProxyType(index))
 
 
@@ -839,7 +859,8 @@ def _sd_parser() -> argparse.ArgumentParser:
                         help="Acknowledge that the bearer token and images travel unencrypted "
                              "(default: the config `insecure_cleartext`, else off)")
     parser.add_argument("--ready-file", default=None,
-                        help="Written 0600 after bind: {\"port\": N, \"pid\": P}; removed on shutdown")
+                        help="Written 0600 after bind: {\"port\": N, \"pid\": P}; removed on shutdown "
+                             "(default: the config `ready_file`, else none)")
     parser.add_argument("--body-limit", type=_sd_cli_int(*_SD_BODY_LIMIT_RANGE), default=None,
                         help=f"Largest accepted request body in bytes, {_SD_BODY_LIMIT_RANGE[0]}-"
                              f"{_SD_BODY_LIMIT_RANGE[1]} (default: the config `body_limit`, else "
@@ -848,8 +869,11 @@ def _sd_parser() -> argparse.ArgumentParser:
                         help=f"Concurrent TCP connections, {_SD_CONNECTIONS_RANGE[0]}-"
                              f"{_SD_CONNECTIONS_RANGE[1]} (default: the config `max_connections`, "
                              f"else {_SD_DEFAULT_MAX_CONNECTIONS})")
-    parser.add_argument("--debug", action="store_true", help="Enable debug logging to stderr")
-    parser.add_argument("--log-file", default=None, help="Log to file, mode 0600 (implies --debug)")
+    parser.add_argument("--debug", action="store_const", const=True, default=None,
+                        help="Enable debug logging to stderr (default: the config `debug`, else off)")
+    parser.add_argument("--log-file", default=None,
+                        help="Log to file, mode 0600 (implies --debug) (default: the config "
+                             "`log_file`, else none)")
     return parser
 
 
@@ -861,6 +885,8 @@ def _sd_parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.ready_file is not None and not args.ready_file:
         parser.error("--ready-file: must not be empty")
+    if args.log_file is not None and not args.log_file:
+        parser.error("--log-file: must not be empty")
     return args
 
 
@@ -4228,7 +4254,10 @@ def _sd_settings(args: argparse.Namespace, cfg: Settings) -> Settings:
         allow_remote=pick(args.allow_remote, cfg.allow_remote),
         insecure_cleartext=pick(args.insecure_cleartext, cfg.insecure_cleartext),
         max_connections=pick(args.max_connections, cfg.max_connections),
-        body_limit=pick(args.body_limit, cfg.body_limit))
+        body_limit=pick(args.body_limit, cfg.body_limit),
+        ready_file=pick(args.ready_file, cfg.ready_file),
+        log_file=pick(args.log_file, cfg.log_file),
+        debug=pick(args.debug, cfg.debug))
     if merged.allow_remote and not merged.insecure_cleartext:
         raise ConfigError("--allow-remote needs --insecure-cleartext: gpu-router has no TLS, the bearer "
                           "token and images would cross the network in cleartext")
@@ -4242,15 +4271,17 @@ def _sd_settings(args: argparse.Namespace, cfg: Settings) -> Settings:
 def main(argv: Optional[List[str]] = None) -> None:
     args = _sd_parse_args(argv)
 
-    try:
-        _configure_logging(args.debug, args.log_file)
-    except OSError as exc:
-        _sd_refuse(f"--log-file: cannot open it for append ({type(exc).__name__})")
-
+    # The config is read first: debug and log_file may come from it. A refusal here goes
+    # to stderr through _sd_refuse, which does not need the logging set up.
     try:
         settings = _sd_settings(args, load_config(args.config))
     except ConfigError as exc:
         _sd_refuse(str(exc))
+
+    try:
+        _configure_logging(settings.debug, settings.log_file)
+    except OSError as exc:
+        _sd_refuse(f"--log-file: cannot open it for append ({type(exc).__name__})")
 
     supervisor = Supervisor()
     scheduler = Scheduler(settings, supervisor)
@@ -4272,9 +4303,9 @@ def main(argv: Optional[List[str]] = None) -> None:
         log.warning(_SD_CLEARTEXT_LINE)
 
     scheduler.start()
-    if args.ready_file is not None:
+    if settings.ready_file is not None:
         try:
-            _http_write_ready_file(args.ready_file, srv.server_port, ConfigError)
+            _http_write_ready_file(settings.ready_file, srv.server_port, ConfigError)
         except ConfigError as exc:
             srv.server_close()
             scheduler.shutdown()
@@ -4285,7 +4316,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     threading.Thread(target=srv.serve_forever, name="sd-serve", daemon=True).start()
     log.info("gpu-router listening: port=%d models=%d", srv.server_port, len(settings.models))
     _sd_wait_stop(stop_flag, threading.Event())
-    _sd_shutdown(srv, scheduler, args.ready_file)
+    _sd_shutdown(srv, scheduler, settings.ready_file)
     sys.exit(0)
 
 
