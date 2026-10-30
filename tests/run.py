@@ -820,8 +820,8 @@ SUITES = [
      "per-child relist (bool-only, default off byte-identical, name set "
      "frozen, stale on failure, coalesced, min interval, cancelled on "
      "stop)", 124),
-    # TYPED: a fixed case table (A 19, B 23, C 22, D 7, E 34, F 9, G 13,
-    # H 26, I 17, N 22 = 192), the rows of plan Steps 7-13, so a count that moves
+    # TYPED: a fixed case table (A 20, B 23, C 22, D 7, E 34, F 9, G 13,
+    # H 26, I 17, N 23 = 194), the rows of plan Steps 7-13, so a count that moves
     # is the alarm, not noise.  F9 (validation round 1) drives layer D live
     # through McpServer.run() -- the smoke probe answers -32602 now and no
     # longer reaches the catch-all.  E (Step 13, the spec's acceptance escape
@@ -866,7 +866,8 @@ SUITES = [
     # (A 15, D 7, N 12, I 17).  Security round 2 added A16-A19 (hex-letter
     # TLDs, "*." over two labels, network.nat64, extra_reads over the work
     # root) and N19-N22 (hex-letter hosts, the IPv4 denylist, configured
-    # NAT64, the process-wide connection budget): 184 -> 192.
+    # NAT64, the process-wide connection budget): 184 -> 192. The internal
+    # egress allowlist (ADR 0033 addendum) added A20 and N23: 192 -> 194.
     ("mcp_sandbox", run_mcp_sandbox,
      "mcp-sandbox, the sandboxed script runner: the one JSON config file "
      "(unknown keys at the top and in limits, every numeric range at its "
@@ -907,8 +908,9 @@ SUITES = [
      "listings, fd-relative darwin fallbacks, the survivor sweep, the out/ "
      "path cap, the worst-case reply serialized within 16 MiB) and the "
      "egress allowlist (the network object, the egress argv, the CONNECT "
-     "proxy in-process, live allowed/refused/direct/DNS/no-network rows)",
-     192),
+     "proxy in-process, the network.internal IPv4:port allowlist, live "
+     "allowed/refused/direct/DNS/no-network rows)",
+     194),
     # TYPED: a fixed case table (A 9, B 10, C 6, D 8, E 5, F 14, G 4, H 6,
     # I 12, J 13, K 2, L 3 = 92), the rows of plan Steps 16, 17 and 18 (J1 is live:
     # INFO off macOS and under a nested Seatbelt, counted either way), so a

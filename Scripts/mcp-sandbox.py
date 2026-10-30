@@ -399,6 +399,7 @@ class NetworkConfig(NamedTuple):
     allow: Tuple[str, ...]           # exact hosts and "*.suffix" patterns
     ports: Tuple[int, ...]           # default (443,)
     nat64: Tuple[Any, ...] = ()      # configured NAT64 prefixes (IPv6Network), refused like 64:ff9b::/96
+    internal: Tuple[str, ...] = ()   # exact "IPv4:port" literals admitted without the public-address check
 
 
 class SandboxConfig(NamedTuple):
@@ -627,8 +628,9 @@ _CONFIG_KEYS = frozenset({"version", "sbx", "work_root", "seccomp", "log_content
                           "interpreters", "limits"})
 # Optional top-level keys: absent is today's runner.
 _CONFIG_OPTIONAL_KEYS = frozenset({"network"})
-_NETWORK_KEYS = frozenset({"allow", "ports", "nat64"})
+_NETWORK_KEYS = frozenset({"allow", "ports", "nat64", "internal"})
 _NETWORK_ALLOW_MAX = 64
+_NETWORK_INTERNAL_MAX = 16
 _NETWORK_PORTS_MAX = 8
 _NETWORK_DEFAULT_PORTS = (443,)
 _NETWORK_NAT64_MAX = 8
@@ -916,11 +918,14 @@ def _hostname_problem(host: Any) -> Optional[str]:
 def _cfg_network(value: Any) -> NetworkConfig:
     """The optional "network" object: an allowlist of exact hosts or "*."
     patterns (strict subdomains) and the ports they may be reached on."""
-    net = _cfg_keys(value, "network", _NETWORK_KEYS, frozenset({"allow"}))
-    allow = net["allow"]
+    net = _cfg_keys(value, "network", _NETWORK_KEYS, frozenset())
+    internal = _cfg_internal(net["internal"]) if "internal" in net else ()
+    if "allow" not in net and not internal:
+        raise ConfigError("network: allow is required unless internal is given")
+    allow = net.get("allow", [])
     if not isinstance(allow, list):
         raise ConfigError("network.allow: must be a list")
-    if not allow:
+    if not allow and not internal:
         raise ConfigError("network.allow: at least one pattern is required")
     if len(allow) > _NETWORK_ALLOW_MAX:
         raise ConfigError(f"network.allow: more than {_NETWORK_ALLOW_MAX} patterns")
@@ -948,7 +953,49 @@ def _cfg_network(value: Any) -> NetworkConfig:
     out = tuple(_cfg_int(port, f"network.ports[{i}]", 1, 65535) for i, port in enumerate(ports))
     if len(set(out)) != len(out):
         raise ConfigError("network.ports: duplicate ports")
-    return NetworkConfig(allow=tuple(allow), ports=out, nat64=_cfg_nat64(net.get("nat64", [])))
+    return NetworkConfig(allow=tuple(allow), ports=out, nat64=_cfg_nat64(net.get("nat64", [])),
+                         internal=internal)
+
+
+def _internal_entry_problem(entry: str) -> Optional[str]:
+    """Why *entry* is not an exact canonical "IPv4:port" this runner may name
+    as an internal egress target, or None. Never quotes the entry."""
+    host, sep, port_text = entry.rpartition(":")
+    if not sep or not host or not port_text.isascii() or not port_text.isdigit():
+        return "must be IPv4:port"
+    if port_text != str(int(port_text)) or not 1 <= int(port_text) <= 65535:
+        return "port must be 1-65535 with no leading zeros"
+    try:
+        ip = ipaddress.IPv4Address(host)
+    except ValueError:
+        return "the host must be an IPv4 literal in canonical dotted form"
+    if str(ip) != host:
+        return "the host must be an IPv4 literal in canonical dotted form"
+    if (ip.is_unspecified or ip.is_multicast or ip.is_link_local
+            or ip in ipaddress.ip_network("0.0.0.0/8")
+            or ip == ipaddress.IPv4Address("255.255.255.255")):
+        return "an unspecified, link-local, multicast or broadcast address is refused"
+    return None
+
+
+def _cfg_internal(value: Any) -> Tuple[str, ...]:
+    """The optional "network.internal" list: exact IPv4:port targets a script
+    may reach without the public-address check (loopback and private ranges)."""
+    if not isinstance(value, list):
+        raise ConfigError("network.internal: must be a list")
+    if not value:
+        raise ConfigError("network.internal: at least one entry is required")
+    if len(value) > _NETWORK_INTERNAL_MAX:
+        raise ConfigError(f"network.internal: more than {_NETWORK_INTERNAL_MAX} entries")
+    for i, entry in enumerate(value):
+        if not isinstance(entry, str):
+            raise ConfigError(f"network.internal[{i}]: must be a string")
+        problem = _internal_entry_problem(entry)
+        if problem is not None:
+            raise ConfigError(f"network.internal[{i}]: {problem}")
+    if len(set(value)) != len(value):
+        raise ConfigError("network.internal: duplicate entries")
+    return tuple(value)
 
 
 def _cfg_nat64(value: Any) -> Tuple[Any, ...]:
@@ -1536,16 +1583,18 @@ class EgressProxy:
             except EgressRefusal as exc:
                 self._refuse(client, exc.status, str(exc))
                 return
-            problem = egress_host_refusal(host)
-            if problem is not None:
-                self._refuse(client, 403, "host refused: " + problem)
-                return
-            if port not in self._network.ports:
-                self._refuse(client, 403, "port not allowed", host, port)
-                return
-            if not egress_host_allowed(host, self._network.allow):
-                self._refuse(client, 403, "host not allowlisted", host, port)
-                return
+            internal = f"{host}:{port}" in self._network.internal
+            if not internal:
+                problem = egress_host_refusal(host)
+                if problem is not None:
+                    self._refuse(client, 403, "host refused: " + problem)
+                    return
+                if port not in self._network.ports:
+                    self._refuse(client, 403, "port not allowed", host, port)
+                    return
+                if not egress_host_allowed(host, self._network.allow):
+                    self._refuse(client, 403, "host not allowlisted", host, port)
+                    return
             with self._lock:
                 if self._active >= _EGRESS_MAX_TUNNELS:
                     full = True
@@ -1556,20 +1605,25 @@ class EgressProxy:
             if full:
                 self._refuse(client, 503, "tunnel cap reached", host, port)
                 return
-            try:
-                answers = list(self._resolver(host, port))
-            except (OSError, UnicodeError, ValueError):
-                self._refuse(client, 502, "lookup failed", host, port)
-                return
-            if self._stop.is_set():
-                return
-            if not answers:
-                self._refuse(client, 502, "lookup returned nothing", host, port)
-                return
-            for answer in answers:
-                if not egress_address_public(str(answer[4][0]), self._network.nat64):
-                    self._refuse(client, 403, "a resolved address is not global", host, port)
+            if internal:
+                # A listed literal: no lookup, no public-address check.
+                answers = [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "",
+                            (host, port))]
+            else:
+                try:
+                    answers = list(self._resolver(host, port))
+                except (OSError, UnicodeError, ValueError):
+                    self._refuse(client, 502, "lookup failed", host, port)
                     return
+                if self._stop.is_set():
+                    return
+                if not answers:
+                    self._refuse(client, 502, "lookup returned nothing", host, port)
+                    return
+                for answer in answers:
+                    if not egress_address_public(str(answer[4][0]), self._network.nat64):
+                        self._refuse(client, 403, "a resolved address is not global", host, port)
+                        return
             last_error = "no address"
             for family, _type, _proto, _canon, sockaddr in answers:
                 if self._stop.is_set():
@@ -5135,7 +5189,8 @@ def capabilities() -> dict:
         "quarantine": {"count": state.quarantine.count(), "max": _QUARANTINE_MAX},
         "network": ({"enabled": False, "allow": [], "ports": []} if cfg.network is None
                     else {"enabled": True, "allow": list(cfg.network.allow),
-                          "ports": list(cfg.network.ports)}),
+                          "ports": list(cfg.network.ports),
+                          "internal": list(cfg.network.internal)}),
         "degraded": state.degraded,
     }
 

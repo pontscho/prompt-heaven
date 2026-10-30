@@ -933,6 +933,59 @@ def _run_a(suite, fx):
     _guard(suite, GRP_A, "A19 extra-reads-over-work-root-refused",
            reads_over_work_root)
 
+    def network_internal():
+        """network.internal: exact IPv4:port literals in canonical form, at
+        most 16, no duplicates, no link-local / 0.0.0.0/8 / multicast /
+        broadcast; allow may be absent or empty only beside internal; IP
+        literals stay refused in network.allow. Refusals name the key,
+        never the value."""
+        mod = _mod()
+        problems = []
+        want = ("127.0.0.1:8082", "192.168.2.245:8082")
+        cfg = _accepts(mod, fx.render("a20-ok", mutate=_set_network(
+            {"internal": list(want)})), "internal only", problems)
+        got = getattr(cfg, "network", None) if cfg is not None else None
+        if cfg is not None and (
+                tuple(getattr(got, "internal", ()) or ()) != want
+                or tuple(getattr(got, "allow", ("x",))) != ()):
+            problems.append("internal only: loaded %r" % (got,))
+        _accepts(mod, fx.render("a20-both", mutate=_set_network(
+            {"allow": [], "internal": ["10.0.0.1:1"]})),
+            "empty allow beside internal", problems)
+        _accepts(mod, fx.render("a20-both2", mutate=_set_network(
+            {"allow": ["a.example"], "internal": ["10.0.0.1:65535"]})),
+            "allow beside internal", problems)
+        for value in ("localhost:8082", "127.0.0.1", "127.0.0.1:0",
+                      "127.0.0.1:65536", "127.0.0.1:08082", "127.1:8082",
+                      "0x7f.0.0.1:80", "127.0.0.01:80", "[::1]:80",
+                      "::1:80", "*:80", "10.0.0.0/8:80", "169.254.169.254:80",
+                      "0.0.0.0:80", "0.1.2.3:80", "224.0.0.1:80",
+                      "255.255.255.255:80", "127.0.0.1:80 ", "", 80, None):
+            _refuses(mod, fx.render("a20", mutate=_set_network(
+                {"internal": ["10.0.0.1:1", value]})),
+                "internal %r" % (value,), problems,
+                names=("network.internal[1]",))
+        for label, net in (
+                ("empty alone", {"internal": []}),
+                ("not a list", {"internal": "127.0.0.1:80"}),
+                ("duplicate", {"internal": ["10.0.0.1:1", "10.0.0.1:1"]}),
+                ("17 entries", {"internal": ["10.0.0.%d:1" % i
+                                             for i in range(1, 18)]})):
+            _refuses(mod, fx.render("a20-shape", mutate=_set_network(net)),
+                     label, problems, names=("network.internal",))
+        _accepts(mod, fx.render("a20-16", mutate=_set_network(
+            {"internal": ["10.0.0.%d:1" % i for i in range(1, 17)]})),
+            "16 entries (edge)", problems)
+        _refuses(mod, fx.render("a20-nokey", mutate=_set_network(
+            {"ports": [443]})), "neither allow nor internal", problems,
+            names=("allow",))
+        _refuses(mod, fx.render("a20-literal", mutate=_set_network(
+            {"allow": ["127.0.0.1"], "internal": ["127.0.0.1:80"]})),
+            "an IP literal in allow", problems, names=("network.allow",))
+        return problems, []
+    _guard(suite, GRP_A, "A20 network-internal-ipv4-port-literals",
+           network_internal)
+
 
 # ---------------------------------------------------------------------------
 # B: Mach-O reader and dylib closure (in-process, synthetic images)
@@ -3923,6 +3976,54 @@ def _run_n(suite, fx):
         return problems, []
     _guard(suite, GRP_N, "N22 global-connection-budget-across-proxies",
            global_budget)
+
+    def internal_literals():
+        """network.internal: a CONNECT to a listed IPv4:port literal is
+        tunnelled straight to that literal (no lookup, no public check, the
+        ports list does not apply); an unlisted port on a listed IP, an
+        unlisted IP, another spelling of the IP and a hostname that
+        resolves to a listed or private address are all refused."""
+        mod = _egress_mod()
+        stub = _NStub({"allowed.example": ["127.0.0.1"]})
+        net = mod.NetworkConfig(allow=("allowed.example",), ports=(443,),
+                                internal=("127.0.0.1:8082",
+                                          "192.168.2.245:8082"))
+        proxy = _n_proxy(mod, stub, network=net)
+        problems = []
+        try:
+            for host in ("127.0.0.1", "192.168.2.245"):
+                c = _n_client(proxy, _n_connect(host, 8082))
+                got = _n_status(c)
+                c.close()
+                if got != 200:
+                    problems.append("%s:8082: %r, want 200" % (host, got))
+            if stub.connected != [("127.0.0.1", 8082),
+                                  ("192.168.2.245", 8082)]:
+                problems.append("connected %r, want the two literals"
+                                % (stub.connected,))
+            if stub.resolved:
+                problems.append("resolved %r, want no lookup"
+                                % (stub.resolved,))
+            before = len(stub.connected)
+            for host, port in (("127.0.0.1", 8083), ("192.168.2.245", 443),
+                               ("192.168.2.246", 8082), ("10.0.0.1", 8082),
+                               ("127.1", 8082), ("0x7f.0.0.1", 8082),
+                               ("[::1]", 8082), ("169.254.169.254", 80),
+                               ("allowed.example", 443)):
+                c = _n_client(proxy, _n_connect(host, port))
+                got = _n_status(c)
+                c.close()
+                if got != 403:
+                    problems.append("%s:%d: %r, want 403" % (host, port, got))
+            if len(stub.connected) != before:
+                problems.append("connected %r after refusals"
+                                % (stub.connected[before:],))
+        finally:
+            proxy.close(time.monotonic() + 2.0)
+            stub.close()
+        return problems, []
+    _guard(suite, GRP_N, "N23 internal-literals-admitted-exactly",
+           internal_literals)
 
 
 # ---------------------------------------------------------------------------
