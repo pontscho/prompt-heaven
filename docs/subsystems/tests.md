@@ -363,7 +363,11 @@ moved `gpu_router` 252 to 255 (L46-L48: `ready_file`, `log_file`, `debug`) and
 `llm_router` 475 to 479 (A51-A54: the eleven listener keys, their precedence,
 their refusals and the OAuth write-back keeping them; A9 now takes
 `max_requests` as its unknown-key example, `body_limit` being a key now)
-`tests/run.py:SUITES`.
+`tests/run.py:SUITES`. Several listeners on one port then moved `gpu_router`
+255 to 259 (L49, P47-P49) and `llm_router` 479 to 483 (A55, B33-B35); L34 and
+A53 no longer list a one-element `bind` list as a bad type, and the live
+two-address cases bind `127.0.0.2` only where the host can (Linux), exercising
+`127.0.0.1` alone on macOS `tests/run.py:SUITES`.
 These are a snapshot copied for the reader, not a second authority: the
 table wins wherever the two disagree, and the fleet total is computed by the
 run, never typed `tests/run.py:main`.

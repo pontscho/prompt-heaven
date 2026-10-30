@@ -87,7 +87,8 @@ whose names match `Scripts/gpu-router.py:_SD_MODEL_NAME_RE`. The optional
 `Scripts/gpu-router.py:_SD_BODY_LIMIT_RANGE` (1 KiB to 1 GiB) and the optional
 `response_limit` 1 to `Scripts/gpu-router.py:_SD_RESPONSE_LIMIT_MAX` (1 GiB).
 The listener options are config keys too, since `ea5bdc8`: `bind` (a non-empty
-string without a NUL), `port` (`Scripts/gpu-router.py:_SD_PORT_RANGE`),
+string without a NUL, or a non-empty list of unique such strings, one listener
+each `Scripts/gpu-router.py:_sd_cfg_bind`), `port` (`Scripts/gpu-router.py:_SD_PORT_RANGE`),
 `allow_remote` and `insecure_cleartext` (real booleans) and `max_connections`
 (`Scripts/gpu-router.py:_SD_CONNECTIONS_RANGE`), and so are the process
 options `ready_file` and `log_file` (non-empty path strings without a NUL
@@ -143,6 +144,19 @@ listener keys and their precedence, L32 the `body_limit` one, and L46 to L48
 the three process keys (accepted, wrong types refused, a flag beating the key)
 `tests/test_gpu_router.py:GL_CASES`.
 
+**Several listeners.** `--bind` is repeatable, and any `--bind` flag replaces
+the config `bind` as a whole rather than adding to it. The rules run per
+address on the merged result: every non-loopback address needs `allow_remote`
+AND `insecure_cleartext`, a repeated address is refused, and more than one
+address with port 0 or no port is refused (`several --bind addresses need an
+explicit port`), because an ephemeral port is picked per socket and the
+addresses would not share one; no refusal echoes an address. A one-element list
+collapses to the plain string, so one address behaves exactly as before
+`Scripts/gpu-router.py:_sd_settings`. All the addresses share the one port, the
+one process and the one scheduler. L49 pins the grammar, the replacing flag, the
+per-address rule and the two refusals; L34 no longer lists a one-element list as
+a bad type `tests/test_gpu_router.py:l49`.
+
 ## Command line and startup
 
 The flags are `--config`, `--bind`, `--port`, `--allow-remote`,
@@ -160,7 +174,16 @@ is refused without echoing it, because argparse would quote it verbatim
 There is no TLS. `allow_remote` without `insecure_cleartext` (flag or key) is
 refused (D-13), and so is a non-loopback bind without `allow_remote`; both run
 on the merged settings `Scripts/gpu-router.py:_sd_settings`, and a bind failure
-exits 2 with one line `Scripts/gpu-router.py:main`. The listener binds before
+exits 2 with one line `Scripts/gpu-router.py:main`. `main` builds one server per
+address: the first is the primary, every later one is constructed with
+`peer=` the primary and shares its shutdown flag, start time (`started_epoch`)
+and drain condition, while keeping its own socket, `loopback` flag (so the
+`Host` check follows the address it listens on), `active` count and connection
+semaphore `Scripts/gpu-router.py:_SdHttpServer`. A bind failure on any address
+closes the sockets already bound before the one-line exit 2; the ready file is
+written only after every bind, with unchanged content (`{port, pid}`), and the
+shutdown drains the sum of the listeners' `active` counts, then shuts down and
+closes each listener `Scripts/gpu-router.py:_sd_shutdown`. The listeners bind before
 anything else starts; the signal handlers (SIGTERM, SIGINT, SIGHUP, all three an
 ordered shutdown) are installed before the ready file is written. A handler only
 sets an attribute on `Scripts/gpu-router.py:_SdStopFlag`, never `Event.set`,
@@ -404,7 +427,10 @@ the ticket `Scripts/gpu-router.py:_sd_settle` `Scripts/gpu-router.py:cancel`
 `Scripts/gpu-router.py:_drop`. The connection semaphore holds
 `max_connections` plus `Scripts/gpu-router.py:_SD_CONTROL_RESERVE` slots, so
 the control routes keep connections while request traffic is at its cap
-`Scripts/gpu-router.py:_SdHttpServer`. The module docstring declares the memory
+`Scripts/gpu-router.py:_SdHttpServer`. With several `--bind` addresses that
+semaphore is per listener, while the reservation counter is the one
+scheduler's, so request tickets stay capped at `max_connections` for the whole
+process and only the connection slots multiply. The module docstring declares the memory
 worst case as `max_connections x (body_limit + response_limit)` plus control
 bodies of at most `Scripts/gpu-router.py:_SD_CONTROL_BODY_LIMIT` per connection,
 about 768 MiB at the defaults `Scripts/gpu-router.py:_SD_DEFAULT_MAX_CONNECTIONS`
@@ -621,13 +647,13 @@ The groups, in run order `tests/test_gpu_router.py:GROUP_ORDER`:
 
 | Group | What it pins | Cases |
 |---|---|---|
-| L | config and CLI refusals and defaults: the listener keys and their precedence (L33-L39), the kind and its defaults, `model_ids` and the index collisions, `ready_path` / `ready_status`, the per-kind deadline caps, `child_port`, the new keys in the repr (L40-L45), the `ready_file` / `log_file` / `debug` keys and their precedence (L46-L48) | `tests/test_gpu_router.py:GL_CASES` |
+| L | config and CLI refusals and defaults: the listener keys and their precedence (L33-L39), the kind and its defaults, `model_ids` and the index collisions, `ready_path` / `ready_status`, the per-kind deadline caps, `child_port`, the new keys in the repr (L40-L45), the `ready_file` / `log_file` / `debug` keys and their precedence (L46-L48), a `bind` list and a repeatable `--bind` (L49) | `tests/test_gpu_router.py:GL_CASES` |
 | R | routing and the sniffer (pure); the llm routes' tokens, caps, ids and kind check, the neutral refusal wording (R21-R23) | `tests/test_gpu_router.py:GR_CASES` |
 | D | the pure FIFO decision; the abort matrix (D23), the strict de-chunker (D24), the stream head parser (D25), the bounded stream queue (D26) | `tests/test_gpu_router.py:GD_CASES` |
 | S | spawn, readiness, the stop ladder, the group sweep, the budget; the probe path and status (S21), a fixed `child_port` and one spawn (S22) | `tests/test_gpu_router.py:GS_CASES` |
 | Q-sched | one in flight, queued and forced unloads, cancel (QS8: cancelling a running request kills nothing), the admission race | `tests/test_gpu_router.py:GQS_CASES` |
 | T | retries, `request_timeout`, the poison prompt, the restart budget; a squatter never sees a request (T14), the llm timeouts abort without a kill (T15, T17), shutdown mid-stream (T16) | `tests/test_gpu_router.py:GT_CASES` |
-| P | auth, routing, framing, the byte-exact relay, startup lines, the error table; the config `port` and `bind` (P39, P40), the llm routes (P41), the per-kind caps with 411 first (P42), the `anthropic-*` headers (P43), the stream head allow-list (P44), an incremental chunked stream (P45), a mid-stream EOF never replayed (P46) | `tests/test_gpu_router.py:GP_CASES` |
+| P | auth, routing, framing, the byte-exact relay, startup lines, the error table; the config `port` and `bind` (P39, P40), the llm routes (P41), the per-kind caps with 411 first (P42), the `anthropic-*` headers (P43), the stream head allow-list (P44), an incremental chunked stream (P45), a mid-stream EOF never replayed (P46), several listeners: every address answers (P47), one bind failure aborts startup (P48), what a `peer` listener shares and keeps (P49) | `tests/test_gpu_router.py:GP_CASES` |
 | Q-http | departed clients, the disconnect loop, the over-cap race, racing unloads; a client that leaves a stream kills nothing (QH6) | `tests/test_gpu_router.py:GQH_CASES` |
 | U | `/v1/unload`, `?force=1`, `/v1/models`; every id listed (U19), unload through any id (U20), a force mid-stream (U21) | `tests/test_gpu_router.py:GU_CASES` |
 | G | the injected front policy (ADR 0029) | `tests/test_gpu_router.py:GG_CASES` |
@@ -650,7 +676,12 @@ the forge target is `gpu_router` in `project-forge.yaml`, whose description
 carries the measured runtime and the timeout derived from it. As history: the
 ledger read 211 when sd-router landed, the listener options moved it to 220,
 and the three stage commits to 239 (2a), 251 (2b) and 252 (stage 3, E6); the
-`ready_file`, `log_file` and `debug` config keys moved it to 255 (L46-L48). Gate
+`ready_file`, `log_file` and `debug` config keys moved it to 255 (L46-L48), and
+several listeners on one port to 259 (L49, P47-P49). P47 and P48 bind
+`127.0.0.2` only where the host can (Linux, where all of 127/8 is up); on macOS
+they exercise `127.0.0.1` alone and say so in their detail, and P48 then fails
+on the unbindable second address instead of a held port. P49 needs no second
+address: it builds two listeners on ephemeral `127.0.0.1` ports in-process. Gate
 A1 was relaxed narrowly for the probe: a literal `GET`, with the path a literal
 or the `path` parameter of `_sd_probe_status`. There is no live case for a slow
 reader (D26 pins the queue only), for the handler's write-timeout path, or for
@@ -706,6 +737,16 @@ additions.
   included, are taken before authentication, so unauthenticated slow-header or
   idle connections can hold them until the header deadline; on the default
   loopback bind only local processes can, with `--allow-remote` anyone can.
+- **The connection cap is per listener.** With several `--bind` addresses each
+  listener has its own `max_connections` plus the control reserve, so the
+  process can hold N times that many connections. It is per listener on
+  purpose: gate G2 demands exactly one `BoundedSemaphore` assignment in
+  `Scripts/gpu-router.py:_SdHttpServer` `tests/test_gpu_router.py:rule_g_cap`,
+  and a flood on a LAN address cannot starve `127.0.0.1`. Request admission
+  stays process-wide (the one scheduler's `try_admit`), so the request-body and
+  answer part of the memory worst case does not multiply; the per-connection
+  control-body part does, and the docstring's figure is written for one
+  listener.
 - **`queue_full` counts reservations.** A completed ticket keeps its slot until
   its answer is written, so a slow reader or a slow body sender (up to the
   120 s body deadline `Scripts/gpu-router.py:_SD_BODY_DEADLINE_S`) holds request

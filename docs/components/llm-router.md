@@ -261,7 +261,7 @@ list rather than adding to it `Scripts/llm-router.py:_rt_settings`.
 | Flag | Default | Rule |
 |---|---|---|
 | `--config` | required | the JSON config below |
-| `--bind` | `127.0.0.1` | an IPv4 literal; IPv6 and host names are refused; a non-loopback address needs `--allow-remote` |
+| `--bind` | `127.0.0.1` | an IPv4 literal; IPv6 and host names are refused; a non-loopback address needs `--allow-remote`. Repeatable: one listener per address, all on the one `--port`, which must then be explicit and not 0; any `--bind` flag replaces the config `bind` as a whole |
 | `--port` | `0` (ephemeral) | `0`-`65535` |
 | `--allow-remote` | off | allows a non-loopback `--bind` — a VPN interface, never a public one: `0.0.0.0` and any global address are refused even with it, while `100.64.0.0/10` (CGNAT, used by VPNs such as Tailscale) is accepted |
 | `--allowed-origin` | none | repeatable; an exact `scheme://host[:port]`, http or https, no path, query or trailing slash |
@@ -276,7 +276,27 @@ list rather than adding to it `Scripts/llm-router.py:_rt_settings`.
 The config is read first, then each option is merged (flag, config key,
 default) and the merged result validated: the IPv4-literal and
 non-loopback rules for `bind` run after the merge, so a config `bind` is refused
-exactly like `--bind` `Scripts/llm-router.py:_rt_settings`. Logging is set up
+exactly like `--bind` `Scripts/llm-router.py:_rt_settings`.
+
+**Several listeners.** `bind` may be a list and `--bind` repeated; the rules
+then run on each address of the merged result: an IPv4 literal, a non-loopback
+address only with `--allow-remote`, and even with it no unspecified or global
+address. A repeated address is refused, and more than one address with port 0
+or no port is refused (`several --bind addresses need an explicit port`),
+because an ephemeral port is picked per socket; no refusal echoes an address.
+One address, from a string or a one-element list, gives the same plain-string
+setting, refusals and ready file as before `Scripts/llm-router.py:RouterSettings`.
+`main` builds one server per address: the first is the primary, every later one
+is constructed with `peer=` the primary and takes its shared state through
+`Scripts/llm-router.py:_RouterHttpServer._SHARED` — the image and raw-relay
+semaphores, the shutdown flag, the upstream socket registry, the token store
+(so the OAuth write-back keeps a single writer), the drain condition, the start
+time and the learned sampling and effort sets. Each listener keeps its own
+socket, `loopback` flag (so the `Host` check follows the address it listens
+on), `active` count and connection semaphore `Scripts/llm-router.py:_RouterHttpServer`.
+A bind failure on any address closes the sockets already bound before the
+one-line exit 2; the ready file is written after every bind with unchanged
+content `Scripts/llm-router.py:main`. Logging is set up
 only after that merge, because `debug` and `log_file` may come from the config,
 so nothing logged while the config loads reaches `--debug` or the log file; a
 config refusal is still one stderr line `Scripts/llm-router.py:main`. The listener is bound before anything
@@ -285,7 +305,10 @@ written, so a supervisor that signals as soon as the file appears reaches the
 ordered shutdown `Scripts/llm-router.py:main`. Exit 0 is a normal or
 signal-initiated exit; exit 2 is a command-line, config or bind refusal, printed
 as one `llm-router: <msg>` line on stderr that names the flag or field and the
-rule, never the value `Scripts/llm-router.py:_rt_refuse`.
+rule, never the value `Scripts/llm-router.py:_rt_refuse` — the one exception
+being a bind that fails at the socket, whose line names the address and port
+that could not be bound (`cannot listen on <host>:<port>: <reason>`)
+`Scripts/llm-router.py:main`.
 
 **The ordered shutdown.** A POST accepted from then on gets a 529 and a live
 stream gets one `event: error` "router shutting down"; every registered upstream
@@ -301,7 +324,8 @@ answered 529 "router shutting down", whatever error the transport saw
 `Scripts/llm-router.py:_RT_SHUTTING_DOWN`. A token write waiting on the config
 flock gives up, keeping the token in memory
 with one WARNING `Scripts/llm-router.py:_rt_config_lock`; running handlers are drained for at most
-`Scripts/llm-router.py:_DRAIN_S`; then the listener closes, the ready file is
+`Scripts/llm-router.py:_DRAIN_S`, the sum of every listener's `active` count;
+then each listener is shut down and closed, the ready file is
 removed if it still holds this process's pid, and the log handlers are flushed
 `Scripts/llm-router.py:_rt_shutdown`.
 
@@ -478,9 +502,10 @@ it `Scripts/llm-router.py:_rt_cfg_listener`: `port` in
 `Scripts/llm-router.py:_RT_PORT_RANGE`, `body_limit`, `max_connections`,
 `max_image_requests` and `max_llm_requests` in the flags' ranges (a JSON
 integer, never a boolean), `allow_remote` and `debug` real booleans,
-`allowed_origin` a list of exact `scheme://host[:port]` strings, and `bind`,
-`ready_file` and `log_file` non-empty strings without a NUL (whether `bind` is
-an IPv4 literal is checked on the merged result).
+`allowed_origin` a list of exact `scheme://host[:port]` strings, `bind` a
+non-empty string without a NUL or a non-empty list of unique such strings, and
+`ready_file` and `log_file` non-empty strings without a NUL (whether each `bind`
+address is an IPv4 literal is checked on the merged result).
 
 - `auth_token` (required): the router's bearer token, at least
   `Scripts/llm-router.py:_TOKEN_MIN_LEN` (32) printable ASCII characters with
@@ -1355,7 +1380,8 @@ The code-mode review of the Responses kinds and the OAuth client, and the five
 findings it fixed, is [[security-review-20261007-123500]].
 
 **Inbound.** The bind is an IPv4 literal, loopback by default, and any other
-address needs `--allow-remote`. Each request is checked from its request line
+address needs `--allow-remote`; with several addresses each is checked on its
+own, and the `Host` rule below follows the address the connection arrived on. Each request is checked from its request line
 and headers only, before any body byte is read, in this order: header defects,
 the path, `Host` (on a loopback bind only), `Origin` (an absent one passes; a
 present one must be named by `--allowed-origin`), the bearer — compared in
@@ -1491,8 +1517,18 @@ per-group detail is the suite's row in [[tests]], and the red-first record per
 group is ADR 0028's, its addendum included. The config twins of the flags are
 A51 (all eleven keys applied, absent keys giving the defaults), A52 (a flag
 beats the key, and the `--allow-remote` rule on the merged result), A53 (the
-wrong types and ranges, and an unknown top-level key) and A54 (the OAuth
-write-back keeps them) `tests/test_llm_router.py:group_a`.
+wrong types and ranges, and an unknown top-level key; a one-element `bind` list
+is no longer among the bad types) and A54 (the OAuth write-back keeps them)
+`tests/test_llm_router.py:group_a`. Several listeners are A55 (a `bind` list
+and repeated `--bind`, a flag list replacing the key whole, the per-address
+rules, duplicates and a missing or zero port refused, no value echoed)
+`tests/test_llm_router.py:group_a`, and B33 (every address answers, the ready
+file keeps `{port, pid}`), B34 (a bind failure on the second address aborts
+startup) and B35 (a `peer` listener shares every `_SHARED` attribute and keeps
+its own socket, connection cap, `loopback` and `active`)
+`tests/test_llm_router.py:group_b`. B33 and B34 bind `127.0.0.2` only where the
+host can (Linux); on macOS they exercise `127.0.0.1` alone and B34 fails on the
+unbindable second address instead of a held port.
 
 **Images.** One case per layer, each in the group of the code it covers: the
 `vision` key's boolean rule (A50) `tests/test_llm_router.py:group_a`; the
@@ -1714,13 +1750,21 @@ read before relying on one of them. In brief:
 - **The pre-auth header bound is a mitigation** (CWE-770). A peer that
   reconnects as soon as it is cut can still keep every `--max-connections`
   slot busy, at one reconnect per slot every 5 s.
+- **The connection cap is per listener.** With several `--bind` addresses each
+  listener has its own `--max-connections` semaphore, so the process can hold N
+  times that many connections; per listener on purpose, so a flood on a LAN
+  address cannot starve `127.0.0.1`. `--max-image-requests` and
+  `--max-llm-requests` stay process-wide (`Scripts/llm-router.py:_RouterHttpServer._SHARED`),
+  but the per-connection memory figure below scales with the number of
+  listeners.
 - **Authenticated worst-case memory** (CWE-770). Per connection, roughly the
   body, its translated copy and the larger of a full pump queue
   (`Scripts/llm-router.py:_RT_QUEUE_BYTES`, 16 MiB) and a non-stream upstream
   answer with its decoded text (2 ×
   `Scripts/llm-router.py:_UPSTREAM_BODY_LIMIT`, 64 MiB), plus the parsed
-  objects, which are several times the bytes; times `--max-connections`. At the
-  defaults the bytes alone are about 6 GiB. Lower `--max-connections` or
+  objects, which are several times the bytes; times `--max-connections`, and
+  that once per `--bind` listener. At the defaults, on one listener, the bytes
+  alone are about 6 GiB. Lower `--max-connections` or
   `--body-limit` to shrink it. Image answers are the first that come near the
   64 MiB bound — one peaks near twice it while it is copied — and an edit upload
   near `--body-limit`, so this is the case that figure describes, not a
