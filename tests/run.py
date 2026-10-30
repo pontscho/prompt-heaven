@@ -966,8 +966,8 @@ SUITES = [
      "streamed image answers (openai), advertised image sizes, "
      "secret leaks, static rules, "
      "hygiene", 460),
-    # TYPED: a fixed case table (A 17, L 45, R 23, D 22, S 22, Q-sched 16,
-    # Q-http 5, T 15, P 43, U 20, G 6, E2E 5 = 239), so a count that moves is
+    # TYPED: a fixed case table (A 18, L 45, R 23, D 26, S 22, Q-sched 16,
+    # Q-http 6, T 17, P 46, U 21, G 6, E2E 5 = 251), so a count that moves is
     # the alarm.
     ("gpu_router", run_gpu_router,
      "gpu-router, the supervisor and proxy for stable-diffusion.cpp "
@@ -976,9 +976,11 @@ SUITES = [
      "/v1/unload (queued and ?force=1, through any model id), crash retries "
      "and the DISABLED state, the kill ladder and process-group sweep, "
      "byte-exact relay through stub children, the per-kind routes, body caps "
-     "and readiness probe, OpenAI-shaped refusals, bearer auth, "
+     "and readiness probe, streamed llm answers (incremental, chunked, an "
+     "allow-listed head, no kill on a client abort, a truncated end that "
+     "never looks complete), OpenAI-shaped refusals, bearer auth, "
      "structure-only logs, static rules, end-to-end through llm-router and "
-     "across the two app kinds", 239),
+     "across the two app kinds", 251),
     # TYPED: a fixed case table (A 7, E 3), so a count that moves is the alarm.
     ("tshark_fields", run_tshark_fields,
      "mcp-tshark analyze's `fields` parameter, in-process with tshark "

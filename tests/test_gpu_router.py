@@ -3547,6 +3547,10 @@ GD_CASES = (
     "D20 retry: same ticket at head",
     "D21 retry allowance",
     "D22 backoff by now, no clock",
+    "D23 abort matrix, reason x kind",
+    "D24 strict de-chunker (R12)",
+    "D25 stream head parser (R20)",
+    "D26 bounded stream queue (R11)",
 )
 
 D_NAMES = ("ModelState", "ModelView", "TicketView", "Decision", "decide", "_SD_ACTIONS",
@@ -3974,8 +3978,288 @@ def d22(mod):
                       "no clock and changes nothing"]
 
 
+# -- stage 2b: the pure halves of the stream seam and the abort matrix (ADR 0035) ----------
+# D23-D26 read names the 2a tree does not have; each checks its own names, so a missing
+# one fails that case alone and D1-D22 stay what they were.
+
+D_ABORT_NAMES = ("_sd_abort_plan", "AbortPlan", "_SD_ABORT_KILLS_SD")
+D_STREAM_NAMES = ("_SdDechunker", "_sd_parse_stream_head", "_sd_head_streams", "_SdStream",
+                  "UpstreamError", "_sd_now")
+
+
+def d23(mod):
+    """The abort matrix, one row per reason x kind x bytes_relayed (plan Section 5): what the stop
+    ladder does, whether a crash is charged, whether the SAME ticket may be re-queued and which
+    closed-table code answers a ticket that relayed nothing.  A client abort never kills (the
+    sd policy sits behind _SD_ABORT_KILLS_SD, flipped here to prove it is the only switch)."""
+    absent = missing_names(mod, D_ABORT_NAMES)
+    if absent:
+        return absent, []
+    problems = []
+    if tuple(getattr(mod.AbortPlan, "_fields", ())) != ("ladder", "charge", "retry", "answer"):
+        problems.append("AbortPlan fields %r" % (getattr(mod.AbortPlan, "_fields", None),))
+    if mod._SD_ABORT_KILLS_SD is not False:
+        problems.append("_SD_ABORT_KILLS_SD is %r, expected False (a client abort kills nothing)"
+                        % (mod._SD_ABORT_KILLS_SD,))
+
+    def rows(kills_sd):
+        table = {}
+        for kind in ("sd", "llm"):
+            for relayed in (False, True):
+                table[(kind, None, relayed)] = (True, True, not relayed, "model_crashed")
+                table[(kind, "force", relayed)] = (True, False, False, "unload_forced")
+                table[(kind, "shutdown", relayed)] = (True, False, False, "shutting_down")
+                table[(kind, "client", relayed)] = (kills_sd and kind == "sd", False, False, None)
+            sd_timeout = kind == "sd"
+            for relayed in (False, True):
+                table[(kind, "timeout", relayed)] = (sd_timeout, sd_timeout, False, "upstream_timeout")
+        return table
+
+    count = 0
+    for flipped in (False, True):
+        with patched(mod, [("_SD_ABORT_KILLS_SD", flipped)]):
+            for (kind, reason, relayed), want in sorted(rows(flipped).items(), key=repr):
+                got = tuple(mod._sd_abort_plan(kind, reason, relayed))
+                count += 1
+                if got != want:
+                    problems.append("_sd_abort_plan(%r, %r, bytes_relayed=%r) with the sd switch %r = %r, "
+                                    "expected %r" % (kind, reason, relayed, flipped, got, want))
+    for bad in (("sd", "nosuch", False), ("nokind", None, False)):
+        try:
+            mod._sd_abort_plan(*bad)
+        except (KeyError, ValueError):
+            continue
+        problems.append("_sd_abort_plan%r did not refuse an unknown name" % (bad,))
+    return problems, ["%d rows: force and shutdown always kill, a crash kills and is charged once and is "
+                      "re-queued only before any byte was relayed, a client abort kills nothing (the sd "
+                      "switch flips only sd), a timeout kills sd only" % count]
+
+
+def d24(mod):
+    """R12: the strict de-chunker.  Good framing decodes the same however the bytes are split; a
+    bad size line, an extension, a missing CRLF, a bare LF, an over-long size, a trailer or a
+    byte after the terminator is refused or ignored by one fixed rule; EOF short of the
+    terminator leaves `done` False."""
+    absent = missing_names(mod, D_STREAM_NAMES)
+    if absent:
+        return absent, []
+    problems = []
+
+    def decode(chunks):
+        dec = mod._SdDechunker()
+        out = b""
+        try:
+            for piece in chunks:
+                out += dec.feed(piece)
+        except ValueError:
+            return None, dec
+        return out, dec
+
+    good = (b"5\r\nhello\r\n0\r\n\r\n", b"A\r\n0123456789\r\n0\r\n\r\n", b"a\r\n0123456789\r\n3\r\nabc\r\n0\r\n\r\n",
+            b"0\r\n\r\n")
+    want = (b"hello", b"0123456789", b"0123456789abc", b"")
+    for raw, expect in zip(good, want):
+        for label, pieces in (("whole", [raw]), ("byte by byte", [raw[i:i + 1] for i in range(len(raw))])):
+            out, dec = decode(pieces)
+            if out != expect or not dec.done:
+                problems.append("%r (%s): decoded %r done=%r, expected %r done" % (raw, label, out, dec.done, expect))
+    out, dec = decode([b"5\r\nhel"])
+    if out != b"hel" or dec.done:
+        problems.append("a body cut short decoded %r done=%r, expected b'hel' and not done" % (out, dec.done))
+    out, dec = decode([b"5\r\nhello\r\n0\r\n\r\nGARBAGE"])
+    if out != b"hello" or not dec.done:
+        problems.append("bytes after the terminator: decoded %r done=%r" % (out, dec.done))
+    if dec.done and dec.feed(b"more") != b"":
+        problems.append("a finished de-chunker returned payload for more bytes")
+    bad = (("a non-hex size", b"g\r\nhello\r\n0\r\n\r\n"), ("a negative size", b"-1\r\nx\r\n"),
+           ("an empty size line", b"\r\nhello\r\n"), ("a leading space", b" 5\r\nhello\r\n0\r\n\r\n"),
+           ("a chunk extension", b"5;ext=1\r\nhello\r\n0\r\n\r\n"), ("a 0x prefix", b"0x5\r\nhello\r\n"),
+           ("a size over 12 hex digits", b"0000000000005\r\nhello\r\n0\r\n\r\n"),
+           ("a huge size line", b"1" * 4096), ("no CRLF after the data", b"5\r\nhelloXX0\r\n\r\n"),
+           ("a bare LF size line", b"5\nhello\r\n0\r\n\r\n"), ("a bare CR in a size line", b"5\rX\r\n"),
+           ("a trailer", b"0\r\nX-Trailer: 1\r\n\r\n"), ("a NUL in the size line", b"5\x00\r\nhello\r\n"))
+    for label, raw in bad:
+        for how, pieces in (("whole", [raw]), ("byte by byte", [raw[i:i + 1] for i in range(len(raw))])):
+            out, dec = decode(pieces)
+            if out is not None:
+                problems.append("%s (%s) was accepted: %r" % (label, how, out))
+    return problems, ["good framing decodes identically whole or byte by byte; %d malformed shapes are "
+                      "refused (ValueError); a trailer and a size over 12 digits too" % len(bad)]
+
+
+def _d_head(*lines, status="HTTP/1.1 200 OK"):
+    return "\r\n".join((status,) + lines).encode("latin-1")
+
+
+def d25(mod):
+    """R20: the stream head parser.  It classifies and refuses; it keeps the child's
+    Content-Type and nothing else (the router recomputes the framing).  1xx, 3xx, an encoded
+    answer, CL together with TE, a repeated framing header, a bare CR/LF or a control byte, an
+    obs-fold, a malformed header line and a malformed status line are all `failed`."""
+    absent = missing_names(mod, D_STREAM_NAMES)
+    if absent:
+        return absent, []
+    problems = []
+    SSE = "Content-Type: text/event-stream"
+    junk = ("Set-Cookie: sid=1", "Location: http://evil.invalid/", "Trailer: X-T", "Upgrade: h2c",
+            "Keep-Alive: timeout=5", "Connection: close", "X-Evil: 1")
+    ok = (
+        ("sse chunked, junk headers", _d_head(SSE, "Transfer-Encoding: chunked", *junk),
+         (200, "text/event-stream", "chunked", None), True),
+        ("json with a length", _d_head("Content-Type: application/json", "Content-Length: 12"),
+         (200, "application/json", "length", 12), False),
+        ("sse with a length", _d_head(SSE, "Content-Length: 10"), (200, "text/event-stream", "length", 10), True),
+        ("no framing header: close-delimited", _d_head(SSE), (200, "text/event-stream", "close", None), True),
+        ("chunked json", _d_head("Content-Type: application/json", "Transfer-Encoding: Chunked"),
+         (200, "application/json", "chunked", None), True),
+        ("a 404 is never streamed", _d_head("Content-Type: application/json", "Content-Length: 3"),
+         (404, "application/json", "length", 3), False),
+        ("a chunked 500 is never streamed", _d_head(SSE, "Transfer-Encoding: chunked"),
+         (500, "text/event-stream", "chunked", None), False),
+        ("identity encoding", _d_head(SSE, "Content-Encoding: identity"), (200, "text/event-stream", "close", None), True),
+        ("HTTP/1.0 status line", _d_head(SSE, status="HTTP/1.0 200 OK"), (200, "text/event-stream", "close", None), True),
+        ("no Content-Type", _d_head("Transfer-Encoding: chunked"), (200, None, "chunked", None), True),
+    )
+    for label, raw, want, streams in ok:
+        status = "HTTP/1.1 %d X" % want[0]
+        if want[0] != 200:
+            raw = raw.replace(b"HTTP/1.1 200 OK", status.encode("latin-1"), 1)
+        try:
+            head = mod._sd_parse_stream_head(raw)
+        except mod.UpstreamError as exc:
+            problems.append("%s: refused (%s)" % (label, exc.kind))
+            continue
+        got = (head.status, head.content_type, head.framing, head.length)
+        if got != want:
+            problems.append("%s: parsed %r, expected %r" % (label, got, want))
+        if bool(mod._sd_head_streams(head)) is not streams:
+            problems.append("%s: _sd_head_streams is %r, expected %r" % (label, mod._sd_head_streams(head), streams))
+    bad = (
+        ("a 103", _d_head(SSE, status="HTTP/1.1 103 Early Hints")), ("a 302", _d_head(SSE, status="HTTP/1.1 302 Found")),
+        ("gzip", _d_head(SSE, "Content-Encoding: gzip")), ("br", _d_head(SSE, "Content-Encoding: br")),
+        ("CL + TE", _d_head(SSE, "Content-Length: 5", "Transfer-Encoding: chunked")),
+        ("TE gzip, chunked", _d_head(SSE, "Transfer-Encoding: gzip, chunked")),
+        ("TE identity", _d_head(SSE, "Transfer-Encoding: identity")),
+        ("two Content-Length", _d_head(SSE, "Content-Length: 5", "Content-Length: 5")),
+        ("two Content-Type", _d_head(SSE, "Content-Type: application/json")),
+        ("two Transfer-Encoding", _d_head(SSE, "Transfer-Encoding: chunked", "Transfer-Encoding: chunked")),
+        ("CL plus sign", _d_head(SSE, "Content-Length: +5")), ("CL two numbers", _d_head(SSE, "Content-Length: 5 5")),
+        ("CL empty", _d_head(SSE, "Content-Length:")), ("CL negative", _d_head(SSE, "Content-Length: -1")),
+        ("CL huge", _d_head(SSE, "Content-Length: " + "9" * 30)),
+        ("a bare LF inside a line", _d_head(SSE, "X-A: a\nSet-Cookie: z")),
+        ("a bare CR inside a line", _d_head(SSE, "X-A: a\rb")),
+        ("an obs-fold", _d_head(SSE, " folded")), ("an obs-fold tab", _d_head(SSE, "\tfolded")),
+        ("a NUL in the Content-Type", _d_head("Content-Type: text/event\x00stream")),
+        ("a control byte in the Content-Type", _d_head("Content-Type: text/\x01event-stream")),
+        ("DEL in the Content-Type", _d_head("Content-Type: text/\x7fevent-stream")),
+        ("a line without a colon", _d_head(SSE, "NoColonHere")),
+        ("a space before the colon", _d_head("Content-Type : text/event-stream")),
+        ("an empty header name", _d_head(SSE, ": value")),
+        ("a NUL in another header", _d_head(SSE, "X-A: a\x00b")),
+        ("HTTP/2", _d_head(SSE, status="HTTP/2 200 OK")), ("a four digit status", _d_head(SSE, status="HTTP/1.1 2000 OK")),
+        ("a two digit status", _d_head(SSE, status="HTTP/1.1 20 OK")),
+        ("a doubled space", _d_head(SSE, status="HTTP/1.1  200 OK")), ("garbage", b"garbage"), ("empty", b""),
+        ("a status 600", _d_head(SSE, status="HTTP/1.1 600 X")),
+    )
+    for label, raw in bad:
+        try:
+            head = mod._sd_parse_stream_head(raw)
+        except mod.UpstreamError as exc:
+            if exc.kind != "failed":
+                problems.append("%s: refused as %r, expected 'failed'" % (label, exc.kind))
+            continue
+        problems.append("%s was accepted: %r" % (label, tuple(head)))
+    return problems, ["%d heads classify (the Content-Type is the only header kept; Set-Cookie, Location, "
+                      "Trailer, Upgrade, Keep-Alive, Connection are not in the result); %d refuse as 'failed'"
+                      % (len(ok), len(bad))]
+
+
+def d26(mod):
+    """R11: the bounded stream queue.  A put over the cap blocks (back-pressure: the pump stops
+    reading) and ends on the abort Event or the deadline; the queue never holds more than the cap
+    plus one piece; data drains before the end marker; a put after the end is refused."""
+    absent = missing_names(mod, D_STREAM_NAMES)
+    if absent:
+        return absent, []
+    problems = []
+    far = mod._sd_now() + 60.0
+    stream = mod._SdStream(1.0, 1.0, cap=1000)
+    abort = threading.Event()
+    stream.put(b"a" * 600, far, abort)
+    if stream.size != 600:
+        problems.append("size is %r after a 600 byte put" % (stream.size,))
+    box = {}
+
+    def second():
+        try:
+            stream.put(b"b" * 600, far, abort)
+            box["done"] = True
+        except mod.UpstreamError as exc:
+            box["error"] = exc.kind
+
+    thread = threading.Thread(target=second, name="tf-d26-put", daemon=True)
+    thread.start()
+    thread.join(0.4)
+    if not thread.is_alive():
+        problems.append("a put over the cap returned at once: no back-pressure (%r)" % (box,))
+    if stream.size > 1000:
+        problems.append("the queue holds %d bytes over its 1000 byte cap" % stream.size)
+    got = stream.get(2.0)
+    if got != ("data", b"a" * 600):
+        problems.append("get gave %r, expected the first 600 bytes" % (got[0],))
+    thread.join(WAIT_CEILING_S)
+    if thread.is_alive() or box.get("done") is not True:
+        problems.append("the blocked put did not complete once the reader drained: %r" % (box,))
+    if stream.get(2.0) != ("data", b"b" * 600):
+        problems.append("the second piece did not arrive intact")
+    if stream.get(0.1) != ("tick", b""):
+        problems.append("an empty open queue did not answer a tick")
+    stream.put(b"c" * 900, far, abort)
+    box.clear()
+    thread = threading.Thread(target=second, name="tf-d26-abort", daemon=True)
+    thread.start()
+    thread.join(0.3)
+    abort.set()
+    thread.join(WAIT_CEILING_S)
+    if thread.is_alive() or box.get("error") != "aborted":
+        problems.append("the abort Event did not end a blocked put with 'aborted': %r" % (box,))
+    abort2 = threading.Event()
+    stream2 = mod._SdStream(1.0, 1.0, cap=100)
+    stream2.put(b"d" * 100, far, abort2)
+    t0 = time.monotonic()
+    try:
+        stream2.put(b"e", mod._sd_now() + 0.3, abort2)
+        problems.append("a put past its deadline returned")
+    except mod.UpstreamError as exc:
+        if exc.kind != "timeout" or time.monotonic() - t0 > 3.0:
+            problems.append("a blocked put past its deadline: kind %r after %.1fs" % (exc.kind, time.monotonic() - t0))
+    stream3 = mod._SdStream(1.0, 1.0, cap=100)
+    stream3.put(b"f" * 5000, far, threading.Event())
+    if stream3.size != 5000:
+        problems.append("one piece over the cap into an EMPTY queue must be accepted (size %r)" % (stream3.size,))
+    stream4 = mod._SdStream(1.0, 1.0, cap=100)
+    stream4.put(b"x", far, threading.Event())
+    stream4.end(False)
+    stream4.end(True)
+    if (stream4.get(1.0), stream4.get(1.0)) != (("data", b"x"), ("trunc", b"")):
+        problems.append("data must drain before the end marker, and the first end() wins")
+    try:
+        stream4.put(b"y", far, threading.Event())
+        problems.append("a put after the end returned")
+    except mod.UpstreamError as exc:
+        if exc.kind != "aborted":
+            problems.append("a put after the end raised %r, expected 'aborted'" % exc.kind)
+    stream5 = mod._SdStream(1.0, 1.0, cap=100)
+    stream5.end(True)
+    if stream5.get(1.0) != ("end", b""):
+        problems.append("a clean end did not read back as 'end'")
+    return problems, ["put blocks over the cap and ends on abort or the deadline; one piece over the cap "
+                      "enters an empty queue; data first, then 'end' / 'trunc'; a put after the end is "
+                      "'aborted'"]
+
+
 GD_FUNCS = (d1, d2, d3, d4, d5, d6, d7, d8, d9, d10, d11, d12, d13, d14, d15, d16, d17,
-            d18, d19, d20, d21, d22)
+            d18, d19, d20, d21, d22, d23, d24, d25, d26)
 
 
 def group_d(suite, fixture_root):
@@ -4092,9 +4376,17 @@ def group_d(suite, fixture_root):
 #           the started model stays READY and resident (final M1).  The
 #           launch `stop` Event is set only by a force for that model or by
 #           shutdown, never by a client cancel;
-#         * sent: the upstream socket is shut down and the child is KILLED
-#           (stop ladder, group confirmed gone) before the next ticket is
-#           served (D-12); not a crash, no retry, no Budget charge.
+#         * sent: the upstream socket is shut down and NOTHING is killed:
+#           no stop ladder, the model stays READY and resident, the next
+#           ticket is served by the same child (D-12 amended by ADR 0035;
+#           the sd policy sits behind _SD_ABORT_KILLS_SD); not a crash, no
+#           retry, no Budget charge.
+#       Stage 2b (ADR 0035): an llm app's 2xx stream is relayed incrementally.
+#       The ticket's `head_ready` Event (set by the head publication AND by
+#       finish) releases the handler; `done` is set only by finish; `stream`
+#       (a _SdStream: bounded byte queue, get() -> (kind, bytes)) and
+#       `bytes_relayed` (True from the head publication: a crash after it is
+#       never re-queued, the stream ends truncated) are the seam.
 #     shutdown(): idempotent and bounded.  The popped ticket is finished 503
 #       shutting_down (a start in progress is stopped, never sent), every
 #       still-queued ticket 503 queue_closed; a ladder in progress is
@@ -4135,7 +4427,7 @@ GQS_CASES = (
     "QS5 budget clear/record lock",
     "QS6 force clears DISABLED",
     "QS7 cancel queued / starting",
-    "QS8 cancel running kills",
+    "QS8 cancel running: no kill",
     "QS9 zombie fails, ESRCH clears",
     "QS10 force while STARTING",
     "QS11 shutdown while STARTING",
@@ -4162,6 +4454,8 @@ GT_CASES = (
     "T13 Popen ValueError -> DEAD",
     "T14 squatter never sees a request",
     "T15 llm timeout aborts, no kill",
+    "T16 shutdown mid-stream (R15)",
+    "T17 head/idle timeout: no kill",
 )
 
 Q_NAMES = ("Scheduler", "Ticket", "TicketResult", "UpstreamError", "_sd_send", "_SD_SCHED_TICK_S",
@@ -4683,20 +4977,26 @@ def qs8(mod, sandbox, names, optional):
         if r1.result is not None or r1.abort_reason != "client":
             problems.append("the client-aborted ticket: result %r abort_reason %r"
                             % (_q_result(r1), r1.abort_reason))
-        stops = [i for i, row in enumerate(trail) if row[0] == "stop" and row[1] == pid1]
-        launches = [i for i, row in enumerate(trail) if row[0] == "launch"]
-        if not stops or trail[stops[0]][2] is not True:
-            problems.append("the running child %d was not stopped (trail %r)" % (pid1, trail))
-        elif len(launches) < 2 or launches[1] < stops[0]:
-            problems.append("the next child was launched before the aborted one was gone")
-        if pid_alive(pid1):
-            problems.append("the client-aborted child %d is alive" % pid1)
+        # ADR 0035 amends D-12: a client abort closes the upstream and kills NOTHING.  The pessimistic
+        # sd case is pinned here: the stub keeps generating (--keep-generating), the router does not
+        # know, and the next request is served by the SAME child.
+        if [row for row in trail if row[0] == "stop"]:
+            problems.append("a client abort ran the stop ladder (trail %r)" % (trail,))
+        if len([row for row in trail if row[0] == "launch"]) != 1 or len(read_starts(sandbox, "A")) != 1:
+            problems.append("the child was started again after a client abort (trail %r)" % (trail,))
+        if not pid_alive(pid1):
+            problems.append("the client-aborted child %d is gone: a client abort must not kill it" % pid1)
+        if w.state("A") != "READY":
+            problems.append("A is %s after a client abort, expected READY" % w.state("A"))
+        if not wait_until(lambda: events_named(sandbox, "client_gone", "A")):
+            problems.append("the stub never saw the upstream connection close")
         if len(_q_sends(sandbox, "A", b1)) != 1 or w.crashes("A"):
             problems.append("a client abort was retried or charged as a crash")
         if not wait_until(lambda: w.admitted() == 0):
             problems.append("admitted %d after the drop and the release" % w.admitted())
-    return problems + w.problems, ["a client abort of a running request killed the child (group "
-                                   "gone) before the next ticket started; no crash (D-12)"]
+    return problems + w.problems, ["a client abort of a running request closed the upstream and killed "
+                                   "nothing: same child, state READY, no crash, the next ticket served "
+                                   "by it while the stub kept generating (D-12 amended, ADR 0035)"]
 
 
 @_q_live
@@ -5438,7 +5738,92 @@ def t15(mod, sandbox, names, optional):
                                    "charge, no re-send"]
 
 
-GT_FUNCS = (t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11, t12, t13, t14, t15)
+def _t_drain(stream, limit=1000):
+    """(data bytes, the end marker) of a _SdStream read to its end: ('end' | 'trunc' | 'tick')."""
+    data = b""
+    for _ in range(limit):
+        kind, piece = stream.get(WAIT_CEILING_S)
+        if kind != "data":
+            return data, kind
+        data += piece
+    return data, "data"
+
+
+@_q_live
+def t16(mod, sandbox, names, optional):
+    """R15 (scheduler level): a shutdown during a running stream finishes the ticket 503
+    shutting_down, ends the stream TRUNCATED (never a clean end), and leaves no child group."""
+    names.append("L")
+    problems = []
+    entry = _p_llm_entry(sandbox, "L", "--events", "200", "--event-delay", "0.1")
+    with _q_world(mod, {"L": entry}) as w:
+        ticket = w.request("L", _s_body("t16"), path=S_CHAT)
+        if not ticket.head_ready.wait(WAIT_CEILING_S) or ticket.stream is None:
+            return problems + ["the stream head was never published (done=%r)" % ticket.done.is_set()], []
+        if ticket.bytes_relayed is not True or ticket.done.is_set():
+            problems.append("after the head: bytes_relayed %r, done %r (done is set only by finish)"
+                            % (ticket.bytes_relayed, ticket.done.is_set()))
+        kind, piece = ticket.stream.get(WAIT_CEILING_S)
+        if kind != "data" or b"tf_seq" not in piece:
+            problems.append("the first read of the stream gave %r" % (kind,))
+        pids = read_starts(sandbox, "L")
+        problems += _q_close(w.sched)
+        problems += _q_code("the streaming ticket", ticket, "shutting_down")
+        rest, end = _t_drain(ticket.stream)
+        if end != "trunc":
+            problems.append("a stream cut by shutdown ended %r, expected 'trunc' (no clean end)" % end)
+        if not pids or not pid_dead(pids[0]):
+            problems.append("the child outlived shutdown: %r" % (pids,))
+        w.release(ticket)
+    return problems + w.problems, ["shutdown mid-stream: 503 shutting_down on the ticket, the stream ends "
+                                   "'trunc', the child group is gone"]
+
+
+@_q_live
+def t17(mod, sandbox, names, optional):
+    """The llm head_timeout (no head) and idle_timeout (no byte) are no-kill aborts: 504
+    upstream_timeout before any byte, a truncated stream after one; the SAME child stays READY, no
+    crash is charged and nothing is re-sent."""
+    names.extend(("L", "M"))
+    problems = []
+    models = {"L": _p_llm_entry(sandbox, "L", "--answer-delay", "8", head_timeout=1.0, retries=1),
+              "M": _p_llm_entry(sandbox, "M", "--events", "5", "--event-delay", "6", idle_timeout=1.0,
+                                retries=1, model_ids=["m-chat"])}
+    with _q_world(mod, models) as w:
+        ticket = w.request("L", _s_body("t17-head"), path=S_CHAT)
+        problems += _q_code("no head within head_timeout", ticket, "upstream_timeout")
+        w.release(ticket)
+        pids = read_starts(sandbox, "L")
+        if ticket.bytes_relayed or ticket.stream is not None:
+            problems.append("a head that never came published a stream")
+        if len(pids) != 1 or not pid_alive(pids[0]) or w.state("L") != "READY" or w.crashes("L"):
+            problems.append("head_timeout touched the child: pids %r state %s crashes %d"
+                            % (pids, w.state("L"), w.crashes("L")))
+        if len(_q_sends(sandbox, "L")) != 1 or ticket.attempts != 1:
+            problems.append("the head timeout was re-sent (%d at the stub)" % len(_q_sends(sandbox, "L")))
+        ticket = w.request("M", _s_body("t17-idle", model="m-chat"), path=S_CHAT)
+        if not ticket.head_ready.wait(WAIT_CEILING_S) or ticket.stream is None:
+            return problems + ["the idle stream's head was never published"], []
+        kind, piece = ticket.stream.get(WAIT_CEILING_S)
+        if kind != "data" or b"tf_seq" not in piece:
+            problems.append("the first event did not arrive: %r" % (kind,))
+        rest, end = _t_drain(ticket.stream)
+        if end != "trunc":
+            problems.append("a stream that stalled past idle_timeout ended %r, expected 'trunc'" % end)
+        problems += _q_code("the stalled stream's ticket", ticket, "upstream_timeout")
+        w.release(ticket)
+        mpids = read_starts(sandbox, "M")
+        if len(mpids) != 1 or not pid_alive(mpids[0]) or w.state("M") != "READY" or w.crashes("M"):
+            problems.append("idle_timeout touched the child: pids %r state %s crashes %d"
+                            % (mpids, w.state("M"), w.crashes("M")))
+        if len(_q_sends(sandbox, "M")) != 1 or ticket.attempts != 1:
+            problems.append("the idle timeout was re-sent (%d at the stub)" % len(_q_sends(sandbox, "M")))
+    return problems + w.problems, ["head_timeout: 504 upstream_timeout, no stream; idle_timeout after an event: "
+                                   "the stream ends 'trunc'; both leave the same child READY, uncharged, "
+                                   "sent once"]
+
+
+GT_FUNCS = (t1, t2, t3, t4, t5, t6, t7, t8, t9, t10, t11, t12, t13, t14, t15, t16, t17)
 
 
 def _q_group(suite, fixture_root, group, cases, funcs, label):
@@ -5643,6 +6028,9 @@ GP_CASES = (
     "P41 llm routes reach the llm app",
     "P42 per-kind body caps, 411 first",
     "P43 anthropic headers, chat only",
+    "P44 stream head allow-list (R20)",
+    "P45 stream incremental, chunked",
+    "P46 mid-stream EOF: no replay (R3)",
 )
 
 GQH_CASES = (
@@ -7068,9 +7456,266 @@ def p43(mod, sandbox, names, optional):
                                    "are 400 and never reach the child; image routes ignore them"]
 
 
+# -- stage 2b: the streamed answer over the wire (ADR 0035) ---------------------------------
+# An llm app's 2xx stream is relayed incrementally: chunked to the client, the child's
+# Content-Type the only header that crosses, Cache-Control router-fixed, a clean end writes the
+# terminating chunk, every abnormal end closes WITHOUT it.  A non-2xx answer and a JSON answer
+# with a Content-Length stay buffered (P41-P43).
+
+S_CHAT = "/v1/chat/completions"
+S_ALLOWED_HEADERS = frozenset(("server", "date", "content-type", "cache-control", "x-content-type-options",
+                               "transfer-encoding", "connection"))
+S_JUNK_HEADERS = ("Set-Cookie: sid=tf", "Location: http://evil.invalid/", "Trailer: X-T", "Upgrade: h2c",
+                  "Keep-Alive: timeout=5", "X-Evil: 1")
+
+
+def _s_body(tag, model="Qwen3.8-Flash-Next", stream=True):
+    """A unique chat body asking for a stream (the LLM stub streams when "stream" is true)."""
+    return json.dumps({"model": model, "stream": stream,
+                       "prompt": "%s %s-%s" % (P_PROMPT, tag, secrets.token_hex(4))},
+                      sort_keys=True).encode("utf-8")
+
+
+class _SResp:
+    """A streamed answer parsed from raw bytes: the status, the header pairs (lower-cased
+    names), the de-chunked chunks and payload, whether the terminating chunk arrived and
+    whether the peer closed the connection."""
+
+    def __init__(self, raw, eof):
+        self.raw = raw
+        self.eof = eof
+        self.status = None
+        self.headers = []
+        self.chunks = []
+        self.terminated = False
+        self.payload = b""
+        head, sep, rest = raw.partition(b"\r\n\r\n")
+        lines = head.split(b"\r\n")
+        if not sep:
+            return
+        try:
+            self.status = int(lines[0].split(b" ")[1])
+        except (IndexError, ValueError):
+            return
+        for line in lines[1:]:
+            name, colon, value = line.partition(b":")
+            if colon:
+                self.headers.append((name.strip().decode("latin-1").lower(), value.strip().decode("latin-1")))
+        if (self.header("transfer-encoding") or "").lower() != "chunked":
+            self.payload = rest
+            return
+        while True:
+            line, crlf, after = rest.partition(b"\r\n")
+            if not crlf:
+                break
+            try:
+                size = int(line, 16)
+            except ValueError:
+                break
+            if size == 0:
+                self.terminated = after.startswith(b"\r\n")
+                break
+            self.chunks.append(after[:size])
+            if len(after) < size + 2:
+                break
+            rest = after[size + 2:]
+        self.payload = b"".join(self.chunks)
+
+    def header(self, name):
+        for key, value in self.headers:
+            if key == name:
+                return value
+        return None
+
+    def events(self):
+        """The SSE `data:` payloads, in order ("[DONE]" included, JSON ones decoded)."""
+        out = []
+        for block in self.payload.decode("utf-8", "replace").split("\n\n"):
+            if block.startswith("data: "):
+                text = block[len("data: "):]
+                try:
+                    out.append(json.loads(text))
+                except ValueError:
+                    out.append(text)
+        return out
+
+    def describe(self):
+        return "%s, %d payload bytes, terminated=%r, eof=%r" % (self.status, len(self.payload),
+                                                                 self.terminated, self.eof)
+
+
+def _s_post(port, target, body, timeout=WAIT_CEILING_S, **kw):
+    """One stream request, read to the peer's close (or *timeout*)."""
+    sock = _p_open(port, _p_head(port, "POST", target, length=len(body), **kw) + body)
+    try:
+        return _SResp(*_p_read(sock, timeout))
+    finally:
+        sock.close()
+
+
+def _s_until(sock, needle, timeout=WAIT_CEILING_S):
+    """The bytes read from *sock* up to the first one holding *needle* (or what came before *timeout*)."""
+    deadline = time.monotonic() + timeout
+    raw = b""
+    while needle not in raw and time.monotonic() < deadline:
+        sock.settimeout(0.5)
+        try:
+            data = sock.recv(65536)
+        except socket.timeout:
+            continue
+        except OSError:
+            break
+        if not data:
+            break
+        raw += data
+    return raw
+
+
+def _s_clean(label, resp, body, events=3):
+    """Problems unless *resp* is the stub's whole stream for *body*: 200, chunked, the router's
+    own head, *events* tf events then [DONE], the terminating chunk, the router's close."""
+    problems = []
+    if resp.status != 200:
+        return ["%s: %s, expected a 200 stream" % (label, resp.describe())]
+    names = {name for name, _value in resp.headers}
+    extra = sorted(names - S_ALLOWED_HEADERS)
+    if extra:
+        problems.append("%s: headers %r reached the client (allow-list: %s)" % (label, extra, sorted(S_ALLOWED_HEADERS)))
+    want = {"content-type": "text/event-stream", "cache-control": "no-cache", "x-content-type-options": "nosniff",
+            "transfer-encoding": "chunked", "connection": "close"}
+    for name, value in want.items():
+        if resp.header(name) != value:
+            problems.append("%s: %s is %r, expected %r" % (label, name, resp.header(name), value))
+    if resp.header("content-length") is not None:
+        problems.append("%s: a streamed answer carries a Content-Length" % label)
+    evs = resp.events()
+    seqs = [ev.get("tf_seq") for ev in evs if isinstance(ev, dict)]
+    if seqs != list(range(events)) or evs[-1:] != ["[DONE]"]:
+        problems.append("%s: events %r, expected tf_seq 0..%d then [DONE]" % (label, evs[:6], events - 1))
+    if any(isinstance(ev, dict) and ev.get("tf_request_sha256") != _q_sha(body) for ev in evs):
+        problems.append("%s: an event answers a different body" % label)
+    if not resp.terminated or not resp.eof:
+        problems.append("%s: a clean end needs the terminating chunk and the close (%s)" % (label, resp.describe()))
+    return problems
+
+
+@_q_live
+def p44(mod, sandbox, names, optional):
+    """R20 / S1: a streamed head is an ALLOW-list.  Only the child's Content-Type crosses; its
+    Set-Cookie, Location, Trailer, Upgrade, Keep-Alive and unknown headers do not; the framing is
+    the router's own.  A head the router must refuse (Content-Length with chunked, a head over
+    64 KiB) is 502 upstream_failed with the child left alone; a non-2xx answer stays buffered."""
+    names.extend(("L", "M", "N", "O"))
+    problems = []
+    flags = []
+    for line in S_JUNK_HEADERS:
+        flags += ["--head-extra", line]
+    models = {
+        "L": _p_llm_entry(sandbox, "L", "--events", "3", *flags),
+        "M": _p_llm_entry(sandbox, "M", "--events", "3", "--head-extra", "Content-Length: 5", model_ids=["m-chat"]),
+        "N": _p_llm_entry(sandbox, "N", "--events", "3", "--head-pad", str(70 * 1024), model_ids=["n-chat"]),
+        "O": _p_llm_entry(sandbox, "O", "--answer-status", "429", "--head-extra", "Retry-After: 7",
+                          model_ids=["o-chat"]),
+    }
+    with _p_front(mod, sandbox, models) as w:
+        body = _s_body("p44")
+        problems += _s_clean("the junk-headed stream", _s_post(w.port, _p_m("L", S_CHAT), body), body)
+        for name, model in (("M", "m-chat"), ("N", "n-chat")):
+            body = _s_body("p44-" + name, model=model)
+            label = {"M": "a child head with Content-Length and chunked",
+                     "N": "a child head over 64 KiB"}[name]
+            problems += _p_refused(label, _p_post(w.port, _p_m(model, S_CHAT), body), "upstream_failed")
+            if not pid_alive((read_starts(sandbox, name) or [0])[0]) or w.state(name) != "READY":
+                problems.append("%s: the child was killed or the app left READY (%s)" % (label, w.state(name)))
+            if w.crashes(name):
+                problems.append("%s: charged as %d crash(es)" % (label, w.crashes(name)))
+            if len(_q_sends(sandbox, name)) != 1:
+                problems.append("%s: the request was re-sent" % label)
+        body = _s_body("p44-429", model="o-chat")
+        resp = _p_post(w.port, _p_m("o-chat", S_CHAT), body)
+        framing = _p_framing("a non-2xx answer", resp)
+        if resp.status != 429 or resp.code() != "tf_status" or framing:
+            problems.append("a streamed request answered 429 by the child: %s, %r (expected the buffered "
+                            "relay, Content-Length framed)" % (resp.describe(), framing))
+        if "retry-after" in dict(resp.headers) or "set-cookie" in dict(resp.headers):
+            problems.append("a non-2xx answer carried a child header other than Content-Type")
+        if not w.settled(0):
+            problems.append("admitted %d after the answers, expected 0" % w.admitted())
+    return problems + w.problems, ["a streamed head passes Content-Type only (Cache-Control fixed, framing the "
+                                   "router's); CL+TE and a 70 KiB head are 502 upstream_failed, child alive, "
+                                   "nothing charged or re-sent; a 429 stays on the buffered relay"]
+
+
+@_q_live
+def p45(mod, sandbox, names, optional):
+    """R1 / R12: the first event reaches the client while the child is still generating (no
+    buffering); a close-delimited child is re-framed as chunked with the terminator."""
+    names.extend(("L", "M"))
+    problems = []
+    models = {"L": _p_llm_entry(sandbox, "L", "--events", "4", "--event-delay", "0.7"),
+              "M": _p_llm_entry(sandbox, "M", "--events", "3", "--close-delimited", model_ids=["m-chat"])}
+    with _p_front(mod, sandbox, models) as w:
+        body = _s_body("p45")
+        sock = _p_open(w.port, _p_head(w.port, "POST", _p_m("L", S_CHAT), length=len(body)) + body)
+        try:
+            raw = _s_until(sock, b"tf_seq")
+            finished = events_named(sandbox, "stream_end", "L")
+            rest, eof = _p_read(sock, WAIT_CEILING_S)
+        finally:
+            sock.close()
+        if b"tf_seq" not in raw:
+            problems.append("no event reached the client")
+        elif finished:
+            problems.append("the first event arrived only after the child had finished: the answer was buffered")
+        problems += _s_clean("the incremental stream", _SResp(raw + rest, eof), body, events=4)
+        body = _s_body("p45-cd", model="m-chat")
+        problems += _s_clean("a close-delimited child", _s_post(w.port, _p_m("m-chat", S_CHAT), body), body)
+        if not w.settled(0):
+            problems.append("admitted %d after the streams, expected 0" % w.admitted())
+    return problems + w.problems, ["the first event arrived before the child's stream_end; chunked to the "
+                                   "client with the terminating chunk, also from a close-delimited child"]
+
+
+@_q_live
+def p46(mod, sandbox, names, optional):
+    """R3 / S2: a child that drops the connection after two events (retries=1!) gives a stream that
+    ends WITHOUT the terminating chunk, one request at the child (never replayed), one crash charged."""
+    names.append("L")
+    problems = []
+    entry = _p_llm_entry(sandbox, "L", "--events", "5", "--drop-after", "2", retries=1)
+    with _p_front(mod, sandbox, {"L": entry}) as w:
+        body = _s_body("p46")
+        resp = _s_post(w.port, _p_m("L", S_CHAT), body)
+        seqs = [ev.get("tf_seq") for ev in resp.events() if isinstance(ev, dict)]
+        if resp.status != 200 or seqs != [0, 1]:
+            problems.append("the truncated stream: %s, events %r, expected a 200 with tf_seq [0, 1]"
+                            % (resp.describe(), seqs))
+        if resp.terminated or not resp.eof:
+            problems.append("a truncated stream ended cleanly (terminated=%r eof=%r): the client cannot tell"
+                            % (resp.terminated, resp.eof))
+        if not w.settled(0):
+            problems.append("admitted %d after the truncated stream, expected 0" % w.admitted())
+        if not wait_until(lambda: w.state("L") in ("DEAD", "STOPPED")):
+            problems.append("L is %s after the crash" % w.state("L"))
+        time.sleep(0.5)   # a replay would show up now
+        if len(_q_sends(sandbox, "L")) != 1:
+            problems.append("the child received %d requests: a stream that relayed bytes was replayed"
+                            % len(_q_sends(sandbox, "L")))
+        if w.crashes("L") != 1:
+            problems.append("%d crash(es) charged, expected exactly one" % w.crashes("L"))
+        again = _p_body("p46-again", model="bge-m3")
+        problems += _p_relayed("the next request restarts the app", _p_post(w.port, _p_m("bge-m3", U_EMBED), again),
+                               again, sandbox, "L", U_EMBED)
+        if len(read_starts(sandbox, "L")) != 2:
+            problems.append("L started %d times, expected 2 (the original and one restart)" % len(read_starts(sandbox, "L")))
+    return problems + w.problems, ["EOF after two events: 200 + two events, no terminating chunk, closed; the "
+                                   "child saw ONE request despite retries=1; one crash charged; the app "
+                                   "restarts for the next request"]
+
+
 GP_FUNCS = (p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p13, p14, p15, p16, p17, p18, p19,
             p20, p21, p22, p23, p24, p25, p26, p27, p28, p29, p30, p31, p32, p33, p34, p35, p36,
-            p37, p38, p39, p40, p41, p42, p43)
+            p37, p38, p39, p40, p41, p42, p43, p44, p45, p46)
 
 
 # -- Q-http ---------------------------------------------------------------------------
@@ -7126,24 +7771,25 @@ def qh2(mod, sandbox, names, optional):
         if found is None:
             return problems + ["the child never started generating"], []
         pid = found[0].get("pid")
-        if not pid_dead(pid):
-            problems.append("the generating child survived its client's departure (D-12)")
+        # ADR 0035 amends D-12: the generating child SURVIVES its client's departure.
         if not w.settled(0):
             problems.append("admitted %d after the scheduler dropped the ticket, expected 0" % w.admitted())
-        if not w.wait_state("A", "STOPPED"):
-            problems.append("A is %s after the client abort, expected STOPPED" % w.state("A"))
+        if not w.wait_state("A", "READY"):
+            problems.append("A is %s after the client abort, expected READY" % w.state("A"))
+        if pid_dead(pid, 1.0):
+            problems.append("the generating child was killed by its client's departure (D-12 amended)")
         if w.crashes("A") != 0:
             problems.append("the client abort was charged as %d crash(es)" % w.crashes("A"))
         _q_control(control, "ok")
         again = _p_body("qh2-again")
         problems += _p_relayed("the next request", _p_post(w.port, _p_m("A", P_GEN), again), again,
                                sandbox, "A", P_GEN)
-    if len(read_starts(sandbox, "A")) != 2:
-        problems.append("A started %d times, expected 2 (a cold start after the abort)"
+    if len(read_starts(sandbox, "A")) != 1:
+        problems.append("A started %d times, expected 1 (no cold start after the abort)"
                         % len(read_starts(sandbox, "A")))
-    return problems + w.problems, ["a running client that closes its socket: the child is killed, the "
-                                   "slot freed by the scheduler, no crash charged; the next request "
-                                   "cold-starts"]
+    return problems + w.problems, ["a running client that closes its socket: the child lives, the slot "
+                                   "is freed by the scheduler, no crash charged; the next request is "
+                                   "served by the same child, no new start (D-12 amended, ADR 0035)"]
 
 
 @_q_live
@@ -7188,8 +7834,9 @@ def qh3(mod, sandbox, names, optional):
         bound = cap * (QH_LOOP_BODY + 1024)
         if peak["bytes"] > bound:
             problems.append("held request bodies peaked at %d bytes, over the bound %d" % (peak["bytes"], bound))
-        if found is not None and not pid_dead(found[0].get("pid")):
-            problems.append("the running request's child survived its client's departure")
+        # ADR 0035 amends D-12: the running request's client leaving closes the upstream, kills nothing.
+        if found is not None and pid_dead(found[0].get("pid"), 1.0):
+            problems.append("the running request's child was killed by its client's departure")
         if not w.settled(0):
             problems.append("admitted %d after the running client left, expected 0" % w.admitted())
         sent = len(_q_sends(sandbox, "A"))
@@ -7407,9 +8054,10 @@ GU_CASES = (
     "U18 prefix vs ?model= clash",
     "U19 /v1/models lists every id",
     "U20 unload through any id",
+    "U21 force mid-stream (R14)",
 )
 
-GQH_CASES = GQH_CASES + ("QH5 racing unloads, one ladder",)
+GQH_CASES = GQH_CASES + ("QH5 racing unloads, one ladder", "QH6 client leaves a stream: no kill")
 
 U_NAMES = P_NAMES + Q_NAMES
 U_MODELS = "/v1/models"
@@ -8185,7 +8833,41 @@ def u20(mod, sandbox, names, optional):
                                    "app is 400), an unknown id is 404, no target stops the resident app"]
 
 
-GU_FUNCS = (u1, u2, u3, u4, u5, u6, u7, u8, u9, u10, u11, u12, u13, u14, u15, u16, u17, u18, u19, u20)
+@_q_live
+def u21(mod, sandbox, names, optional):
+    """R14: ?force=1 during a running stream kills the child (a force still kills), answers the
+    unload {"unloaded": true}, and the client's stream ends TRUNCATED: no terminating chunk."""
+    names.append("L")
+    problems = []
+    models = {"L": _p_llm_entry(sandbox, "L", "--events", "300", "--event-delay", "0.1")}
+    with _p_front(mod, sandbox, models) as w:
+        body = _s_body("u21")
+        sock = _p_open(w.port, _p_head(w.port, "POST", _p_m("L", U_CHAT), length=len(body)) + body)
+        try:
+            raw = _s_until(sock, b"tf_seq")
+            if b"tf_seq" not in raw:
+                problems.append("no event reached the client before the force unload")
+            pids = read_starts(sandbox, "L")
+            problems += _u_unloaded("?force=1 mid-stream", _u_post(w.port, U_UNLOAD + "?force=1"), True, "L")
+            rest, eof = _p_read(sock, WAIT_CEILING_S)
+        finally:
+            sock.close()
+        resp = _SResp(raw + rest, eof)
+        if resp.status != 200 or resp.terminated or not resp.eof:
+            problems.append("the forced stream: %s, expected a 200 that ends WITHOUT the terminating chunk"
+                            % resp.describe())
+        if not pids or not pid_dead(pids[0]):
+            problems.append("the child outlived a force unload: %r" % (pids,))
+        if not w.settled(0):
+            problems.append("admitted %d after the force, expected 0" % w.admitted())
+        if w.state("L") != "STOPPED" or w.crashes("L"):
+            problems.append("L is %s with %d crash(es) after a force, expected STOPPED and 0"
+                            % (w.state("L"), w.crashes("L")))
+    return problems + w.problems, ["?force=1 mid-stream: the child is killed, {unloaded: true}, the stream "
+                                   "ends without the terminating chunk, no crash charged"]
+
+
+GU_FUNCS = (u1, u2, u3, u4, u5, u6, u7, u8, u9, u10, u11, u12, u13, u14, u15, u16, u17, u18, u19, u20, u21)
 
 
 @_q_live
@@ -8248,7 +8930,62 @@ def qh5(mod, sandbox, names, optional):
                                    "group gone"]
 
 
-GQH_FUNCS = GQH_FUNCS + (qh5,)
+@_q_live
+def qh6(mod, sandbox, names, optional):
+    """R1 / R2: a client that leaves a running stream -- after some events, and in a silent thinking
+    phase where nothing is written -- gets the upstream closed and the slot freed, and the SAME
+    child (pid, start count) serves the next request: no kill, no crash, no cold start."""
+    names.extend(("L", "M"))
+    problems = []
+    models = {"L": _p_llm_entry(sandbox, "L", "--events", "100", "--event-delay", "0.2"),
+              "M": _p_llm_entry(sandbox, "M", "--events", "2", "--think-gap", "60", model_ids=["m-chat"])}
+
+    def peer_closed(name):
+        return bool(events_named(sandbox, "client_gone", name) or events_named(sandbox, "closed_by_peer", name))
+
+    with _p_front(mod, sandbox, models) as w:
+        body = _s_body("qh6-mid")
+        sock = _p_open(w.port, _p_head(w.port, "POST", _p_m("L", S_CHAT), length=len(body)) + body)
+        try:
+            if b"tf_seq" not in _s_until(sock, b"tf_seq"):
+                problems.append("no event reached the client before it left")
+        finally:
+            sock.close()
+        pids = read_starts(sandbox, "L")
+        if not wait_until(lambda: peer_closed("L")):
+            problems.append("the upstream connection was not closed after the client left mid-stream")
+        if not w.settled(0):
+            problems.append("admitted %d after the client left, expected 0" % w.admitted())
+        if not pids or not pid_alive(pids[0]) or w.state("L") != "READY" or w.crashes("L"):
+            problems.append("a client abort touched the child: pids %r state %s crashes %d"
+                            % (pids, w.state("L"), w.crashes("L")))
+        again = _p_body("qh6-again", model="bge-m3")
+        problems += _p_relayed("the next request", _p_post(w.port, _p_m("bge-m3", U_EMBED), again), again,
+                               sandbox, "L", U_EMBED)
+        if read_starts(sandbox, "L") != pids:
+            problems.append("L was started again after the client abort: %r -> %r" % (pids, read_starts(sandbox, "L")))
+        body = _s_body("qh6-think", model="m-chat")
+        sock = _p_open(w.port, _p_head(w.port, "POST", _p_m("m-chat", S_CHAT), length=len(body)) + body)
+        try:
+            head = _p_read_head(sock, WAIT_CEILING_S)
+            if not head.startswith(b"HTTP/1.1 200"):
+                problems.append("the silent stream's head did not reach the client: %r" % head[:40])
+        finally:
+            sock.close()
+        mpids = read_starts(sandbox, "M")
+        if not wait_until(lambda: peer_closed("M")):
+            problems.append("a client that left a silent thinking phase did not close the upstream")
+        if not w.settled(0):
+            problems.append("admitted %d after the silent client left, expected 0" % w.admitted())
+        if not mpids or not pid_alive(mpids[0]) or w.state("M") != "READY" or w.crashes("M"):
+            problems.append("the silent abort touched the child: pids %r state %s crashes %d"
+                            % (mpids, w.state("M"), w.crashes("M")))
+    return problems + w.problems, ["a client leaving a stream mid-way or in a silent think phase: upstream "
+                                   "closed, slot freed, same pid, no new start, no crash; the next request "
+                                   "is served by the same child"]
+
+
+GQH_FUNCS = GQH_FUNCS + (qh5, qh6)
 
 
 def group_u(suite, fixture_root):
@@ -9183,6 +9920,7 @@ GA_CASES = (
     "A15 platform by sys.platform",
     "A16 child env not os.environ",
     "A17 lock: no log/block/finish",
+    "A18 a stream aborts, never kills",
 )
 
 A_SEND_OWNERS = frozenset(("_sd_send", "_sd_probe_status"))
@@ -9804,7 +10542,43 @@ def a17(ctx):
                       % (len(sections), start, end)]
 
 
-GA_FUNCS = (a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17)
+A_STREAM_SEAM = ("_sd_send", "_sd_pump", "_sd_write_stream", "_SdStream", "_SdDechunker",
+                 "_sd_parse_stream_head")
+A_STREAM_BANNED = frozenset(("_ladder", "_signal_group", "killpg", "kill", "Popen", "stop", "kill_all",
+                             "terminate", "Supervisor"))
+
+
+def a18(ctx):
+    """Stage 2b: a signal is sent by `_signal_group` alone (no os.kill / killpg / .kill anywhere
+    else); the stop ladder is called from Scheduler methods only; and the stream seam -- the send,
+    the pump, the writer, the queue, the de-chunker, the head parser -- never names the ladder,
+    a signal, a Popen or the Supervisor: a stream aborts, it never kills (the matrix decides)."""
+    problems = []
+    for call in _a_calls(ctx.tree, ("kill", "killpg")):
+        owner = _a_leaf(ctx.owners.get(id(call), ""))
+        if owner != "_signal_group":
+            problems.append("%d: a %s call in %s, outside _signal_group" % (call.lineno, _a_call_name(call),
+                                                                          owner or "module scope"))
+    for call in _a_calls(ctx.tree, ("_ladder",)):
+        owner = ctx.owners.get(id(call), "")
+        if not owner.startswith(A_SCHEDULER + "."):
+            problems.append("%d: _ladder called from %s, not a Scheduler method" % (call.lineno, owner or "module scope"))
+    seen = []
+    for name in A_STREAM_SEAM:
+        defs = [n for n in ast.walk(ctx.tree) if isinstance(n, (ast.FunctionDef, ast.ClassDef)) and n.name == name]
+        if len(defs) != 1:
+            problems.append("%s is defined %d time(s), expected once (the rule would go blind)" % (name, len(defs)))
+            continue
+        seen.append(name)
+        for node in ast.walk(defs[0]):
+            word = node.id if isinstance(node, ast.Name) else node.attr if isinstance(node, ast.Attribute) else None
+            if word in A_STREAM_BANNED:
+                problems.append("%d: %s names %s" % (node.lineno, name, word))
+    return problems, ["scope       : every kill/killpg call, every _ladder call; the stream seam %s "
+                      "(no ladder, signal, Popen or Supervisor name)" % ", ".join(seen)]
+
+
+GA_FUNCS = (a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18)
 
 
 def group_a(suite, fixture_root, pyc_before, tree_before):

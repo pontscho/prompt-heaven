@@ -58,10 +58,13 @@ Behaviour flags
 --hang-after-accept         a POST is read and recorded, then never answered.
 --events N                  stream events (default 3).
 --event-delay S             seconds between stream events (default 0).
+--event-bytes N             pad every stream event with a "tf_pad" string of N bytes (a flood).
 --think-gap S               a silent gap before the first event (a thinking phase).
 --close-delimited           a stream is close-delimited (no chunked, no Content-Length).
 --drop-after N              after N stream events close the socket with no terminator.
 --head-extra "Name: value"  an extra response header line on every POST answer (repeatable).
+--head-pad N                an X-Tf-Pad header of N bytes on every POST answer (an oversize head).
+--answer-status N           every POST (stream or not) is answered N with a JSON error body.
 --response-bytes N          pad a JSON answer to at least N bytes.
 --dump-env                  write <name>.env.json at start.
 --ignore-term               SIGTERM is ignored.
@@ -207,6 +210,8 @@ class TfHandler(BaseHTTPRequestHandler):
         for line in self.tf_state.args.head_extra or ():
             name, _sep, value = line.partition(":")
             self.send_header(name.strip(), value.strip())
+        if self.tf_state.args.head_pad:
+            self.send_header("X-Tf-Pad", "a" * self.tf_state.args.head_pad)
 
     def tf_send(self, status, body, seq=None, extra=False):
         try:
@@ -310,7 +315,10 @@ class TfHandler(BaseHTTPRequestHandler):
                 except OSError:
                     pass
                 return
-            event = ("data: " + json.dumps({"tf_seq": index, "tf_request_sha256": sha}) + "\n\n").encode("utf-8")
+            doc = {"tf_seq": index, "tf_request_sha256": sha}
+            if args.event_bytes:
+                doc["tf_pad"] = "x" * args.event_bytes
+            event = ("data: " + json.dumps(doc) + "\n\n").encode("utf-8")
             if not self.tf_write(event, seq, chunked):
                 return
             sent += 1
@@ -368,6 +376,9 @@ class TfHandler(BaseHTTPRequestHandler):
                 tf_forever()
             if args.answer_delay:
                 time.sleep(args.answer_delay)
+            if args.answer_status != 200:
+                self.tf_send(args.answer_status, tf_error_body("tf_status", "tf scripted status"), seq, extra=True)
+                return
             if stream and self.path in TF_CHAT_ROUTES:
                 self.tf_stream(seq, sha)
                 return
@@ -422,10 +433,13 @@ def tf_parse_args(argv):
     ap.add_argument("--hang-after-accept", action="store_true")
     ap.add_argument("--events", type=int, default=3)
     ap.add_argument("--event-delay", type=float, default=0.0)
+    ap.add_argument("--event-bytes", type=int, default=0)
     ap.add_argument("--think-gap", type=float, default=0.0)
     ap.add_argument("--close-delimited", action="store_true")
     ap.add_argument("--drop-after", type=int, default=None)
     ap.add_argument("--head-extra", action="append", default=None)
+    ap.add_argument("--head-pad", type=int, default=0)
+    ap.add_argument("--answer-status", type=int, default=200)
     ap.add_argument("--response-bytes", type=int, default=0)
     ap.add_argument("--dump-env", action="store_true")
     ap.add_argument("--ignore-term", action="store_true")

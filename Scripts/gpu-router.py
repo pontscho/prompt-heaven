@@ -11,8 +11,11 @@ app is one child process that serves one or more model ids. Per app it spawns th
 child from config data (argv list, never a shell), proxies requests to it, restarts
 it on a crash, swaps apps when the queue head targets another one, and stops it on
 /v1/unload to free VRAM. Strict FIFO, ONE request in flight regardless of app; a
-cold start or a swap blocks and waits. Answers are buffered (stage 2a; streaming
-is a later stage). Requires only Python 3.9+ stdlib modules.
+cold start or a swap blocks and waits. An sd app's answer is buffered; an llm app's
+2xx stream (SSE, or any answer without a Content-Length) is relayed incrementally,
+chunked to the client, through a bounded queue (stage 2b). A client that leaves a
+running request closes the upstream connection and kills nothing. Requires only
+Python 3.9+ stdlib modules.
 
 Config grammar (one 0600 JSON file owned by you, read through --config)
 -----------------------------------------------------------------------
@@ -137,8 +140,19 @@ Declared limits (ADR 0034 carries the full list)
   * The free port is picked by bind-and-close; the race is mitigated by the
     child-liveness readiness rule and a liveness check right before each send,
     not removed (child_port removes it for an app that sets one).
-  * An llm app's request_timeout aborts the request without killing the child;
-    whether the engine stops generating on the closed connection is its own.
+  * An llm app's request_timeout, head_timeout (no response head) and idle_timeout
+    (no byte from the child) abort the request without killing the child; whether
+    the engine stops generating on the closed connection is its own.
+  * A client abort of a running request (either kind) closes the upstream and kills
+    nothing (_SD_ABORT_KILLS_SD, ADR 0035). After an sd abort the sd-server may keep
+    generating, so the NEXT request can reach a busy GPU; whether it stops is unmeasured.
+  * A stream that ends abnormally (the child drops it, an idle abort, a force unload,
+    shutdown) closes the client connection WITHOUT the terminating chunk. A crash
+    after the head was relayed is never re-queued and is charged once. A force unload
+    still kills the child and truncates the stream.
+  * A streamed answer's head is an allow-list: only the child's Content-Type crosses
+    (Cache-Control is the router's own); the head must fit in 64 KiB. A non-2xx
+    answer and a JSON answer with a Content-Length stay buffered (response_limit).
   * No TLS; --allow-remote needs --insecure-cleartext. The control-route
     connection reserve only mitigates unauthenticated slot holders.
   * No keep-alive, Content-Length required (chunked refused 411), no restart
@@ -334,6 +348,9 @@ class _SdKindRow(NamedTuple):
     # closed, 504 upstream_timeout, the child stays READY, nothing is charged (owner decision:
     # a kill throws away a 20-60 s model load).
     timeout_kills: bool = True
+    # A 2xx answer without a Content-Length (and any SSE answer) is relayed incrementally through
+    # a bounded queue (llm); False = every answer is buffered whole (sd, as ever).
+    streams: bool = False
 
 
 # sd: today's behaviour, byte-compatible.  llm: one inferNO-style process serving several ids;
@@ -343,7 +360,7 @@ _SD_KIND_DEFAULTS: Mapping[str, _SdKindRow] = types.MappingProxyType({
     "sd": _SdKindRow("image", ("openai", "sdapi"), False, 120.0, 600.0, 7200.0,
                      False, None, None, "/", None, True),
     "llm": _SdKindRow("chat", ("chat", "embed"), True, 120.0, 86400.0, 604800.0,
-                      True, 1800.0, 1800.0, "/v1/models", 200, False),
+                      True, 1800.0, 1800.0, "/v1/models", 200, False, True),
 })
 _SD_DEADLINE_CAP = 604800.0  # head_timeout / idle_timeout ceiling, seconds: (0, cap]
 
@@ -1310,6 +1327,120 @@ def _sd_may_retry(attempts: int, retries: int, disabled: bool) -> bool:
     return not disabled and attempts <= retries
 
 
+# The abort matrix (ADR 0035, stage 2b): what a failed or aborted send does, one row per reason
+# x kind x bytes_relayed, in ONE pure function so the scheduler holds no policy of its own.
+#   reason None (a crash or an EOF): the stop ladder, one charge, the SAME ticket back at the
+#     head -- unless a byte was already relayed (a stream is never replayed) -- else 502.
+#   "timeout": the kind row's timeout_kills decides ladder and charge together (sd kills and
+#     charges, llm aborts the request and keeps the child); never re-queued; 504.
+#   "client": the upstream is closed and, by default, NOTHING is killed (D-12 amended); the sd
+#     policy sits behind this one switch, an llm app never kills on a client abort.
+#   "force" / "shutdown": the ladder, no charge, never re-queued.
+# `answer` is the closed-table code of a ticket that relayed nothing; None = no answer (the
+# client is gone). A ticket that relayed bytes ends its stream truncated whatever the code.
+_SD_ABORT_KILLS_SD = False
+
+
+class AbortPlan(NamedTuple):
+    ladder: bool  # run the stop ladder (kill the child)
+    charge: bool  # one crash charge against the restart budget
+    retry: bool  # the SAME ticket may go back to the head (still subject to _sd_may_retry)
+    answer: Optional[str]  # the closed-table code answered when no byte was relayed
+
+
+def _sd_abort_plan(kind: str, reason: Optional[str], bytes_relayed: bool) -> AbortPlan:
+    """The abort matrix row for an app *kind* (KeyError for an unknown one), an abort *reason*
+    (None | "timeout" | "client" | "force" | "shutdown"; ValueError otherwise) and whether
+    a byte of the answer already reached the client. PURE."""
+    row = _SD_KIND_DEFAULTS[kind]
+    if reason is None:
+        return AbortPlan(True, True, not bytes_relayed, "model_crashed")
+    if reason == "timeout":
+        return AbortPlan(row.timeout_kills, row.timeout_kills, False, "upstream_timeout")
+    if reason == "client":
+        return AbortPlan(bool(_SD_ABORT_KILLS_SD) and kind == _SD_KIND_DEFAULT, False, False, None)
+    if reason == "force":
+        return AbortPlan(True, False, False, "unload_forced")
+    if reason == "shutdown":
+        return AbortPlan(True, False, False, "shutting_down")
+    raise ValueError("_sd_abort_plan: unknown abort reason")
+
+
+# A strict incremental `Transfer-Encoding: chunked` decoder for a child's streamed answer (R12).
+# Hex digits only in the size line (no extension, no sign, no space, no 0x), at most
+# _SD_CHUNK_DIGITS of them; exactly CRLF after the size and after the data; a trailer section
+# is refused (the zero chunk is followed by the empty line at once); bytes after the end are
+# ignored. A violation is a ValueError; the caller makes it `failed`.
+_SD_CHUNK_DIGITS = 12
+_SD_CHUNK_HEX = frozenset(b"0123456789abcdefABCDEF")
+
+
+class _SdDechunker:
+    """feed(bytes) -> the decoded payload of those bytes; `done` once the terminating chunk and
+    its empty line were seen. Split anywhere: byte by byte decodes like the whole."""
+
+    def __init__(self) -> None:
+        self.done = False
+        self._state = "size"
+        self._digits = bytearray()
+        self._size = 0
+        self._left = 0
+
+    def feed(self, data: bytes) -> bytes:
+        if self.done:
+            return b""
+        out = bytearray()
+        index, count = 0, len(data)
+        while index < count and not self.done:
+            state = self._state
+            if state == "data":
+                take = min(self._left, count - index)
+                out += data[index:index + take]
+                index += take
+                self._left -= take
+                if self._left == 0:
+                    self._state = "data_cr"
+                continue
+            byte = data[index]
+            index += 1
+            if state == "size":
+                if byte in _SD_CHUNK_HEX:
+                    self._digits.append(byte)
+                    if len(self._digits) > _SD_CHUNK_DIGITS:
+                        raise ValueError("chunk size line too long")
+                elif byte == 13 and self._digits:
+                    self._size = int(bytes(self._digits), 16)
+                    self._digits = bytearray()
+                    self._state = "size_lf"
+                else:
+                    raise ValueError("malformed chunk size line")
+            elif state == "size_lf":
+                if byte != 10:
+                    raise ValueError("chunk size line without CRLF")
+                if self._size == 0:
+                    self._state = "last_cr"
+                else:
+                    self._left = self._size
+                    self._state = "data"
+            elif state == "data_cr":
+                if byte != 13:
+                    raise ValueError("chunk data without CRLF")
+                self._state = "data_lf"
+            elif state == "data_lf":
+                if byte != 10:
+                    raise ValueError("chunk data without CRLF")
+                self._state = "size"
+            elif state == "last_cr":
+                if byte != 13:
+                    raise ValueError("a trailer section is refused")
+                self._state = "last_lf"
+            else:  # last_lf
+                if byte != 10:
+                    raise ValueError("the last chunk without CRLF")
+                self.done = True
+        return bytes(out)
+
+
 def decide(head: Optional[TicketView], states: Mapping[str, ModelView],
            resident: Optional[str], now: float) -> Decision:
     """The scheduler's next step for *head* (PURE: reads no clock, writes nothing).
@@ -1746,6 +1877,15 @@ class Supervisor:
 # abort or a shutdown additionally shut the socket down from another thread
 # (on_socket hands it out). The answer is buffered whole (Connection: close, read to
 # EOF) and parsed by http.client.HTTPResponse from the buffer.
+#
+# Stage 2b (ADR 0035): for an llm app _sd_send is given a `sink` (a _SdStream). It reads
+# the response head first (_sd_read_head, bounded by head_timeout and _SD_HEAD_LIMIT),
+# classifies it (_sd_parse_stream_head, _sd_head_streams) and then either falls back to the
+# buffered path above (a non-2xx answer, a JSON answer with a Content-Length) or publishes
+# the head and pumps the body into the sink's bounded byte queue (_sd_pump), de-chunking a
+# chunked body strictly (_SdDechunker) and reading each piece under idle_timeout. The pump
+# only reads and enqueues: it never decides anything about the child (the abort matrix,
+# _sd_abort_plan, does) and never calls the stop ladder.
 
 _SD_SEND_TICK_S = 0.1  # select tick of the upstream exchange (<= 0.2 s)
 _SD_SEND_CHUNK = 64 * 1024  # largest single send()/recv()
@@ -1927,10 +2067,259 @@ def _sd_parse_answer(raw: bytes, limit: int) -> Tuple[int, Tuple[Tuple[str, str]
     return status, relay, body
 
 
+_SD_STREAM_CAP = 256 * 1024  # bytes the stream queue holds before the pump stops reading (R11)
+_SD_STATUS_LINE_RE = re.compile(rb"HTTP/1\.[01] ([0-9]{3})(?: [\x20-\x7e\x80-\xff]*)?")
+_SD_HEADER_LINE_RE = re.compile(rb"([!#$%&'*+.^_`|~0-9A-Za-z-]+):[ \t]*([\x20-\x7e\x80-\xff\t]*?)[ \t]*")
+_SD_STREAM_FRAMING = ("content-type", "content-length", "transfer-encoding", "content-encoding")
+
+
+class _SdStreamHead(NamedTuple):
+    """What the router keeps of a child's response head: the status, the Content-Type (the only
+    header that is ever relayed), and how the body is framed ("chunked" | "length" | "close")."""
+
+    status: int
+    content_type: Optional[str]
+    framing: str
+    length: Optional[int]
+
+
+def _sd_parse_stream_head(head: bytes) -> _SdStreamHead:
+    """Parse a response head (the bytes before the blank line) for the stream path; every
+    defect is UpstreamError("failed"). Refused: a malformed status line (HTTP/1.x only), 1xx and
+    3xx, a non-identity Content-Encoding, Content-Length together with Transfer-Encoding, a
+    Transfer-Encoding other than chunked, a repeated Content-Type / Content-Length /
+    Transfer-Encoding / Content-Encoding, a Content-Length that is not 1-19 digits, a header line
+    that is not `token: value` (an obs-fold, a space before the colon, a bare CR or LF, a NUL or
+    any other control byte). The result carries nothing else: Set-Cookie, Location, Trailer,
+    Upgrade, Keep-Alive, Connection and every unknown header are dropped (R20)."""
+    lines = head.split(b"\r\n")
+    match = _SD_STATUS_LINE_RE.fullmatch(lines[0])
+    if match is None:
+        raise UpstreamError("failed")
+    status = int(match.group(1))
+    if not 100 <= status <= 599 or status < 200 or 300 <= status < 400:
+        raise UpstreamError("failed")
+    seen: Dict[str, str] = {}
+    for line in lines[1:]:
+        found = _SD_HEADER_LINE_RE.fullmatch(line)
+        if found is None:
+            raise UpstreamError("failed")
+        name = found.group(1).decode("ascii").lower()
+        if name in _SD_STREAM_FRAMING:
+            if name in seen:
+                raise UpstreamError("failed")
+            seen[name] = found.group(2).decode("latin-1")
+    if seen.get("content-encoding", "").strip().lower() not in ("", "identity"):
+        raise UpstreamError("failed")
+    encoding, length = seen.get("transfer-encoding"), seen.get("content-length")
+    if encoding is not None and length is not None:
+        raise UpstreamError("failed")
+    if encoding is not None:
+        if encoding.strip().lower() != "chunked":
+            raise UpstreamError("failed")
+        framing, size = "chunked", None
+    elif length is not None:
+        if not _SD_LENGTH_RE.fullmatch(length):
+            raise UpstreamError("failed")
+        framing, size = "length", int(length)
+    else:
+        framing, size = "close", None
+    return _SdStreamHead(status, seen.get("content-type") or None, framing, size)
+
+
+def _sd_head_streams(head: _SdStreamHead) -> bool:
+    """A 2xx answer streams when it is Server-Sent Events or has no Content-Length; every other
+    answer (a non-2xx one, a JSON answer with a length) stays on the buffered path."""
+    if not 200 <= head.status < 300:
+        return False
+    media = (head.content_type or "").split(";", 1)[0].strip().lower()
+    return media == "text/event-stream" or head.framing != "length"
+
+
+class _SdStream:
+    """The seam between the scheduler thread (the pump: put) and the handler thread (get): a
+    bounded byte queue plus the published head. put blocks while the queue holds `cap` bytes
+    (back-pressure: the pump stops reading the child) and ends on the abort Event, the
+    deadline, or the end of the stream; one piece larger than `cap` enters an EMPTY queue.
+    get drains data first and then reports the end: 'end' (clean) or 'trunc' (abnormal)."""
+
+    def __init__(self, head_timeout: Optional[float], idle_timeout: Optional[float],
+                 cap: Optional[int] = None,
+                 on_head: Optional[Callable[["_SdStream"], None]] = None) -> None:
+        self.head_timeout = head_timeout
+        self.idle_timeout = idle_timeout
+        self.cap = _SD_STREAM_CAP if cap is None else int(cap)
+        self.status = 0
+        self.content_type: Optional[str] = None
+        self._on_head = on_head
+        self._cond = threading.Condition()
+        self._parts: Deque[bytes] = collections.deque()
+        self._size = 0
+        self._end: Optional[bool] = None  # None open, True a clean end, False truncated
+
+    @property
+    def size(self) -> int:
+        with self._cond:
+            return self._size
+
+    def publish(self, status: int, content_type: Optional[str]) -> None:
+        """The head is parsed and the answer streams: hand it to the handler (on_head)."""
+        self.status = status
+        self.content_type = content_type
+        if self._on_head is not None:
+            self._on_head(self)
+
+    def put(self, data: bytes, deadline: float, abort_evt: threading.Event) -> None:
+        with self._cond:
+            while True:
+                if self._end is not None or abort_evt.is_set():
+                    raise UpstreamError("aborted")
+                if self._size == 0 or self._size + len(data) <= self.cap:
+                    break
+                left = deadline - _sd_now()
+                if left <= 0:
+                    raise UpstreamError("timeout")
+                self._cond.wait(min(left, _SD_SEND_TICK_S))
+            self._parts.append(data)
+            self._size += len(data)
+            self._cond.notify_all()
+
+    def get(self, timeout: float) -> Tuple[str, bytes]:
+        """('data', bytes) | ('tick', b'') nothing yet | ('end', b'') | ('trunc', b'')."""
+        with self._cond:
+            if not self._parts and self._end is None:
+                self._cond.wait(timeout)
+            if self._parts:
+                data = b"".join(self._parts)
+                self._parts.clear()
+                self._size = 0
+                self._cond.notify_all()
+                return "data", data
+            if self._end is None:
+                return "tick", b""
+            return ("end" if self._end else "trunc"), b""
+
+    def end(self, clean: bool) -> None:
+        """Close the stream; the first call wins."""
+        with self._cond:
+            if self._end is None:
+                self._end = bool(clean)
+            self._cond.notify_all()
+
+
+def _sd_read_head(sock: socket.socket, deadline: float, abort_evt: threading.Event) -> Tuple[bytes, bytes]:
+    """Read to the blank line that ends the response head: (the head without it, the bytes already
+    read past it). More than _SD_HEAD_LIMIT before the blank line is `failed`; EOF first is `eof`."""
+    buf = b""
+    while True:
+        end = buf.find(b"\r\n\r\n")
+        if end >= 0:
+            if end > _SD_HEAD_LIMIT:
+                raise UpstreamError("failed")
+            return buf[:end], buf[end + 4:]
+        if len(buf) > _SD_HEAD_LIMIT:
+            raise UpstreamError("failed")
+        left = _sd_check_go(deadline, abort_evt)
+        ready, _w, _x = select.select([sock], [], [], min(left, _SD_SEND_TICK_S))
+        if not ready:
+            continue
+        try:
+            data = sock.recv(_SD_SEND_CHUNK)
+        except (BlockingIOError, InterruptedError):
+            continue
+        except OSError:
+            raise UpstreamError("aborted" if abort_evt.is_set() else "eof")
+        if not data:
+            raise UpstreamError("aborted" if abort_evt.is_set() else "eof")
+        buf += data
+
+
+def _sd_pump(sock: socket.socket, first: bytes, head: _SdStreamHead, stream: _SdStream,
+             deadline: float, abort_evt: threading.Event) -> None:
+    """Relay the body that follows a published head into *stream*, de-chunking a chunked one.
+    Returns on a clean end (the terminating chunk, Content-Length bytes, or the close of a
+    close-delimited body); raises UpstreamError: eof (cut short), failed (malformed chunking),
+    timeout (the request deadline, or idle_timeout without a byte from the child), aborted."""
+    dechunker = _SdDechunker() if head.framing == "chunked" else None
+    remaining = head.length if head.framing == "length" else None
+    if remaining == 0:
+        return
+    idle = stream.idle_timeout
+    last = _sd_now()
+    pending = first
+    while True:
+        if pending:
+            piece, pending = pending, b""
+            if dechunker is not None:
+                try:
+                    piece = dechunker.feed(piece)
+                except ValueError:
+                    raise UpstreamError("failed")
+            elif remaining is not None:
+                piece = piece[:remaining]
+                remaining -= len(piece)
+            if piece:
+                stream.put(piece, deadline, abort_evt)
+                last = _sd_now()
+            if (dechunker is not None and dechunker.done) or remaining == 0:
+                return
+        wait = _sd_check_go(deadline, abort_evt)
+        if idle is not None:
+            idle_left = last + idle - _sd_now()
+            if idle_left <= 0:
+                raise UpstreamError("timeout")
+            wait = min(wait, idle_left)
+        ready, _w, _x = select.select([sock], [], [], min(wait, _SD_SEND_TICK_S))
+        if not ready:
+            continue
+        try:
+            data = sock.recv(_SD_SEND_CHUNK)
+        except (BlockingIOError, InterruptedError):
+            continue
+        except OSError:
+            raise UpstreamError("aborted" if abort_evt.is_set() else "eof")
+        if not data:
+            if abort_evt.is_set():
+                raise UpstreamError("aborted")
+            if head.framing == "close":
+                return
+            raise UpstreamError("eof")
+        last = _sd_now()
+        pending = data
+
+
+def _sd_relay(sock: socket.socket, limit: int, deadline: float, abort_evt: threading.Event,
+              stream: _SdStream) -> Tuple[int, Tuple[Tuple[str, str], ...], Optional[bytes]]:
+    """The answer of an llm app: the head under head_timeout, then either the buffered path
+    (body bytes, as _sd_parse_answer) or the stream path (body None: the bytes went through
+    *stream*; the returned headers are the Content-Type alone)."""
+    head_deadline = deadline
+    if stream.head_timeout is not None:
+        head_deadline = min(deadline, _sd_now() + stream.head_timeout)
+    head_bytes, rest = _sd_read_head(sock, head_deadline, abort_evt)
+    head = _sd_parse_stream_head(head_bytes) if _sd_status_streams(head_bytes) else None
+    if head is None or not _sd_head_streams(head):
+        raw = head_bytes + b"\r\n\r\n" + rest
+        room = max(limit + _SD_HEAD_LIMIT - len(raw), 0)
+        return _sd_parse_answer(raw + _sd_read_all(sock, room, deadline, abort_evt), limit)
+    stream.publish(head.status, head.content_type)
+    _sd_pump(sock, rest, head, stream, deadline, abort_evt)
+    return head.status, ((("Content-Type", head.content_type),) if head.content_type else ()), None
+
+
+def _sd_status_streams(head_bytes: bytes) -> bool:
+    """True when the status line says 2xx: only then is the strict stream parser applied; any
+    other status goes to the buffered parser, whose 1xx / 3xx / malformed refusals are its own."""
+    match = _SD_STATUS_LINE_RE.fullmatch(head_bytes.split(b"\r\n", 1)[0])
+    return match is not None and match.group(1)[:1] == b"2"
+
+
 def _sd_send(port: int, method: str, path: str, headers: Sequence[Tuple[str, str]], body: bytes,
              deadline: float, abort_evt: threading.Event,
              on_socket: Optional[Callable[[socket.socket], None]] = None,
-             response_limit: Optional[int] = None) -> Tuple[int, Tuple[Tuple[str, str], ...], bytes]:
+             response_limit: Optional[int] = None,
+             sink: Optional[_SdStream] = None
+             ) -> Tuple[int, Tuple[Tuple[str, str], ...], Optional[bytes]]:
     """The ONE upstream send site: one exchange with the child on 127.0.0.1:*port*.
 
     *method* and *path* come from the route table (never the client's request line);
@@ -1942,6 +2331,11 @@ def _sd_send(port: int, method: str, path: str, headers: Sequence[Tuple[str, str
     with the connected socket. The answer is buffered whole under *response_limit*
     (default _SD_DEFAULT_RESPONSE_LIMIT). Returns (status, (("Content-Type", v),) or (),
     body); every failure raises UpstreamError, the socket is always closed.
+
+    With a *sink* (an llm app, stage 2b) a 2xx answer that is an SSE stream or has no
+    Content-Length is relayed through the sink instead: the sink's head callback fires once,
+    the body goes into its bounded queue, and the returned body is None. Any other answer
+    is buffered and returned as above.
     """
     limit = _SD_DEFAULT_RESPONSE_LIMIT if response_limit is None else int(response_limit)
     payload = bytes(body)
@@ -1972,6 +2366,8 @@ def _sd_send(port: int, method: str, path: str, headers: Sequence[Tuple[str, str
         if on_socket is not None:
             on_socket(sock)
         _sd_write(sock, chunks, deadline, abort_evt)
+        if sink is not None:
+            return _sd_relay(sock, limit, deadline, abort_evt, sink)
         raw = _sd_read_all(sock, limit + _SD_HEAD_LIMIT, deadline, abort_evt)
         return _sd_parse_answer(raw, limit)
     except UpstreamError:
@@ -2035,12 +2431,15 @@ _SD_ANSWER_REFUSED = frozenset(("failed", "too_large"))
 class TicketResult(NamedTuple):
     """A finished ticket's answer. A relayed child answer: code None, the child's status
     and body byte-exact. A refusal: the closed-table code and its status, body None (the
-    handler renders the error body). An unload's 200: code None, JSON body."""
+    handler renders the error body). An unload's 200: code None, JSON body. A streamed
+    answer (stage 2b) ends with code None, body None and `stream` set to the _SdStream the
+    handler already drained; a stream that ended abnormally carries a refusal code instead."""
 
     status: int
     code: Optional[str]
     headers: Tuple[Tuple[str, str], ...]
     body: Optional[bytes]
+    stream: Optional[Any] = None
 
 
 def _sd_ticket_error(code: str) -> TicketResult:
@@ -2072,6 +2471,12 @@ class Ticket:
     Event _sd_send watches. `sock` is the upstream socket of a running send (set
     through on_socket under the lock). finish() is set-once: its own small lock makes
     the first call win; it is never taken together with the scheduler Condition.
+
+    Stage 2b: `head_ready` releases the waiting handler; it is set when a stream's head is
+    published AND by finish(), and is NOT `done` (done is set only by finish/_drop, so a client
+    leaving mid-stream still finds the ticket unfinished and cancels it). `stream` is the
+    _SdStream once a head was published, `bytes_relayed` is True from then on: a crash after it
+    is never re-queued.
     """
 
     def __init__(self, kind: str, model: Optional[str], force: bool = False,
@@ -2090,20 +2495,25 @@ class Ticket:
         self.reservation = reservation
         self.attempts = 0
         self.done = threading.Event()
+        self.head_ready = threading.Event()
         self.cancelled = threading.Event()
         self.abort_evt = threading.Event()
         self.abort_reason: Optional[str] = None
         self.result: Optional[TicketResult] = None
         self.sock: Optional[socket.socket] = None
+        self.stream: Optional[_SdStream] = None
+        self.bytes_relayed = False
         self._finish_lock = threading.Lock()
 
     def finish(self, result: Optional[TicketResult]) -> bool:
-        """Store *result* and set `done`; True the first time, False (no change) after."""
+        """Store *result*, set `done` and then `head_ready`; True the first time, False (no
+        change) after."""
         with self._finish_lock:
             if self.done.is_set():
                 return False
             self.result = result
             self.done.set()
+            self.head_ready.set()
             return True
 
     def view(self) -> TicketView:
@@ -2438,10 +2848,15 @@ class Scheduler:
                 self._release_locked(ticket.reservation)
                 result = None
         ticket.finish(result)
+        # A published stream ends AFTER the ticket is done (the handler that sees the end finds
+        # `done` set and cancels nothing): clean only for a relayed answer, else truncated.
+        stream = ticket.stream
+        if stream is not None:
+            stream.end(result is not None and result.code is None)
 
     def _drop(self, ticket: Ticket) -> None:
         """A departed client's popped ticket: body dropped and the reservation released BY
-        THE SCHEDULER (the handler is gone), result None."""
+        THE SCHEDULER (the handler is gone), result None; a published stream ends truncated."""
         with self.cond:
             ticket.body = None
             ticket.sock = None
@@ -2449,6 +2864,17 @@ class Scheduler:
             if self.running is ticket:
                 self.running = None
         ticket.finish(None)
+        stream = ticket.stream
+        if stream is not None:
+            stream.end(False)
+
+    def _publish_stream(self, ticket: Ticket, stream: _SdStream) -> None:
+        """The pump parsed a streamable head: publish the stream to the handler (head_ready, NOT
+        done). From here on a byte may reach the client, so the ticket is never re-queued."""
+        with self.cond:
+            ticket.stream = stream
+            ticket.bytes_relayed = True
+        ticket.head_ready.set()
 
     def _ladder(self, name: str, after: ModelState = ModelState.STOPPED,
                 stopping: bool = True) -> bool:
@@ -2653,6 +3079,13 @@ class Scheduler:
             with self.cond:
                 head.sock = sock
 
+        # An llm app streams (stage 2b): the sink publishes the head to the handler and queues the body.
+        stream: Optional[_SdStream] = None
+        extra: Dict[str, Any] = {}
+        if _SD_KIND_DEFAULTS[spec.kind].streams:
+            stream = _SdStream(spec.head_timeout, spec.idle_timeout,
+                               on_head=lambda published: self._publish_stream(head, published))
+            extra["sink"] = stream
         try:
             if child is None or child.spec.name != target:
                 raise UpstreamError("connect")
@@ -2663,7 +3096,8 @@ class Scheduler:
             answer = _sd_send(child.port, head.method or "POST", head.path or "/",
                               head.headers, head.body or b"",
                               _sd_now() + spec.request_timeout, head.abort_evt,
-                              on_socket=on_socket, response_limit=self.settings.response_limit)
+                              on_socket=on_socket, response_limit=self.settings.response_limit,
+                              **extra)
         except UpstreamError as exc:
             self._send_failed(head, target, spec, exc)
             return
@@ -2675,36 +3109,44 @@ class Scheduler:
             self._drop(head)  # the answer is complete: the child is idle, nothing to kill
             return
         status, headers, body = answer
+        if body is None:
+            self._finish(head, TicketResult(status, None, headers, None, stream))  # a clean stream end
+            return
         self._finish(head, TicketResult(status, None, headers, body))
 
     def _send_failed(self, head: Ticket, target: str, spec: ModelSpec, exc: UpstreamError) -> None:
-        """Classify a failed send by abort_reason (H6, H7, M1). None: a CRASH -- DEAD with
-        group_alive True, one Budget charge, the ladder, then the SAME ticket back at the
-        head while _sd_may_retry allows, else 502 model_crashed. "timeout" (the deadline
-        from dispatch): kind sd -- one charge, the ladder, 504 upstream_timeout, never
-        retried; kind llm (_SdKindRow.timeout_kills False) -- the upstream socket is already
-        closed, 504 upstream_timeout, the child stays READY, no charge, no ladder.
-        "force" / "client" / "shutdown": the ladder only (D-12), never a charge.
+        """Classify a failed send by abort_reason (H6, H7, M1) and act on the abort matrix
+        (_sd_abort_plan: one row per reason x kind x bytes_relayed, ADR 0035). None: a CRASH --
+        DEAD with group_alive True, one Budget charge, the ladder, then the SAME ticket back at
+        the head while _sd_may_retry allows and NO byte was relayed (a stream is never
+        replayed), else 502 model_crashed (a relayed stream just ends truncated). "timeout"
+        (the request deadline, or an llm head / idle timeout): kind sd -- one charge, the
+        ladder, 504 upstream_timeout, never retried; kind llm (_SdKindRow.timeout_kills False)
+        -- the upstream socket is already closed, 504 upstream_timeout (a truncated stream once
+        bytes were relayed), the child stays READY, no charge, no ladder. "client": the
+        upstream is closed and NOTHING is killed (D-12 amended; _SD_ABORT_KILLS_SD is the sd
+        switch), never a charge. "force" / "shutdown": the ladder only, never a charge.
         An answer the relay refuses (kind "failed": 1xx, 3xx, encoded, malformed; or
         "too_large": over response_limit) with no abort is NOT a crash: the child
         answered and stays READY, nothing is charged, retried or stopped, and the
         ticket is finished 502 upstream_failed after that one send (closed table, P28)."""
         tripped = False
-        kills = _SD_KIND_DEFAULTS[spec.kind].timeout_kills
         with self.cond:
             head.sock = None
             reason = head.abort_reason
             if reason is None and exc.kind == "timeout":
                 reason = head.abort_reason = "timeout"
                 head.abort_evt.set()
+            relayed = head.bytes_relayed
             refused = reason is None and exc.kind in _SD_ANSWER_REFUSED
             crash = reason is None and not refused
+            plan = _sd_abort_plan(spec.kind, reason, relayed)
             if refused:
                 self._restarts[target] = 0  # the child answered: it is alive
             if crash:
                 self._state[target] = ModelState.DEAD
                 self._group_alive[target] = True
-            if crash or (reason == "timeout" and kills):
+            if plan.charge and not refused:
                 tripped = self._charge_locked(target)
         if refused:
             log.warning("sd upstream answer refused: model=%s kind=%s attempts=%d",
@@ -2713,14 +3155,14 @@ class Scheduler:
             return
         if crash:
             ok = self._ladder(target, after=ModelState.DEAD, stopping=False)
-        elif reason == "timeout" and not kills:
-            ok = True  # a no-kill abort: the socket is closed, the child stays resident and READY
-        else:
+        elif plan.ladder:
             ok = self._ladder(target)
+        else:
+            ok = True  # a no-kill abort: the socket is closed, the child stays resident and READY
         retry = False
         with self.cond:
             late = head.abort_reason
-            if (crash and ok and late is None and not self.closing
+            if (crash and plan.retry and ok and late is None and not self.closing
                     and _sd_may_retry(head.attempts, spec.retries, self._disabled[target])):
                 retry = True
                 self.queue.appendleft(head)  # the SAME ticket, at the head (FR-10 M9)
@@ -2733,10 +3175,13 @@ class Scheduler:
                         target, exc.kind if crash else "timeout", head.attempts, retry, tripped)
         if retry:
             return
+        # The answer of the abort that finally stood (a later abort can have landed during the
+        # ladder) is the `answer` column of its matrix row (_sd_abort_plan, pinned by D23); the
+        # codes are spelled out here because gate A9 reads the closed table against these calls.
         if late == "force":
             self._finish(head, _sd_ticket_error("unload_forced"))
         elif late == "client":
-            self._drop(head)
+            self._drop(head)  # the client is gone: no answer
         elif late == "shutdown" or (crash and closing):
             self._finish(head, _sd_ticket_error("shutting_down"))
         elif late == "timeout":
@@ -3315,6 +3760,59 @@ def _sd_write_result(handler: "_SdHandler", result: Optional[TicketResult]) -> N
     log.debug("http answer status=%d", result.status)
 
 
+_SD_STREAM_TICK_S = 0.1  # the stream writer's wait for the next piece (also its client-gone cadence)
+
+
+def _sd_write_stream(handler: "_SdHandler", ticket: Ticket, stream: _SdStream) -> None:
+    """Write a published stream: the status line and an ALLOW-listed head (the child's
+    Content-Type, a router-fixed Cache-Control, nosniff, chunked framing for an HTTP/1.1 client
+    and the close -- never a Content-Length, never another child header), then every queued
+    piece as it arrives. The handler thread alone writes the client socket. A clean end writes
+    the terminating chunk; an abnormal end (the child dropped, an idle abort, a force unload,
+    shutdown) closes WITHOUT it, so a truncated answer cannot pass as a complete one. A write
+    error or a departed client (polled between pieces, also while nothing arrives) cancels the
+    ticket: the scheduler closes the upstream and kills nothing."""
+    scheduler = handler.server.scheduler
+    chunked = handler.request_version >= "HTTP/1.1"
+    handler._sd_replied = True
+    handler.close_connection = True
+    handler.send_response(stream.status)
+    if stream.content_type:
+        handler.send_header("Content-Type", stream.content_type)
+    handler.send_header("Cache-Control", "no-cache")
+    handler.send_header("X-Content-Type-Options", "nosniff")
+    if chunked:
+        handler.send_header("Transfer-Encoding", "chunked")
+    handler.send_header("Connection", "close")
+    handler.end_headers()
+    last_poll = time.monotonic()
+    try:
+        handler.wfile.flush()
+        while True:
+            kind, data = stream.get(_SD_STREAM_TICK_S)
+            if kind == "data":
+                handler.wfile.write((b"%x\r\n" % len(data)) + data + b"\r\n" if chunked else data)
+                handler.wfile.flush()
+            elif kind == "end":
+                if chunked:
+                    handler.wfile.write(b"0\r\n\r\n")
+                    handler.wfile.flush()
+                log.debug("http stream ended status=%d", stream.status)
+                return
+            elif kind == "trunc":
+                log.debug("http stream truncated status=%d", stream.status)
+                return
+            now = time.monotonic()
+            if kind == "tick" or now - last_poll >= _SD_CLIENT_POLL_S:
+                last_poll = now
+                if _sd_client_gone(handler):
+                    log.debug("http client gone mid-stream")
+                    scheduler.cancel(ticket)
+                    return
+    except OSError:
+        scheduler.cancel(ticket)  # the client stopped reading: a no-kill abort, not a crash
+
+
 def _sd_client_gone(handler: "_SdHandler") -> bool:
     """Client-EOF poll while nothing is written (adapted copy of llm-router's
     _rt_client_gone): readable plus a peeked b"" (or an OSError) means the client left.
@@ -3661,12 +4159,17 @@ def _sd_pipeline(handler: "_SdHandler", method: str, started: float) -> None:
     ticket = scheduler.submit_request(model, "POST", upstream, list(handler.headers.items()), body, reservation)
     handler._sd_ticket = ticket
     body = b""
-    while not ticket.done.wait(_SD_CLIENT_POLL_S):
+    # head_ready is set by a stream's head AND by finish(): either way there is something to write.
+    while not ticket.head_ready.wait(_SD_CLIENT_POLL_S):
         if _sd_client_gone(handler):
             log.debug("http client gone while waiting: model=%s", _log_value(model))
             scheduler.cancel(ticket)
             handler.close_connection = True
             return
+    stream = ticket.stream
+    if stream is not None:
+        _sd_write_stream(handler, ticket, stream)
+        return
     _sd_write_result(handler, ticket.result)
 
 

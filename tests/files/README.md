@@ -260,8 +260,10 @@ model ids on one loopback port (`GET /v1/models`, `GET /health`, and
 `POST /v1/chat/completions`, `/v1/messages`, `/v1/embeddings`, `/v1/rerank` with
 canned JSON or an SSE stream). It does not listen while it "loads"
 (`--start-delay`), can answer 404 on `/v1/models` after the bind
-(`--ready-404-for`), stalls, streams slowly, drops a stream or adds response
-headers on command. Its `.events.jsonl` ledger records `start` (pid), `request`
+(`--ready-404-for`), stalls, streams slowly (`--event-delay`, `--think-gap`,
+`--event-bytes` to flood), drops a stream (`--drop-after`), answers a fixed
+error status (`--answer-status`) or adds response headers (`--head-extra`,
+`--head-pad` for an oversize head) on command. Its `.events.jsonl` ledger records `start` (pid), `request`
 (body SHA, header names, the two `anthropic-*` values), `client_gone` and
 `closed_by_peer`. Same rules as the sd stub: metadata only, no body or secret on
 any output, every symbol prefixed `tf`.
