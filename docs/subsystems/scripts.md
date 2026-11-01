@@ -44,6 +44,7 @@ links:
   - gpu-router
   - 0034-sd-router-a-supervisor-and-proxy-for-sd-server
   - 0035-one-gpu-several-apps
+  - adding-an-mcp-server
 ---
 
 # Scripts & MCP Servers
@@ -118,6 +119,9 @@ tool of its own but relays its children's tools under their own names
 HTTP instead of stdio `Scripts/mcp-proxy.py:serve_http`.
 The decision to fold `mcp-clangd` and `mcp-cuda` into `mcp-purity` behind the
 `purity_call` entry point is recorded in [[0001-purity-server-unification]].
+Adding a server — the skeleton, its generated regions, every fleet table and gate
+it must join, and how it is registered — is the step-by-step
+[[adding-an-mcp-server]].
 
 **A refusal of a name the caller sent points at the closest real one.** An
 unknown function, an unknown parameter, and the proxy's unknown tool each end
