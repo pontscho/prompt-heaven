@@ -1,15 +1,18 @@
 ---
 name: 0036-own-code-not-a-remote-server
 type: adr
-status: draft
+status: active
 title: Own code, not a remote server, for Google Drive, Calendar and Sheets
 description: Decision to reach Google Drive, Calendar and Sheets through the repo's own stdlib MCP server, Scripts/mcp-gd.py behind one gd_call tool, rather than through a remote Google MCP server -- an installed-app OAuth client with PKCE whose client secret is a new optional argument of the _mcp_oauth canonical source, a token store under a thread lock, an flock and a reread, a host-local verified-TLS transport to a fixed host table, default-closed owner switches against invitation mail, formula injection, untrusted remote text and local-file abuse (D11-D16), the 24000 COMPOSED ceiling, download and upload roots as launch flags with no default directory, the three review rounds and what each changed, the alternatives rejected, the owner-unconfirmed defaults, and the declared limits -- among them the fleet-wide stdin gaps this server closed for itself only.
-targets:
+sources:
   - Scripts/mcp-gd.py
   - Scripts/_mcp_oauth.py:_oauth_exchange_request
   - Scripts/_mcp_oauth.py:_oauth_refresh_request
   - tests/test_mcp_gd.py
   - tests/test_mcp_oauth.py
+verified:
+  commit: 7787308
+  date: 2026-11-02
 links:
   - mcp-gd
   - generated-regions

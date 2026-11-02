@@ -1,13 +1,16 @@
 ---
 name: mcp-gd
 type: component
-status: draft
+status: active
 title: mcp-gd — the Google Drive, Calendar and Sheets server
 description: The stdio MCP server behind one gd_call tool for Google Drive, Calendar and Sheets -- twenty functions validated before any token read or socket, a strict 0600 config with default-closed owner switches, CLI-flag download and upload roots with name-based protected classes, an installed-app OAuth login with PKCE and a client secret through the generated _mcp_oauth core, a token store under a thread lock, an flock and a reread, verified TLS to a fixed host table with no redirect and no proxy, the untrusted reply envelope under the 24000 COMPOSED ceiling, how it is tested and what it declares rather than gates.
-targets:
+sources:
   - Scripts/mcp-gd.py
   - tests/test_mcp_gd.py
   - ClaudeCode/skills/mcp-gd/SKILL.md
+verified:
+  commit: cfc5590
+  date: 2026-11-02
 links:
   - 0036-own-code-not-a-remote-server
   - generated-regions
@@ -39,10 +42,9 @@ decision below, is [[0036-own-code-not-a-remote-server]]. The model-facing
 reference — every function, parameter and refusal code — is the skill
 `ClaudeCode/skills/mcp-gd/SKILL.md`.
 
-**Status of this page.** The server, its suite and the skill exist in the
-working tree and are not committed yet, so this page is `draft` and carries
-`targets:` instead of `sources:` / `verified:` (a `verified.commit` cannot vouch
-for code no commit holds). It is promoted once the code lands. The smoke table
+**Status of this page.** The server and its suite landed in `7787308` and the
+skill in `cfc5590`; the page was written while the code was uncommitted and was
+promoted to `active` against those commits. The smoke table
 carries the server as unregistered `Scripts/_mcp_smoke_test.py:SERVERS`; the
 registration in `~/.claude.json` and the mcp-proxy child on the Linux host are
 the owner's steps, and this page does not describe them beyond the launch line.
