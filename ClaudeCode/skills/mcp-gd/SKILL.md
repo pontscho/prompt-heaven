@@ -75,8 +75,8 @@ Refusal (`isError: true`): `{"error":{"code":"<code>","message":"<one clean line
 |-|-|
 | `invalid_params` | unknown function / parameter, a missing or malformed value, a policy refusal (send_updates, attendee domain, formula, local path) |
 | `internal` | a handler crash; the message is the exception type only |
-| `not_logged_in` | no token file yet: run `mcp-gd.py login` |
-| `relogin` | refresh token rejected (Testing-status tokens expire after 7 days): run `login` again |
+| `not_logged_in` | no token file yet (operator) |
+| `relogin` | the refresh token was rejected (operator) |
 | `token_endpoint` | the token endpoint refused, rate-limited or was unavailable |
 | `token_store` | the token file, its lock or its directory failed a check |
 | `not_configured` | the server holds no config (not reachable through the normal launch) |
@@ -94,6 +94,15 @@ Refusal (`isError: true`): `{"error":{"code":"<code>","message":"<one clean line
 | `local_io` | a local open/read/write failed |
 | `bad_location` | a resumable upload session URL failed the check |
 | `upload_stalled` | a resumable upload made no progress within its retries |
+
+**Operator-side refusals.** `not_logged_in`, `relogin`, `token_store`, `token_endpoint`,
+`not_configured` and `tls`, and the `invalid_params` refusals that say local writes or uploads
+are disabled, are not fixed by changing the call: the operator must act (log in again, fix the
+config, the token file or the launch flags). Report the code and message to the user and do not
+retry in a loop. The owner switches `allow_send_updates`, `attendee_domains` and
+`allow_formulas` are the operator's too. See setup.md next to this file for login and
+configuration problems: [./setup.md](./setup.md) (absolute path:
+`~/.claude/skills/p/skills/mcp-gd/setup.md`).
 
 ## Drive
 
@@ -223,43 +232,3 @@ Ranges are A1 notation, validated before any request: `Sheet1!A1:B2`, `'My Sheet
 
 ### `sheets_create`
 `title` (required), `sheet_titles` (1-50, unique). Reply: `spreadsheetId`, `spreadsheetUrl`, ...
-
-## Launch and configuration (owner)
-
-```
-python3 Scripts/mcp-gd.py --config PATH [--project-root DIR] [--download-dir DIR] [--upload-root DIR ...] [--debug] [--log-file PATH]
-python3 Scripts/mcp-gd.py login --config PATH [--no-browser] [--timeout S]
-```
-
-- `--config PATH` (required): a JSON file, mode 0600, owned by you, in a directory not group/other
-  writable. A bad config or flag exits 2 before the server starts; the message names the key or
-  flag, never a value.
-- `--download-dir DIR`: the ONLY directory a download may be saved into (created 0700 one level if
-  missing). Refused: relative, `/`, `$HOME`, the token directory or anything above or inside it, a
-  secret or system directory. No default.
-- `--upload-root DIR` (repeatable, needs `--project-root`): an existing directory inside
-  `--project-root` a `local_path` upload may read from; must not hold the token directory.
-- `--project-root DIR`: the containment base of the upload roots; not `/` or `$HOME`.
-
-Config keys (strict JSON; unknown keys and repeated keys refused):
-
-| key | required | default | meaning |
-|-|-|-|-|
-| `client_id`, `client_secret` | yes | | the Desktop OAuth client from your Google Cloud project |
-| `token_file` | yes | | absolute, normalised path of the 0600 token file (not ending `.lock` / `.tmp`) |
-| `scopes` | yes | | non-empty subset of `https://www.googleapis.com/auth/drive`, `.../auth/calendar`, `.../auth/spreadsheets` |
-| `login_port` | no | `0` (ephemeral) | fixed loopback port for `login` (use one for an SSH port forward) |
-| `inline_download_bytes` | no | `16000` | inline download cap in raw bytes |
-| `max_transfer_bytes` | no | 256 MiB | cap on one download or upload |
-| `request_timeout` | no | `60` | seconds per request (1-600) |
-| `protected_paths` | no | `[]` | extra project-relative paths never read or written |
-| `allow_send_updates` | no | `false` | let `send_updates` mail invitations |
-| `attendee_domains` | no | `[]` (no restriction) | lowercase domains attendees must belong to |
-| `allow_formulas` | no | `false` | allow formula cells under `USER_ENTERED` |
-
-**Login.** `mcp-gd.py login --config PATH` listens on `127.0.0.1` only, prints the authorize URL to
-stderr (and opens a browser unless `--no-browser`), exchanges the code with PKCE and the client
-secret, and writes the token file 0600. On a headless host either forward the port
-(`ssh -L <login_port>:127.0.0.1:<login_port> host`, with a fixed `login_port` in the config) or log
-in on another machine and copy the token file (0600). While the Google app is in **Testing**
-publishing status the refresh token expires after 7 days: the error is `relogin`; run `login` again.

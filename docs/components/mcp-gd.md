@@ -40,14 +40,24 @@ repo's own code, stdlib only on Python 3.9, talking to Google's REST APIs over
 verified TLS; why it is not one of the remote Google MCP servers, and every
 decision below, is [[0036-own-code-not-a-remote-server]]. The model-facing
 reference — every function, parameter and refusal code — is the skill
-`ClaudeCode/skills/mcp-gd/SKILL.md`.
+`ClaudeCode/skills/mcp-gd/SKILL.md`. The operator half — the one-time Google
+Cloud setup, every config key with its default, the launch flags and what
+`check_flags` refuses, the `login` procedure, the 7-day Testing-status expiry,
+a troubleshooting table of the operator-side refusal codes and the registration
+shapes — is the sibling file `ClaudeCode/skills/mcp-gd/setup.md`, split out by
+owner decision so it is not loaded into the model's context on every skill
+activation; SKILL.md keeps one paragraph listing the operator-side codes and
+pointing at it. That file is not yet in this page's `sources`: it is
+uncommitted, and every source must exist at `verified.commit`, so it joins the
+list when the page is next verified against the commit that contains it.
 
 **Status of this page.** The server and its suite landed in `7787308` and the
 skill in `cfc5590`; the page was written while the code was uncommitted and was
 promoted to `active` against those commits. The smoke table
 carries the server as unregistered `Scripts/_mcp_smoke_test.py:SERVERS`; the
 registration in `~/.claude.json` and the mcp-proxy child on the Linux host are
-the owner's steps, and this page does not describe them beyond the launch line.
+the owner's steps, described for the operator in `setup.md` and not on this
+page beyond the launch line.
 
 ## The launch line and the config
 
