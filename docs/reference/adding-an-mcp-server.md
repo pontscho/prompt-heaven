@@ -281,6 +281,7 @@ These came from the recon behind this page and were not proven from the code:
 - A copy deployment of the proxy on another host (copy steps, restart): no page
   describes one, and the owner restarts a live proxy.
 - That the `tests/README.md` roster is maintained; it looked stale.
-- Whether a provider's token endpoint needs a `client_secret` the OAuth builders in
-  `Scripts/_mcp_oauth.py` do not send — an external fact about the provider, not a
-  property of this tree.
+- Whether a provider's token endpoint needs a `client_secret` — an external fact
+  about the provider, not a property of this tree. The OAuth builders in
+  `Scripts/_mcp_oauth.py` send one only when the host passes the optional
+  keyword-only `client_secret`.

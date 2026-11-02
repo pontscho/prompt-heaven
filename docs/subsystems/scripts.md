@@ -45,6 +45,8 @@ links:
   - 0034-sd-router-a-supervisor-and-proxy-for-sd-server
   - 0035-one-gpu-several-apps
   - adding-an-mcp-server
+  - mcp-gd
+  - 0036-own-code-not-a-remote-server
 ---
 
 # Scripts & MCP Servers
@@ -140,9 +142,10 @@ the servers that learned this later (forge, jenkins, tshark, context7, lldb,
 gdc and the three legacy LSP servers) the sentence is the second generated
 block, `Scripts/_mcp_dispatch.py:_unknown_params_refusal`, read against a hand
 `ACCEPTED_PARAMS` table per function; the servers that refused first still
-write it by hand. mcp-sandbox and mcp-skill refuse an unknown key from their
-first commit through the same generated block, read against their own tables
-`Scripts/mcp-sandbox.py:_RUN_PARAMS` and `Scripts/mcp-skill.py:ACCEPTED`. The check is a pure function of the params and the table, so
+write it by hand. mcp-sandbox, mcp-skill and mcp-gd refuse an unknown key from
+their first commit through the same generated block, read against their own
+tables `Scripts/mcp-sandbox.py:_RUN_PARAMS`, `Scripts/mcp-skill.py:ACCEPTED` and
+`Scripts/mcp-gd.py:ACCEPTED`. The check is a pure function of the params and the table, so
 it runs before anything that can wait or fail for another reason: before forge
 reads its config `Scripts/mcp-forge.py:handle_forge_call`, before jenkins
 injects its project-scope `job_path` (so the injected key is never what is
@@ -204,10 +207,11 @@ has its reply suppressed. For the LSP servers (`lsp-cancel`), the generated
 (`pg-cancel`), a `CancelRequest` carrying the captured `BackendKeyData` goes out
 on a second socket and the worker drains the error through `ReadyForQuery`
 before releasing the connection `Scripts/mcp-postgres.py:send_cancel_request`.
-For context7, jenkins, webfetch, search and skill (`reply-only`), the reply is suppressed
+For context7, jenkins, webfetch, search, skill and gd (`reply-only`), the reply is suppressed
 and the worker thread runs to its own timeout — for search, a call waiting on or
-holding an endpoint lock runs to its end, and for skill, the runner HTTP call
-runs to its own deadline `tests/test_cancel.py:FLEET`. The addendum to [[0008-a-serialized-read-loop-looks-like-a-dead-server]]
+holding an endpoint lock runs to its end, for skill, the runner HTTP call
+runs to its own deadline, and for gd, the Google call (a mutation included)
+completes at Google `tests/test_cancel.py:FLEET`. The addendum to [[0008-a-serialized-read-loop-looks-like-a-dead-server]]
 records the decision, and `tests/test_cancel.py` gates it ([[tests]]).
 
 The unregistered servers below were converted too, even though they never
@@ -288,6 +292,25 @@ the smoke check runs both as unregistered servers `Scripts/_mcp_smoke_test.py:SE
   (`--runner-url`, `--runner-token-file`). ai-soul reaches it as an mcp-proxy
   child with `relist` on. Its tiers, file hygiene, answer shape and the runner
   client are [[mcp-skill]].
+
+One more server sits outside the table because it is new and not registered yet:
+the smoke check runs it as unregistered `Scripts/_mcp_smoke_test.py:SERVERS`.
+
+- `Scripts/mcp-gd.py` (`gd_call`: seven `drive_*`, seven `cal_*` and six
+  `sheets_*` functions `Scripts/mcp-gd.py:FUNCTIONS`) is the Google Drive,
+  Calendar and Sheets server, the repo's own stdlib code rather than a remote
+  Google MCP server ([[0036-own-code-not-a-remote-server]]). Its command line is
+  `--config PATH` (a strict 0600 JSON file holding the OAuth client and the
+  default-closed owner switches `Scripts/mcp-gd.py:load_config`), the local-file
+  roots `--download-dir`, `--upload-root` and `--project-root`
+  `Scripts/mcp-gd.py:check_flags`, `--debug`/`--log-file`, and a `login`
+  subcommand for the installed-app OAuth flow `Scripts/mcp-gd.py:run_login`.
+  It is the `_mcp_oauth` source's second host beside llm-router
+  ([[generated-regions]]), validates every argument before it reads a token or
+  opens a socket, and flags every reply `untrusted`. Its config, token store,
+  transport, envelope and declared limits are [[mcp-gd]]; the model-facing
+  reference is `ClaudeCode/skills/mcp-gd/SKILL.md`. Registration on the Mac and
+  the mcp-proxy child on the Linux host are owner steps.
 
 Superseded, not registered — their capabilities were folded into `purity_call`,
 which is the live route for all three: `mcp-clangd.py` (C/C++), `mcp-lua-lsp.py`
