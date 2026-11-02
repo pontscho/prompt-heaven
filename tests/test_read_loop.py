@@ -196,6 +196,9 @@ FLEET = {
                         "single LSP backend, one lock; unregistered (purity_call)"),
     "mcp-forge.py":    ("forge-stdin",    "pool",      "forge-call",     "arg",
                         "no serialization needed"),
+    "mcp-gd.py":       ("gd-stdin",       "pool",      "gd-call",        "arg",
+                        "blocking Google HTTPS calls need a thread; the token "
+                        "refresh is the only shared state, under one lock"),
     "mcp-gdc.py":      ("gdc-stdin",      "coroutine", None,             None,
                         "per-browser-target lane lock; CdpSession id counter"),
     "mcp-git.py":      ("git-stdin",      "pool",      "git-call",       "arg",
@@ -236,7 +239,7 @@ FLEET = {
 
 # Declared totals, so a silent re-classification of one server trips a case
 # rather than sliding through as "the table matches the table".
-DECLARED_POOL = 11
+DECLARED_POOL = 12
 DECLARED_COROUTINE = 8
 
 # Both spellings create a task.  Gating one would fail a correct refactor.

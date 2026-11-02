@@ -468,11 +468,116 @@ def group_c(chk):
                                "body %r" % body_text(body))
         return problems
 
+    # D1 (mcp-gd plan): an optional RFC 6749 2.3.1 client_secret on the two builders.
+    # The golden bodies were captured from the builders BEFORE the parameter existed.
+    def c6(mod):
+        secret = sentinel()
+        _url, _headers, body = mod._oauth_exchange_request(provider(mod), "app_tf", "code_tf", "ver_tf", "http://localhost:1455/cb", client_secret=secret)
+        pairs, fields = form_fields(body)
+        keys = [k for k, _v in pairs]
+        problems = problem_if(keys.count("client_secret") != 1, "client_secret appears %d times" % keys.count("client_secret"))
+        problems += problem_if(fields.get("client_secret") != secret, "client_secret value %r" % fields.get("client_secret"))
+        problems += problem_if("code_verifier" not in keys or "client_secret" not in keys or keys.index("client_secret") < keys.index("code_verifier"), "client_secret is not after code_verifier: %s" % ",".join(keys))
+        return problems
+
+    def c7(mod):
+        _url, _headers, body = mod._oauth_exchange_request(provider(mod), "app_tf", "code_tf", "ver_tf", "http://localhost:1455/cb")
+        want = b"grant_type=authorization_code&code=code_tf&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fcb&client_id=app_tf&code_verifier=ver_tf"
+        _url, _headers, empty = mod._oauth_exchange_request(provider(mod), "app_tf", "code_tf", "ver_tf", "http://localhost:1455/cb", client_secret="")
+        return problem_if(body != want, "no-secret exchange body %r differs from the golden bytes" % body) + problem_if(empty != want, "empty-secret exchange body %r differs from the golden bytes" % empty)
+
+    def c8(mod):
+        secret = sentinel()
+        problems = []
+        for row in (provider(mod), openai_provider(mod)):
+            _url, _headers, body = mod._oauth_refresh_request(row, "app_tf", "rt_tf", client_secret=secret)
+            _pairs, fields = form_fields(body)
+            problems += problem_if(fields.get("client_secret") != secret, "%s: client_secret %r" % (row.name, fields.get("client_secret")))
+            problems += problem_if("scope" in fields, "%s: refresh carries scope" % row.name)
+        return problems
+
+    def c9(mod):
+        problems = []
+        _url, _headers, body = mod._oauth_refresh_request(provider(mod), "app_tf", "rt_tf")
+        problems += problem_if(body != b"grant_type=refresh_token&refresh_token=rt_tf&client_id=app_tf", "no-secret refresh body %r differs from the golden bytes" % body)
+        _url, _headers, body = mod._oauth_refresh_request(provider(mod, resource="https://api.tf.invalid/v1"), "app_tf", "rt_tf")
+        problems += problem_if(body != b"grant_type=refresh_token&refresh_token=rt_tf&client_id=app_tf&resource=https%3A%2F%2Fapi.tf.invalid%2Fv1", "no-secret resource refresh body %r differs from the golden bytes" % body)
+        return problems
+
+    def c10(mod):
+        secret = "a&b=c+d%e/fé中"
+        problems = []
+        for build in (lambda: mod._oauth_exchange_request(provider(mod), "app_tf", "code_tf", "ver_tf", "http://localhost:1455/cb", client_secret=secret), lambda: mod._oauth_refresh_request(provider(mod), "app_tf", "rt_tf", client_secret=secret)):
+            body = build()[2]
+            problems += problem_if(not isinstance(body, bytes) or any(b > 127 for b in body), "body is not pure ASCII bytes")
+            problems += problem_if(urllib.parse.parse_qs(body_text(body)).get("client_secret") != [secret], "secret did not round-trip through parse_qs")
+            problems += problem_if(b"&b=" in body, "a raw & of the secret reached the body")
+        return problems
+
+    def c11(mod):
+        canary = sentinel()
+        problems = []
+        for what, build in (("exchange", lambda v: mod._oauth_exchange_request(provider(mod), "app_tf", "code_tf", "ver_tf", "http://localhost:1455/cb", client_secret=v)), ("refresh", lambda v: mod._oauth_refresh_request(provider(mod), "app_tf", "rt_tf", client_secret=v))):
+            for value in (123, b"bytes", None, ["x"], canary.encode()):
+                try:
+                    build(value)
+                except ValueError as exc:
+                    problems += problem_if(str(exc) != "client_secret", "%s: %r raised ValueError(%r), wanted ValueError('client_secret')" % (what, value, str(exc)))
+                    problems += problem_if(canary in "%s%r" % (exc, exc), "%s: the value is in the error" % what)
+                except Exception as exc:
+                    problems.append("%s: %r raised %s, wanted ValueError" % (what, value, type(exc).__name__))
+                else:
+                    problems.append("%s: non-str %r was accepted" % (what, value))
+        return problems
+
+    def c12(mod):
+        canary = sentinel()
+        problems = []
+        for what, build in (("exchange", lambda v: mod._oauth_exchange_request(provider(mod), "app_tf", "code_tf", "ver_tf", "http://localhost:1455/cb", client_secret=v)), ("refresh", lambda v: mod._oauth_refresh_request(provider(mod), "app_tf", "rt_tf", client_secret=v))):
+            for bad in ("a b", " " + canary, canary + " ", canary + "\n", canary + "\r\n", canary + "\t", canary + "\x00", "a\x00", "a\x7fb", "a\x1bb", "a\x85b", "a\u00a0b", "a\u2028b", "a\ud800b"):
+                try:
+                    build(bad)
+                except ValueError as exc:
+                    problems += problem_if(canary in "%s%r" % (exc, exc), "%s: %r: the value is in the error" % (what, bad))
+                except Exception as exc:
+                    problems.append("%s: %r raised %s, wanted ValueError" % (what, bad, type(exc).__name__))
+                else:
+                    problems.append("%s: %r was accepted" % (what, bad))
+        return problems
+
+    def c13(mod):
+        canary = sentinel()
+        row = provider(mod)
+        problems = problem_if(canary in repr(row), "the provider repr holds the canary")
+        mod._oauth_refresh_request(row, "app_tf", "rt_tf", client_secret=canary)
+        problems += problem_if(canary in repr(row) or "client_secret" in mod.OAuthProvider.__slots__, "the provider row carries a client secret")
+        for status, body in ((400, json.dumps({"error": "invalid_grant", "error_description": canary}).encode()), (500, canary.encode()), (200, json.dumps({"access_token": canary + " x"}).encode()), (200, canary.encode())):
+            try:
+                mod._oauth_parse_token_response(status, body, NOW, "rt_tf")
+            except mod.OAuthError as exc:
+                problems += ["status %d: %s in the error" % (status, n) for n in leaks(exc, [canary])]
+        return problems
+
+    def c14(mod):
+        with open(H.repo_path("Scripts", "llm-router.py"), encoding="utf-8") as fh:
+            text = fh.read()
+        return (problem_if("def _oauth_exchange_request(provider, client_id, code, verifier, redirect_uri, *, client_secret=\"\"):" not in text, "llm-router's generated region lacks the exchange signature")
+                + problem_if("def _oauth_refresh_request(provider, client_id, refresh_token, *, client_secret=\"\"):" not in text, "llm-router's generated region lacks the refresh signature"))
+
     chk.case(GC, "C1 exchange-form", c1)
     chk.case(GC, "C2 refresh-no-scope-resource", c2)
     chk.case(GC, "C3 refresh-issued-client-id", c3)
     chk.case(GC, "C4 device-usercode-json", c4)
     chk.case(GC, "C5 device-poll-json", c5)
+    chk.case(GC, "C6 exchange-secret-after-verifier", c6)
+    chk.case(GC, "C7 exchange-no-secret-golden", c7)
+    chk.case(GC, "C8 refresh-secret-no-scope", c8)
+    chk.case(GC, "C9 refresh-no-secret-golden", c9)
+    chk.case(GC, "C10 secret-percent-encoded", c10)
+    chk.case(GC, "C11 secret-non-str-refused", c11)
+    chk.case(GC, "C12 secret-space-control-refused", c12)
+    chk.case(GC, "C13 secret-not-in-row-or-errors", c13)
+    chk.case(GC, "C14 llm-router-region-signature", c14)
 
 
 # --- D. token response ------------------------------------------------------------

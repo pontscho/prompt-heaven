@@ -202,6 +202,10 @@ FLEET = {
                         "same shape as clangd, from which it was copied"),
     "mcp-forge.py":    (W_HANDLE, D_PRESENT,
                         "tabs; layer D sits after narrow (ValueError, OSError)"),
+    "mcp-gd.py":       (W_HANDLE, D_PRESENT,
+                        "layer D sits in handle_gd_call after the narrow \
+GdArgError and GdError refusals; error.code internal, exception type only; \
+driven live through McpServer.run() in tests/test_mcp_gd.py R4-R6"),
     "mcp-gdc.py":      (W_DISPATCH, D_NONE_FAMILY,
                         "handle_gdc_call ends in `return await handler(...)`"),
     "mcp-git.py":      (W_HANDLE, D_NONE_OWN,
@@ -251,8 +255,8 @@ message rather than an f-string"),
 
 # Declared totals, so a silent re-classification of one server trips a case
 # rather than sliding through as "the table matches the table".
-DECLARED_W = 19
-DECLARED_D = 11
+DECLARED_W = 20
+DECLARED_D = 12
 
 # ---------------------------------------------------------------------------
 # the rule, as data

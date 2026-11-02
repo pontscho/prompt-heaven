@@ -458,6 +458,10 @@ STRICT_JSON_EXCEPTIONS = {
     ("mcp-purity.py", "_RegexWorker._ask", "loads"):
         "the server's own regex worker subprocess answering on a private "
         "length-prefixed pipe the server spawned; not a peer",
+    ("mcp-gd.py", "_refuse_duplicate_keys_parse", "loads"):
+        "a second pass over the operator's config text _strict_loads already "
+        "accepted, only to refuse duplicate keys; _strict_loads takes no "
+        "object_pairs_hook",
     ("mcp-sandbox.py", "_refuse_duplicate_keys_parse", "loads"):
         "a second pass over the operator's config text _strict_loads already "
         "accepted, only to refuse duplicate keys; _strict_loads takes no "

@@ -207,6 +207,13 @@ FLEET = {
                                     "waiter"),
     "mcp-forge.py":    (KILL,       "run_command's build/test child is adopted "
                                     "and its process group killed on cancel"),
+    "mcp-gd.py":       (REPLY_ONLY, "the Google HTTPS call runs to its own "
+                                    "request_timeout in the worker thread; a "
+                                    "cancelled mutation still completes at "
+                                    "Google and only the reply is dropped; no "
+                                    "connection is closed on cancel (proven "
+                                    "live through McpServer.run() in "
+                                    "tests/test_mcp_gd.py R1-R3)"),
     "mcp-gdc.py":      (TASK,       "coroutine handlers: the CDP await is "
                                     "cancelled and the lane lock released"),
     "mcp-git.py":      (KILL,       "handle_git_call's git child is adopted "
@@ -260,7 +267,7 @@ DECLARED_TASK = 3
 DECLARED_KILL = 6
 DECLARED_LSP_CANCEL = 4
 DECLARED_PG_CANCEL = 1
-DECLARED_REPLY_ONLY = 5
+DECLARED_REPLY_ONLY = 6
 
 # A `kill` server's spawn sites a cancel does NOT reach, by (file, enclosing
 # function), each with the reason it may outlive the request that spawned it.

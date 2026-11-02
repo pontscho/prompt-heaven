@@ -150,10 +150,23 @@ SERVERS = [
     # mcp-skill.py with no skill root serves an empty index: no placeholder.
     {"file": "mcp-skill.py",    "tool": "skill_call",    "args": [], "registered": False,
      "forced_exc_code": -32602},
+    # mcp-gd.py needs a config FILE (0600, a client secret inside), so its row
+    # names a placeholder too: every launch path replaces GD_CONFIG_TOKEN with a
+    # file generated at runtime from the ONE pure text helper
+    # _gd_smoke_config_text below. Its token_file names a path that does NOT
+    # exist: the server validates every argument before it reads a token or
+    # opens a socket, so no probe of this harness can dial Google. Like the two
+    # runners above it refuses the forced-exc probe's non-object params as
+    # -32602 before any handler runs.
+    {"file": "mcp-gd.py",       "tool": "gd_call",
+     "args": ["--config", "{gd_config}"], "registered": False,
+     "forced_exc_code": -32602},
 ]
 
 # The argv token a launch path replaces with a generated mcp-sandbox config.
 SANDBOX_CONFIG_TOKEN = "{sandbox_config}"
+# The argv token a launch path replaces with a generated mcp-gd config.
+GD_CONFIG_TOKEN = "{gd_config}"
 _SANDBOX_SBX = os.path.join(_REPO_DIR, "ClaudeCode", "skills", "sandbox-run", "scripts", "sbx")
 
 
@@ -180,6 +193,24 @@ def _sandbox_smoke_config_text(work_root):
             "max_stdin_bytes": 1048576, "max_args": 64, "max_arg_chars": 4096,
             "max_concurrent": 2, "min_free_bytes": 1073741824,
         },
+    }, indent=2) + "\n"
+
+def _gd_smoke_config_text(token_path):
+    """The mcp-gd smoke config as TEXT. Pure: it writes nothing, so each launch
+    path writes it through its own recorded write path (and makes it 0600: the
+    server refuses a group- or other-accessible config). *token_path* is a file
+    in the same temp directory that is NEVER created; the dummy client secret
+    is not a real credential."""
+    return json.dumps({
+        "client_id": "smoke-client.apps.googleusercontent.com",
+        "client_secret": "smoke-not-a-real-secret",
+        "token_file": token_path,
+        "scopes": [
+            "https://www.googleapis.com/auth/drive",
+            "https://www.googleapis.com/auth/calendar",
+            "https://www.googleapis.com/auth/spreadsheets",
+        ],
+        "login_port": 0,
     }, indent=2) + "\n"
 
 READ_TIMEOUT = 8.0  # seconds to wait for a single response line
@@ -546,6 +577,7 @@ NEAR_MISS_FUNCTION = {
     "mcp-inspect.py":  ("processs",               "processes"),
     "mcp-sandbox.py":  ("run_scrip",              "run_script"),
     "mcp-skill.py":    ("lod",                    "load"),
+    "mcp-gd.py":       ("drive_lst",              "drive_list"),
 }
 
 # mcp-proxy.py has no `function` layer at all: it relays a tools/call to the
@@ -559,7 +591,7 @@ NEAR_MISS_TOOL = {
 # near-miss key, and the canonical name the suggestion must carry. A host is in
 # this table iff its source carries the refusal sentence (PARAM_REFUSAL_MARK);
 # the coverage row derives that from the source, so a host that learns to refuse
-# a parameter cannot join the fleet without a probe. Seventeen hosts refuse one
+# a parameter cannot join the fleet without a probe. Eighteen hosts refuse one
 # now. mcp-git turns an unknown key into a `--key[=value]` git flag by design
 # (its tool description documents that channel), so it has no unknown-name
 # refusal to probe -- it refuses only a key no git option can be spelled from,
@@ -599,6 +631,9 @@ NEAR_MISS_PARAM = {
     # The two runners refuse an unknown key before any run or skill lookup.
     "mcp-sandbox.py":  ("run_script",     {"entri": "x"},      "entry"),
     "mcp-skill.py":    ("load",           {"name": "x", "fiel": "x"}, "file"),
+    # mcp-gd refuses an unknown key before it validates a value, reads a token
+    # or opens a socket.
+    "mcp-gd.py":       ("drive_list",     {"page_sze": 5},    "page_size"),
 }
 
 # The false-refusal half: per newly refusing host, a call spelled exactly as the
@@ -628,6 +663,10 @@ DOCUMENTED_CALL = {
                                                    "context_lines": 2}),
     "mcp-sandbox.py":  ("capabilities",   {}),
     "mcp-skill.py":    ("list",           {}),
+    # A validated drive_list ends at the skeleton's fixed "not implemented"
+    # error (later: at the token read of a file that does not exist) -- never
+    # at a socket, because the arguments are validated first.
+    "mcp-gd.py":       ("drive_list",     {"page_size": 10, "max_answer_chars": 100}),
 }
 ORIGINAL_PARAM_REFUSERS = ("mcp-purity.py", "mcp-postgres.py", "mcp-search.py",
                            "mcp-webfetch.py", "mcp-inspect.py", "mcp-wiki.py")
@@ -1487,8 +1526,26 @@ def run_server(cfg):
 
     A row whose args carry SANDBOX_CONFIG_TOKEN is launched against a config
     generated here, in a mkdtemp under the repo's .claude/tmp that also holds
-    the runner's work root, and removed with it after the row.
+    the runner's work root, and removed with it after the row. A row carrying
+    GD_CONFIG_TOKEN is launched the same way against an mcp-gd config whose
+    token file is never created.
     """
+    if GD_CONFIG_TOKEN in cfg["args"]:
+        import tempfile
+        tmp_root = os.path.join(os.path.dirname(SCRIPT_DIR), ".claude", "tmp")
+        os.makedirs(tmp_root, exist_ok=True)
+        base = tempfile.mkdtemp(prefix="gd_smoke_", dir=tmp_root)
+        try:
+            cfg_path = os.path.join(base, "gd.json")
+            fd = os.open(cfg_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(_gd_smoke_config_text(os.path.join(base, "gd-token.json")))
+            launched = dict(cfg)
+            launched["args"] = [cfg_path if arg == GD_CONFIG_TOKEN else arg
+                                for arg in cfg["args"]]
+            return _run_server_checks(launched)
+        finally:
+            shutil.rmtree(base, ignore_errors=True)
     if SANDBOX_CONFIG_TOKEN not in cfg["args"]:
         return _run_server_checks(cfg)
     import tempfile

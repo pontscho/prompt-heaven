@@ -18,9 +18,12 @@ protocol, and neither says what a grant is. The rule that decided it is ADR
 (endpoints, client ids, scopes) live in the host, and this file only defines
 the row type they are written in.
 
-**One host.** `Scripts/llm-router.py` takes this source for its `codex` and
+**Two hosts.** `Scripts/llm-router.py` takes this source for its `codex` and
 `openai` backends: it refreshes their tokens while it serves, and its `login`
-subcommand runs the browser and the device flows.
+subcommand runs the browser and the device flows. `Scripts/mcp-gd.py` (Google
+Drive / Calendar / Sheets) is the second; Google's installed-app clients still
+need a client secret, so the two code/refresh builders take an optional one
+(RFC 6749 2.3.1), which llm-router never passes.
 
 **Sans-IO core, one thin wrapper of two blocks.** Everything that decides
 anything is a pure function over its arguments: `_oauth_pkce_pair` /
@@ -75,8 +78,9 @@ through this module.
 **Out of scope, deliberately:** ID-token signature verification (OIDC Core
 3.1.3.7 item 6 permits skipping it when the token arrives straight from the
 token endpoint over TLS, which is the only way this module receives one),
-discovery documents, revocation, client secrets (a native client is public),
-the implicit and hybrid flows, and every vendor row.
+discovery documents, revocation, any storing of a client secret (it is only an
+optional argument of the two request builders, never a field of the provider
+row, and its provenance is not judged), the implicit and hybrid flows, and every vendor row.
 
 **Tab safety is a constraint on how this file is WRITTEN.** A host may indent
 with tabs, and `Scripts/amalgamate.py:block_is_tab_safe` refuses a block that
@@ -389,34 +393,48 @@ def _oauth_json_headers():
     return (("Content-Type", "application/json"), ("Accept", "application/json"))
 
 
-def _oauth_exchange_request(provider, client_id, code, verifier, redirect_uri):
+def _oauth_exchange_request(provider, client_id, code, verifier, redirect_uri, *, client_secret=""):
     """(url, headers, body) of the authorization-code exchange (RFC 6749 4.1.3, RFC 7636 4.5).
 
     *redirect_uri* is the one the authorize URL carried -- the server compares
-    them -- and *client_id* the one it was issued to.
+    them -- and *client_id* the one it was issued to. A non-empty
+    *client_secret* (RFC 6749 2.3.1, form-body client authentication) is
+    appended after `code_verifier`; it must be a str with no whitespace or
+    control character, else ValueError("client_secret") that never holds the
+    value. Empty, the body is byte-identical to one built without it.
     """
     if not client_id:
         raise ValueError("client_id")
     if not redirect_uri:
         raise ValueError("redirect_uri")
+    if not isinstance(client_secret, str) or any(ch.isspace() or not ch.isprintable() for ch in client_secret):
+        raise ValueError("client_secret")
     fields = [("grant_type", "authorization_code"), ("code", code), ("redirect_uri", redirect_uri), ("client_id", client_id), ("code_verifier", verifier)]
+    if client_secret:
+        fields.append(("client_secret", client_secret))
     return provider.token_url, _oauth_form_headers(), urllib.parse.urlencode(fields).encode("ascii")
 
 
-def _oauth_refresh_request(provider, client_id, refresh_token):
+def _oauth_refresh_request(provider, client_id, refresh_token, *, client_secret=""):
     """(url, headers, body) of a refresh-token grant (RFC 6749 6).
 
     It never sends `scope`: omitted, the new token carries the scope the grant
     already has, and a narrower or wider one is not this module's call. It
     sends `resource` when the row has one (RFC 8707), and *client_id* is the
     id the grant was issued to -- for a dynamically registered client the
-    issued one, never the row's `registration_client_id`.
+    issued one, never the row's `registration_client_id`. A non-empty
+    *client_secret* is validated and appended last exactly as in
+    _oauth_exchange_request.
     """
     if not client_id:
         raise ValueError("client_id")
+    if not isinstance(client_secret, str) or any(ch.isspace() or not ch.isprintable() for ch in client_secret):
+        raise ValueError("client_secret")
     fields = [("grant_type", "refresh_token"), ("refresh_token", refresh_token), ("client_id", client_id)]
     if provider.resource:
         fields.append(("resource", provider.resource))
+    if client_secret:
+        fields.append(("client_secret", client_secret))
     return provider.token_url, _oauth_form_headers(), urllib.parse.urlencode(fields).encode("ascii")
 
 

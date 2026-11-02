@@ -276,6 +276,10 @@ WIRE = {
                         "unregistered (purity_call); cuda_call dispatcher"),
     "mcp-forge.py":    (OUT, FULL,
                         "forge_call dispatcher; replies carry build output"),
+    "mcp-gd.py":       (OUT, FULL,
+                        "gd_call dispatcher; replies carry Drive/Calendar/Sheets "
+                        "data and file bodies; the planted-sentinel scan at "
+                        "--debug is tests/test_mcp_gd.py R7"),
     "mcp-gdc.py":      (OUT, SILENT,
                         "the read loop logs nothing: isinstance guard straight "
                         "to create_task.  method+id is logged later, in "
@@ -323,7 +327,7 @@ WIRE = {
 
 # Declared totals, so a silent re-classification of one row trips a case rather
 # than sliding through as "the table matches the table".
-DECLARED_FULL = 16
+DECLARED_FULL = 17
 DECLARED_MINIMAL = 1
 DECLARED_SILENT = 2
 

@@ -551,7 +551,9 @@ def probe_argv(path, args, sandbox, prefix, smoke):
     text helper and written through this suite's recorded `write_text` into
     the sandbox, then made 0600 (the runner refuses a group-writable config,
     and `write_text` honours the umask).  Without it the runner would refuse
-    to start on a literal `{sandbox_config}` and stay a permanent SKIP.
+    to start on a literal `{sandbox_config}` and stay a permanent SKIP.  A
+    `{gd_config}` token (`smoke.GD_CONFIG_TOKEN`, mcp-gd's row) is handled the
+    same way from `smoke._gd_smoke_config_text`; its token file is never made.
     """
     argv = list(prefix) + [path] + list(args)
     for idx, token in enumerate(argv[:-1]):
@@ -564,6 +566,14 @@ def probe_argv(path, args, sandbox, prefix, smoke):
             smoke._sandbox_smoke_config_text(os.path.join(config_dir, "work")))
         os.chmod(cfg_path, 0o600)
         argv = [cfg_path if token == smoke.SANDBOX_CONFIG_TOKEN else token
+                for token in argv]
+    if smoke.GD_CONFIG_TOKEN in argv:
+        config_dir = os.path.join(sandbox, "gd-config")
+        cfg_path = write_text(
+            os.path.join(config_dir, "gd.json"),
+            smoke._gd_smoke_config_text(os.path.join(config_dir, "gd-token.json")))
+        os.chmod(cfg_path, 0o600)
+        argv = [cfg_path if token == smoke.GD_CONFIG_TOKEN else token
                 for token in argv]
     CHILD_ARGV.append(list(argv))
     return argv

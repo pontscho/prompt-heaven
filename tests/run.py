@@ -238,6 +238,10 @@ def run_mcp_skill(opts):
     return run_python_suite("test_mcp_skill", opts)
 
 
+def run_mcp_gd(opts):
+    return run_python_suite("test_mcp_gd", opts)
+
+
 def run_llm_router(opts):
     return run_python_suite("test_llm_router", opts)
 
@@ -552,13 +556,13 @@ SUITES = [
      "the size caps and strict UTF-8, the asyncio and blocking-socket "
      "wrappers -- then mcp-gdc's generated copy driven against a loopback "
      "CDP peer", 41),
-    # TYPED: A 4, B 5, C 5, D 12, E 11, F 7, G 5, H 15, I 4 = 68
+    # TYPED: A 4, B 5, C 14, D 12, E 11, F 7, G 5, H 15, I 4 = 77
     ("mcp_oauth", run_mcp_oauth,
      "the stdlib OAuth 2.0 helpers: PKCE and state, the authorize URL, the "
      "exchange, refresh and device request builders, token response and "
      "ID-token parsing with every refusal typed, the callback parse, the "
      "device flow, the loopback callback listener on a fake clock, and the "
-     "ast contract over the source", 68),
+     "ast contract over the source", 77),
     # TYPED: a fixed case table.  Every row that needs the host's libbrotlidec
     # or libzstd is recorded as INFO when the library is absent rather than
     # omitted, so the count is the same on every host.
@@ -658,7 +662,7 @@ SUITES = [
     ("read_loop", run_read_loop,
      "every MCP server's read loop carries ADR 0008's shape: a single-thread "
      "reader executor no handler can take, and one task per message -- with "
-     "the pool/coroutine split declared per server rather than inferred", 55),
+     "the pool/coroutine split declared per server rather than inferred", 57),
     # TYPED for read_loop's reason: a server that appears without a declared
     # reclaim class is the defect, so a moved count is the alarm working.  The
     # two per-server groups make it 2N + a fixed tail.
@@ -669,7 +673,7 @@ SUITES = [
      "never cancellable, a dispatch target that lets the CancelledError "
      "through, and what a cancel reclaims declared per server and MEASURED "
      "for the kill, lsp-cancel and pg-cancel classes -- the PostgreSQL "
-     "CancelRequest and its drain driven against a loopback fake server", 92),
+     "CancelRequest and its drain driven against a loopback fake server", 94),
     # TYPED for read_loop's reason above, not mcp_footprint's: a server that
     # appears without a declared row is the defect, so a moved count is the
     # alarm working.  The two per-server groups make it 2N + a fixed tail.
@@ -680,17 +684,17 @@ SUITES = [
      "every peer-chosen method, id, tool name and key logged through the "
      "generated _log_value (CWE-117), "
      "and MCP_SKELETON.md's own sample lifted by script and gated the same way",
-     68),
-    # TYPED for the same reason as the two above.  The count is 30 declared
-    # sites + 19 servers + 4 roster + 11 control + 4 hygiene: the site total is
-    # 19 layer-W plus 11 layer-D, so a server that gains or loses a catch-all
+     70),
+    # TYPED for the same reason as the two above.  The count is 32 declared
+    # sites + 20 servers + 4 roster + 11 control + 4 hygiene: the site total is
+    # 20 layer-W plus 12 layer-D, so a server that gains or loses a catch-all
     # moves it, which is the alarm working.
     ("handler_crash", run_handler_crash,
      "every MCP server's tool-handler catch-all leaves a traceback at a level "
      "the default WARNING configuration emits -- at BOTH site layers, the "
      "McpServer wrap and the module-level dispatcher, each declared per server "
      "rather than inferred, with the format string required to be a literal so "
-     "a payload cannot be interpolated into a log that IS written", 68),
+     "a payload cannot be interpolated into a log that IS written", 71),
     # TYPED for the same reason again.  The count is 6 escapers + 6 rendered
     # rows + 1 coupling + 3 unpadded + 2 documented + 2 structure + 1 jenkins
     # two-space + 1 jenkins newline + 4 roster + 12 control + 4 hygiene (the
@@ -711,7 +715,7 @@ SUITES = [
      "declared unpadded charges no row for another row's width, a jenkins "
      "two-space cell is measured not to forge against the aligned reader, "
      "and a CR/LF in a jenkins cell is escaped so it cannot end its row", 42),
-    # TYPED for the same reason again.  The count is 3 clauses x 19 servers +
+    # TYPED for the same reason again.  The count is 3 clauses x 20 servers +
     # 2 fleet + 3 roster + 18 control + 3 hygiene: a server arriving without
     # being analysed IS the defect here, so a count that moves when the fleet
     # moves is the alarm working.  The control group is the large one on
@@ -725,7 +729,7 @@ SUITES = [
      "handshake structurally cannot see, since a server inlining the RIGHT "
      "string is indistinguishable on the wire from one reading the constant, "
      "with the fleet's agreement asserted BETWEEN the files so the suite "
-     "never holds a copy of the number it polices", 83),
+     "never holds a copy of the number it polices", 86),
     ("forge_dispatch", run_forge_dispatch,
      "forge_call dispatch: `status` answers exactly what the empty call "
      "answers on all four of its paths, each with a control proving the "
@@ -748,7 +752,7 @@ SUITES = [
      "every file parsing as 3.9 SYNTAX, the stdlib Bing parser pinned to "
      "lxml's fields, every ctypes system library declared, no 3.10+ API "
      "in the new sources, and webfetch's PEP 723 deps bounded with its lxml "
-     "builder declared", 65),
+     "builder declared", 66),
     # TYPED: a fixed case table (A 6, B 9, C 5, E 2).
     ("search_parsers", run_search_parsers,
      "the DDG lite and grep.app result parsers as single html.parser passes "
@@ -952,6 +956,94 @@ SUITES = [
      "function does not read or holding its type's empty value dropped, "
      "a key outside it refused)",
      95),
+    # TYPED: a fixed case table (A 13, B 8, C 9, D 9, E 5, F 10, G 2, H 16,
+    # I 11, J 2, K 18, L 10, M 9, N 15, O 19, P 18, Q 15, R 7, S 26 = 222): the skeleton
+    # groups of plan step 3, the step 4 groups F, H, I, J, the step 5-6 groups
+    # K (all twenty functions), L (local files) and M (the reply envelope), the
+    # step 7 group N (Drive read/metadata: list, get, mkdir, move, trash), the
+    # step 8 group O (drive_download and drive_upload), the step 9 group P
+    # (Calendar) and the step 10 group Q (Sheets); no handler is a stub any
+    # more; the step 12 group R drives McpServer.run() live (cancel, crash,
+    # wire-log canary; its one red run was a planted-sentinel bug of the test
+    # itself, fixed before the count was written); the group S rows are the
+    # fixes of the code-mode security review (verdict 20261101-200000), each
+    # written before its fix, the F1 and F52 rows mutation-checked by reverting
+    # the fix (both went red). A is 12 pass + 1 INFO (A4 needs root), still 13 counted.
+    # Each step was written and run RED first (step 9-10: 38 of 189 rows
+    # failed against the not-implemented stubs -- 32 of the 33 new P and Q
+    # rows (P12 only exercises the validation layer that already existed)
+    # and 6 older K rows (K3, K12 among them), whose expectation moved from the
+    # stub to the real handler; step 3: Scripts/mcp-gd.py
+    # missing; step 4: 39 of 85 rows failed on the missing transport, token
+    # store and login; step 5-6: 35 of 122 rows failed on the missing tables,
+    # helpers and envelope; step 7: 23 of 137 rows failed against the
+    # not-implemented stubs -- all 15 N rows and 8 older rows whose
+    # expectation moved from the stub to the real handler; step 8: 22 of 156
+    # rows failed -- all 19 O rows and K3, K11, L3, whose expectation moved
+    # from the stub to the real handler). A row that cannot
+    # run on this host (A4 needs root) is INFO, counted.
+    ("mcp_gd", run_mcp_gd,
+     "mcp-gd, the Google Drive / Calendar / Sheets server behind one gd_call "
+     "tool (transport, token manager, login): the strict 0600 JSON config "
+     "(symlink, group/other bits, duplicate key, required and unknown keys "
+     "named, the three full scope URLs, every optional key strictly typed "
+     "with its default, the token file rules, no refusal ever carrying a "
+     "secret), the CLI flags of plan D15 (--config required, --download-dir, "
+     "repeatable --upload-root inside --project-root, the login arguments), "
+     "initialize/ping/-32601/notification/tools/list and the -32700/-32600/"
+     "-32602 refusals, the status reply, unknown function and parameter "
+     "near-miss pointers that never resolve, the ACCEPTED tables, f/p "
+     "aliases, validation before any token read or socket (trapped), the "
+     "host allowlist before any socket, the TLS context inspected, no proxy "
+     "and no redirect followed, error text reduced to one clean line, the "
+     "token store (skew and floor, one forced refresh per 401, a mutation "
+     "never re-sent, exactly one refresh under threads and under two stores, "
+     "invalid_grant, rotation, an atomic 0600 write under injected failures, "
+     "the token file and directory refusals), the login flow against a "
+     "loopback fake Google (PKCE, state, client_secret, refresh token "
+     "required, 127.0.0.1 only, one callback, timeout, denial, the token "
+     "directory created at 0700), a canary scan of every log, output and "
+     "error, a handler crash (layer D internal + log.exception, layer W), "
+     "the ACCEPTED table, required parameters, bad values and near-miss "
+     "pointers of all twenty functions, the id / A1 / RFC 3339 tables, the "
+     "send_updates matrix and attendee domains (D11), the formula refusal "
+     "(D12), the local-file containment and protected-class matrix with the "
+     "open helpers (D6, D15), and the reply envelope (untrusted flag, "
+     "cleaned strings, tail truncation, base64 never cut, the inline budget, "
+     "errors as one clean isError line), and the Drive read/metadata "
+     "functions against a fake Drive (request shapes at the peer, the paging "
+     "token round trip, field trimming, 401 handling, error scrubbing and the "
+     "canary, a missing token failing before any socket, the trash-only "
+     "invariant: no file DELETE and no emptying of the trash), and "
+     "drive_download / drive_upload against a fake Drive with media, export, "
+     "multipart and resumable sessions (inline reply and refusals, save_to "
+     "exclusive and streamed, a race, an abort, 8 MiB chunks with 308 resume "
+     "and retries, the session Location check, local-path refusals, the "
+     "memory ceiling), the Calendar functions against a fake Calendar "
+     "(request shapes at the peer, PATCH of only the supplied fields, "
+     "defaults, the send_updates and attendee-domain refusals reaching zero "
+     "peer requests, the fixed attendee note, 401 handling, scrubbing, "
+     "untrusted and cleaned replies, truncation), and the Sheets functions "
+     "against a fake Sheets (values get/batchGet/update/append/clear/create "
+     "shapes, the RAW default, the formula and IMPORT* refusals at zero peer "
+     "requests, the cell and body caps, 401 handling, scrubbing, untrusted "
+     "cells, truncation), and the live behaviour the static gates cannot see "
+     "(McpServer.run() in-process: a cancel for a stalled call drops the "
+     "reply and the server keeps serving, a cancelled mutation still "
+     "completes at the peer, ill-formed cancels ignored, a forced exception "
+     "at layer W, layer D and the -32603 catch-all answered with the type "
+     "only and the next request served, a debug-level wire-log canary scan "
+     "of all twenty functions), and the code-mode security review round (F-ids "
+     "of the 20261101-200000 review: a deeply nested, malformed-UTF-8 or "
+     "overlong stdin frame, bounded ASCII integers, lone surrogates, the Drive "
+     "query's parentheses, the fields mask, the formula guard, encoded dot and "
+     "slash in a path or an A1 sheet name, the reply keys and the cleaner's "
+     "categories, a repeated Content-Length / Location, the upload Location "
+     "path, hard links, the protected name classes, the flag roots, the own-file "
+     "temp and log file, the token_file rules, the token and config directories, "
+     "the refresh scope and expiry, token_type, a non-fatal write-back, the "
+     "token POST deadline, the stale-temp sweep and a trust store that ignores "
+     "SSL_CERT_FILE)", 222),
     # TYPED: a fixed case table (A 55, B 35, C 16, D 17, E 15, F 31, G 23,
     # H 6 x 4 kinds + H7 + H8-H9 = 27, I 16, J 44, K 29, L 20, M 23, N 42,
     # O 18, P 4, Q 18, R 14, S 5, T 13, U 3, V 15 = 483), so a count that moves is the alarm, not noise.
