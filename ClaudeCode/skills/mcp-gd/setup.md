@@ -3,8 +3,9 @@
 This is the owner's half of the `mcp-gd` skill: everything needed to give the server a
 Google identity and start it. The model-facing half (functions, reply envelope, refusal
 codes, rules) is [SKILL.md](./SKILL.md) next to this file. Facts here are read from
-`Scripts/mcp-gd.py`; where Google's own UI is involved this page says so and names the
-Google document to check instead of quoting menu labels.
+`Scripts/mcp-gd.py`; where Google's own UI is involved (section 1) the menu labels follow
+Google's documentation as read on 2026-11-02, unverified statements are marked, and
+Google's pages win where the console differs.
 
 Command forms (from the module docstring):
 
@@ -15,18 +16,54 @@ python3 Scripts/mcp-gd.py login --config PATH [--no-browser] [--timeout S]
 
 ## 1. One-time Google Cloud setup
 
-The server is an OAuth "installed app": it needs an OAuth client of the **Desktop** type
-in a Google Cloud project you own, and the three APIs it calls switched on in that
-project. In outline:
+The server is an OAuth "installed app": it needs an OAuth client of the **Desktop app**
+type in a Google Cloud project you own, and the three APIs it calls switched on in that
+project. The click-path below follows Google's documentation as read on 2026-11-02 (the
+sources are listed at the end of this section); console labels change, so where the
+console differs, Google's pages win over this text. Statements marked **unverified** are
+not backed by those pages.
 
-1. Create (or pick) a Google Cloud project.
-2. Enable the **Google Drive API**, the **Google Calendar API** and the **Google Sheets
-   API** in it. Enable only the ones whose scope you will put in `scopes` (section 2).
-3. Configure the **OAuth consent screen** for the project. While its publishing status is
-   **Testing**, refresh tokens expire after 7 days (section 5).
-4. Create an **OAuth client ID** of application type **Desktop**. Google shows a
-   **client ID** and a **client secret**: these are the config's `client_id` and
-   `client_secret`. The secret is why the config file is treated as a secret file.
+1. **Create a project.** At `console.cloud.google.com`, open the project picker and
+   create a new Google Cloud project (or pick one you own).
+2. **Enable the three APIs.** In **APIs & Services > Library**, search for and enable the
+   **Google Drive API**, the **Google Calendar API** and the **Google Sheets API**. Enable
+   only the ones whose scope you will put in `scopes` (section 2).
+3. **Configure the Google Auth platform.** In **Google Auth platform**:
+   - **Branding**: the app name, the user support email and the developer contact email.
+   - **Audience**: user type **External** for a `gmail.com` account (Internal is only
+     offered inside a Workspace organisation). While the publishing status is
+     **Testing**, add your own Google account under **Test users**.
+   - **Data Access**: add the scopes the server requests. They are the three full URLs of
+     `Scripts/mcp-gd.py:GD_SCOPES` (listed in section 2):
+     `https://www.googleapis.com/auth/drive`, `https://www.googleapis.com/auth/calendar`
+     and `https://www.googleapis.com/auth/spreadsheets`. Add only those you will put in
+     `scopes`.
+4. **Create the client.** In **Google Auth platform > Clients > Create Client**, choose
+   application type **Desktop app** and give it a name. Google shows a **client ID** and
+   a **client secret**: these are the config's `client_id` and `client_secret`. **The
+   client secret is shown only once, at creation**: copy it at once into the config file
+   and `chmod 600` it (section 2). The secret is why the config file is treated as a
+   secret file.
+5. **Publish the app.** In **Audience**, press **Publish app** to move the publishing
+   status from **Testing** to **In production**. In Testing the refresh token expires
+   after 7 days (section 5); publishing avoids that. The app stays unverified, which is
+   what the warning of step 6 is about.
+6. **First login: the unverified-app warning.** On the first `login` (section 4) Google
+   shows a warning that it has not verified the app. Click **Advanced**, then **Go to
+   <app name> (unsafe)**, then approve the scopes.
+7. **"Use this client for an AI-powered agent".** Google's own remote MCP servers require
+   this checkbox on the client. For this server, which is your own code calling the APIs
+   directly, leave it **unchecked**. **Unverified**: what the checkbox changes for a
+   client that is not used with Google's remote MCP servers was not found in Google's
+   documentation.
+
+**Unverified: the `/callback` redirect path.** Google's loopback documentation only shows
+`http://127.0.0.1:<port>` as the redirect URI of a Desktop client; this server's
+`Scripts/mcp-gd.py:run_login` sends `http://127.0.0.1:<port>/callback`
+(`Scripts/mcp-gd.py:_GD_LOGIN_CALLBACK`). Whether Google accepts the path has not been
+checked against a live login. If the first login is refused with a redirect error, the
+fallback is to switch the redirect path to `/`: a code change plus a test, tracked
+separately, not something the config can do.
 
 The server's side of the flow, for reference when Google asks: the redirect URI is
 `http://127.0.0.1:<port>/callback` on the port the login listener got (section 4); the
@@ -36,11 +73,15 @@ secret. The server only ever connects to `www.googleapis.com` (Drive, Calendar),
 `sheets.googleapis.com` and `oauth2.googleapis.com` (the token endpoint);
 `accounts.google.com` is only the URL your browser opens.
 
-**Console labels change.** The menu names above may differ from what the Google Cloud
-console shows today. Check Google's own pages rather than this text: "OAuth 2.0 for
-Mobile & Desktop Apps" (developers.google.com, Google Identity documentation) for the
-Desktop client, and the Google Cloud console help on configuring the OAuth consent screen
-and its publishing status and test users.
+Sources (Google documentation):
+
+- [Create a Google Cloud project](https://developers.google.com/workspace/guides/create-project)
+- [Enable Google Workspace APIs](https://developers.google.com/workspace/guides/enable-apis)
+- [Configure the OAuth consent screen](https://developers.google.com/workspace/guides/configure-oauth-consent)
+- [Create access credentials](https://developers.google.com/workspace/guides/create-credentials)
+- [Google Cloud help 15549945](https://support.google.com/cloud/answer/15549945)
+- [Google Cloud help 15549257](https://support.google.com/cloud/answer/15549257)
+- [Google Cloud help 13464323](https://support.google.com/cloud/answer/13464323)
 
 ## 2. The config file
 
@@ -202,8 +243,8 @@ the message `refresh token rejected; run mcp-gd.py login (Testing-status tokens 
 after 7 days)` (`Scripts/mcp-gd.py:_gd_oauth_refusal`). The model sees that refusal and
 must hand it to you; the fix is to run `login` again (section 4). Calls keep working until
 the current access token runs out, so the refusal appears some time after the 7 days, not
-at a fixed hour. Moving the app out of Testing is a Google-side decision; check the
-consent-screen documentation named in section 1 for what it requires.
+at a fixed hour. Moving the app out of Testing is the Publish app step in section 1
+(Audience > Publish app); the consent-screen documentation listed there says what it requires.
 
 ## 6. Troubleshooting: refusals that need the operator
 

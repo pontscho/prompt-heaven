@@ -17,6 +17,7 @@ WIP now: 0 of 3. Archive: 78 closed items (69 done, 9 dropped).
 | next  | R-0097 | idea  | Live-verify sbx restricted mode and mcp-sandbox on the Linux host                                   | yes   |
 | next  | R-0098 | idea  | mcp-sandbox: pre-check a plan's reads against sbx's 256-entry read cap                              | yes   |
 | next  | R-0110 | idea  | Run the mcp-sandbox live rows on Linux and earn LIVE_VERIFIED linux true                            | yes   |
+| next  | R-0113 | idea  | Fleet-wide MCP stdin hardening in the run() loop                                                    | yes   |
 | later | R-0048 | idea  | Answer a HelloRetryRequest that selects P-384 (FLAG-2)                                              | yes   |
 | later | R-0052 | idea  | Measure the DDG challenge page's structural marker and replace the fallback block predicate         | yes   |
 | later | R-0047 | idea  | implement certificate verification in _ChTls so fingerprint and authenticity stop being a trade-off | yes   |
@@ -112,6 +113,21 @@ On 2026-10-12 the 60 live E/G/I rows of the mcp_sandbox suite ran on Linux for t
 ### Log
 
 - 2026-10-12 new->next: measured on para 2026-10-12
+
+## R-0113 · Fleet-wide MCP stdin hardening in the run() loop
+
+state: idea
+horizon: next
+origin: user:2026-11-02:fleet-stdin-hardening
+blocked_by: []
+severity: medium
+tags: [mcp, security]
+
+The run() loop of the other MCP servers, and the skeleton they are copied from (Scripts/MCP_SKELETON.md), has three gaps that mcp-gd fixed locally in 7787308: a deeply nested JSON frame raises RecursionError out of run() and kills the process; sys.stdin.readline has no size cap; one invalid UTF-8 byte (UnicodeDecodeError, a ValueError) takes the shutdown path. Evidence: the code-mode security review of mcp-gd (20261101-200000), findings F1 (MEDIUM), F2 and F3, verified by reading run(); declared as open fleet-wide limits in ADR 0036. Candidate fix: one generated canonical-source block, or a skeleton change, plus a gate row in tests/test_read_loop.py.
+
+### Log
+
+- 2026-11-02 new->next: proposed by the mcp-gd security review
 
 # later
 
