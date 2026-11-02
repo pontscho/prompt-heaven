@@ -10081,6 +10081,8 @@ def e5(_mod, sandbox, names, optional):
 
 
 E_RAW_ROUTES = {"Qwen3.8-Flash-Next": "L", "bge-m3": "L", "bge-reranker-v2-m3": "L"}   # llm-router route key -> app
+# the route modality llm-router requires for the embeddings and rerank endpoints (chat is the default)
+E_RAW_MODALITY = {"bge-m3": "embedding", "bge-reranker-v2-m3": "rerank"}
 
 
 def _e_raw_config(sandbox, gpu_port, routes, key=TF_TOKEN):
@@ -10093,6 +10095,8 @@ def _e_raw_config(sandbox, gpu_port, routes, key=TF_TOKEN):
                              "allow_private": True, "allow_loopback": True,
                              "api_key": key, "auth_header": "authorization"}
         table[route] = {"backend": backend, "model": route}
+        if route in E_RAW_MODALITY:
+            table[route]["modality"] = E_RAW_MODALITY[route]
     doc = {"auth_token": E_LLM_TOKEN, "backends": backends, "routes": table}
     return write_file(os.path.join(sandbox, "llm-router.json"), json.dumps(doc, indent=2, sort_keys=True) + "\n")
 
