@@ -8,8 +8,9 @@ sources:
   - Scripts/mcp-gd.py
   - tests/test_mcp_gd.py
   - ClaudeCode/skills/mcp-gd/SKILL.md
+  - ClaudeCode/skills/mcp-gd/setup.md
 verified:
-  commit: cfc5590
+  commit: 379f9e2
   date: 2026-11-02
 links:
   - 0036-own-code-not-a-remote-server
@@ -47,12 +48,12 @@ a troubleshooting table of the operator-side refusal codes and the registration
 shapes — is the sibling file `ClaudeCode/skills/mcp-gd/setup.md`, split out by
 owner decision so it is not loaded into the model's context on every skill
 activation; SKILL.md keeps one paragraph listing the operator-side codes and
-pointing at it. That file is not yet in this page's `sources`: it is
-uncommitted, and every source must exist at `verified.commit`, so it joins the
-list when the page is next verified against the commit that contains it.
+pointing at it. The split landed in `379f9e2`, and `setup.md` is one of this
+page's `sources`.
 
-**Status of this page.** The server and its suite landed in `7787308` and the
-skill in `cfc5590`; the page was written while the code was uncommitted and was
+**Status of this page.** The server and its suite landed in `7787308`, the
+skill in `cfc5590` and the operator split into `setup.md` in `379f9e2`, the
+commit this page is verified against; the page was written while the code was uncommitted and was
 promoted to `active` against those commits. The smoke table
 carries the server as unregistered `Scripts/_mcp_smoke_test.py:SERVERS`; the
 registration in `~/.claude.json` and the mcp-proxy child on the Linux host are
