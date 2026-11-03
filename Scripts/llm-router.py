@@ -4776,6 +4776,10 @@ def _rt_rs_error_codes() -> Dict[str, Tuple[int, str]]:
                  "subscription_sharing_usage_limit_exceeded", "subscription_sharing_usage_unavailable"):
         codes[code] = (429, "rate_limit_error")
     codes["subscription_sharing_route_not_supported"] = (403, "permission_error")
+    # OpenAI's "Our servers are currently overloaded" and its plain server error: the
+    # Anthropic type that is a 529, so a client retries instead of reading a fault of its own.
+    for code in ("server_is_overloaded", "server_error"):
+        codes[code] = (529, "overloaded_error")
     return codes
 
 
@@ -5401,6 +5405,9 @@ class ResponsesStreamTranslator:
         self.summary_streamed = False   # a summary delta of the current reasoning item was rendered
         self.ignored_events = 0         # unknown event types (debug only)
         self.error_status: Optional[int] = None   # an upstream error code's mapped status (json_response)
+        # (code, scrubbed message) of the upstream error event, each None when absent: the
+        # relay logs it on the WARNING line (_rt_upstream_detail); never sent anywhere else.
+        self.upstream_error: Optional[Tuple[Optional[str], Optional[str]]] = None
         # F26: the tool names this request offered; a function_call naming any other is refused.
         self.offered: FrozenSet[str] = _rt_offered_tools(inbound)
 
@@ -5605,7 +5612,9 @@ class ResponsesStreamTranslator:
         self.error_status = mapped[0] if mapped is not None else None
         if isinstance(message, str) and message:
             message = self.scrub(message)
+            self.upstream_error = (code if isinstance(code, str) else None, message)
         else:
+            self.upstream_error = (code if isinstance(code, str) else None, None)
             message = "backend %s reported an error" % self.backend_name
         return self.fail(err_type, message)
 
@@ -5747,6 +5756,10 @@ class ResponsesAdapter(Adapter):
                 message = obj["detail"]
         if not isinstance(message, str) or not message:
             message = "backend %s answered %d" % (name, status)
+        if mapped is not None and mapped[1] == "overloaded_error" and status >= 500:
+            # The overloaded entries of the table type an in-band error EVENT. An HTTP 5xx is
+            # already typed by its status (KD-8: 502 api_error, 503 overloaded_error), as before.
+            mapped = None
         if status == 403 and row.oauth_provider:
             # F30: an OAuth profile's 403 is about the login (plan, account, region); the
             # client gets a fixed text, as a 401 gets the re-login hint. The status stays.
@@ -8152,6 +8165,37 @@ class _RtHttpsConnection(http.client.HTTPSConnection):
         _rt_track_discard(self._track, self.raw_sock)
 
 
+_RT_UPSTREAM_CODE_RE = re.compile(r"[A-Za-z0-9_.-]{1,64}\Z")
+_RT_UPSTREAM_MESSAGE_CAP = 200      # characters of an upstream error message on the WARNING line
+
+
+def _rt_upstream_detail(detail: Any) -> str:
+    """The ` upstream_code=... upstream_message='...'` tail of the `upstream failed` line, or "".
+
+    `detail` is the translator's (code, message): the message already went through the
+    secret scrubber (KD-9). It is UPSTREAM-CONTROLLED text on its way into a log line, so
+    here every non-printable character (newline, ESC, NUL, DEL, bidi and format characters)
+    becomes a space, runs of whitespace collapse, it is cut to _RT_UPSTREAM_MESSAGE_CAP
+    characters ("..." marks the cut) and written with repr(), so it cannot forge a second
+    line (CWE-117). A code outside [A-Za-z0-9_.-]{1,64}, a non-string or an empty message
+    adds nothing: no `None` noise. No request content is ever passed in.
+    """
+    if not isinstance(detail, tuple) or len(detail) != 2:
+        return ""
+    code, message = detail
+    out = ""
+    if isinstance(code, str) and _RT_UPSTREAM_CODE_RE.match(code):
+        out += " upstream_code=" + code
+    if isinstance(message, str):
+        window = message[:4 * _RT_UPSTREAM_MESSAGE_CAP]
+        cleaned = " ".join("".join(c if c.isprintable() else " " for c in window).split())
+        if cleaned:
+            if len(cleaned) > _RT_UPSTREAM_MESSAGE_CAP:
+                cleaned = cleaned[:_RT_UPSTREAM_MESSAGE_CAP] + "..."
+            out += " upstream_message=" + repr(cleaned)
+    return out
+
+
 def _rt_one_line(text: Any) -> str:
     """The first line of `text`, cut before the first quoted value (never echo a header or URL),
     printable, bounded -- _ChFallbackConnection._one_line's rule."""
@@ -9115,22 +9159,25 @@ class _RouterHandler(BaseHTTPRequestHandler):
                   _log_value(rec["in"]), _log_value(rec["out"]), _log_value(int((now - t0) * 1000)),
                   _log_value(up_ms), _log_value(rec["end"]), extra)
 
-    def _log_upstream_failure(self, status: int, reason: str) -> None:
-        """The one structure-only WARNING line of an upstream failure (the default sink).
+    def _log_upstream_failure(self, status: int, reason: str, detail: Any = None) -> None:
+        """The one WARNING line of an upstream failure (the default sink).
 
         status is what the client was answered (a stream: the 200 head it already got, the
         failure travelling in-band). reason is a FIXED category or an exception TYPE NAME,
         never an exception message, an upstream text or a body (ADR 0011); every value goes
-        through _log_value, so none can forge a line (CWE-117)."""
+        through _log_value, so none can forge a line (CWE-117). The one deliberate
+        exception: `detail`, an upstream error EVENT's (code, scrubbed message), is
+        appended by _rt_upstream_detail -- cleaned, capped and quoted -- so an operator can
+        read "server_is_overloaded" instead of a bare upstream_error_event."""
         rec = self._rt_rec
         now = time.monotonic()
         up_ms = 0
         if rec["up_t0"] is not None:
             up_ms = int(((rec["up_t1"] or now) - rec["up_t0"]) * 1000)
-        log.warning("upstream failed: backend=%s kind=%s route=%s endpoint=%s status=%s up_status=%s reason=%s up_ms=%s",
+        log.warning("upstream failed: backend=%s kind=%s route=%s endpoint=%s status=%s up_status=%s reason=%s up_ms=%s%s",
                     _log_value(rec["backend"]), _log_value(rec["kind"]), _log_value(rec["route"]),
                     _log_value(rec["endpoint"]), _log_value(status), _log_value(rec["up_status"]),
-                    _log_value(reason), _log_value(up_ms))
+                    _log_value(reason), _log_value(up_ms), _rt_upstream_detail(detail))
 
     def _precheck(self) -> Optional[str]:
         """The endpoint ("messages" | "count_tokens" | "images_generations" | "images_edits" |
@@ -9707,7 +9754,9 @@ class _RouterHandler(BaseHTTPRequestHandler):
                 # In-band failure after the 200 head: the translator is sans-IO, so the relay,
                 # which knows the outcome, logs it (an upstream error / response.failed event
                 # leaves no reason of its own).
-                self._log_upstream_failure(rec["status"], rec["fail_reason"] or "upstream_error_event")
+                self._log_upstream_failure(
+                    rec["status"], rec["fail_reason"] or "upstream_error_event",
+                    None if rec["fail_reason"] else getattr(translator, "upstream_error", None))
             rec["dropped_thinking"] = getattr(translator, "dropped_thinking", None)
             if end == "disconnected":
                 self._disconnected()

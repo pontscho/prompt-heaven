@@ -114,7 +114,9 @@ import _harness as H  # noqa: E402
 
 NAME = "llm_router"
 
-SERVER = H.repo_path("Scripts", "llm-router.py")
+# PH_TEST_LLM_ROUTER points the suite at a mutated copy of the router (a mutation run of the
+# change that added it); unset, it is the real one.
+SERVER = os.environ.get("PH_TEST_LLM_ROUTER") or H.repo_path("Scripts", "llm-router.py")
 FIXTURES = H.repo_path("tests", "files", "llm_router")
 TLS = H.repo_path("tests", "files", "tls")
 
@@ -12753,9 +12755,11 @@ GM_CASES = (
     "namespaced call -> plain tool_use",  # M21
     "unoffered tool name -> error",      # M22
     "oauth 403: fixed text, status kept",  # M23
+    "overloaded codes -> overloaded_error",  # M24
+    "failure line: upstream code+message",   # M25
 )
 GM_IDS = ("M1", "M2", "M3", "M4", "M5", "M6", "M7", "M8", "M9", "M10", "M11", "M12", "M13", "M14", "M15",
-          "M16", "M17", "M18", "M19", "M20", "M21", "M22", "M23")
+          "M16", "M17", "M18", "M19", "M20", "M21", "M22", "M23", "M24", "M25")
 
 GM_BACKEND = "tf-codex-m"
 GM_ROUTE = "claude-tf-m"                    # the requested model (an exact route); echoed, never the upstream's
@@ -13907,6 +13911,124 @@ def group_m(suite, fixture_root):
             shown.append("%s -> %r" % (case, got[0] if isinstance(got, tuple) and got else got))
         return problems, ["403         : " + s for s in shown]
 
+    def m24():
+        # An upstream "overloaded" is typed overloaded_error (the Anthropic type that is a 529),
+        # not the api_error of an unknown code; the table is the one the usage-limit codes use.
+        problems, shown = [], []
+        overloaded = "Our servers are currently overloaded. Please try again later."
+        table = [("server_is_overloaded (top level)",
+                  {"type": "error", "code": "server_is_overloaded", "message": overloaded, "param": None},
+                  "overloaded_error", 529),
+                 ("server_error (top level)",
+                  {"type": "error", "code": "server_error", "message": "tf m24 server", "param": None},
+                  "overloaded_error", 529),
+                 ("server_is_overloaded (error.code)",
+                  {"type": "error", "error": {"type": "tf", "code": "server_is_overloaded", "message": overloaded}},
+                  "overloaded_error", 529),
+                 ("response.failed, response.error.code server_is_overloaded",
+                  gm_completed(None, kind="response.failed", status="failed",
+                               error={"code": "server_is_overloaded", "message": overloaded}),
+                  "overloaded_error", 529),
+                 ("an unknown code", {"type": "error", "code": "tf_unknown_code", "message": "tf m24 unknown"},
+                  "api_error", None),
+                 ("no code at all", {"type": "error", "message": "tf m24 nocode"}, "api_error", None),
+                 ("usage_limit_reached unchanged",
+                  {"type": "error", "code": "usage_limit_reached", "message": "tf m24 usage"},
+                  "rate_limit_error", 429),
+                 ("rate_limit_exceeded unchanged",
+                  {"type": "error", "code": "rate_limit_exceeded", "message": "tf m24 rate"},
+                  "rate_limit_error", 429)]
+        for label, event, want_type, want_status in table:
+            lines = gm_lines(gm_created(), gm_msg_added(), gm_text("tf m24 before"), event)
+            tr_ = translator()
+            run = gg_drive(tr_, lines, True)
+            problems += gg_wellformed(label, run, requested=GM_ROUTE) + gg_failed(label, run)
+            etype, emsg = gm_error(run["events"])
+            if etype != want_type:
+                problems.append("%s: error.type %r, expected %s" % (label, etype, want_type))
+            if tr_.error_status != want_status:
+                problems.append("%s: error_status %r, expected %r" % (label, tr_.error_status, want_status))
+            # the in-band error event holds the upstream's own words and nothing of the request
+            events = [obj for name, obj in run["events"] if name == "error"]
+            blob = json.dumps(events)
+            if len(events) != 1 or sorted(events[0]) != ["error", "type"] \
+                    or sorted(events[0]["error"]) != ["message", "type"]:
+                problems.append("%s: the error event has an unexpected shape: %r" % (label, events))
+            for needle in GM_OFFERED + ("tf m\"",):
+                if needle in blob:
+                    problems.append("%s: request content %r in the error event" % (label, needle))
+            shown.append("%s -> %r / %r" % (label, etype, tr_.error_status))
+        # An HTTP 5xx answer keeps the type its status gives it (the overloaded entries are for
+        # in-band events): a 500 whose body says server_error is still KD-8's 502 api_error.
+        kind = GK_KIND["codex"]
+        adapter = (getattr(mod, "ADAPTERS", None) or {}).get(kind) or getattr(mod, GK_ADAPTER[kind])()
+        body = json.dumps({"error": {"type": "server_error", "code": "server_is_overloaded",
+                                     "message": "tf m24 http"}}).encode("utf-8")
+        got = adapter.json_response(gm_inbound(mod, "codex", stream=False), 500, body)
+        problems += gm_envelope("HTTP 500 server_error body", got, 502, "api_error")
+        shown.append("HTTP 500 server_error -> %r" % (got[0] if isinstance(got, tuple) and got else got))
+        return problems, ["error       : " + s for s in shown]
+
+    def m25():
+        # The WARNING line of an in-band upstream failure carries the upstream's error code and a
+        # short message -- scrubbed: one line, no control character, capped -- and nothing for an
+        # absent part.  The default sink's line stays one line however hostile the text.
+        problems, shown = [], []
+        detail_of = mod._rt_upstream_detail
+        text = "Our servers are currently overloaded. Please try again later."
+        got = detail_of(("server_is_overloaded", text))
+        if got != " upstream_code=server_is_overloaded upstream_message=%r" % text:
+            problems.append("a plain detail rendered %r" % got)
+        hostile = "line one\nWARNING forged: backend=x\r\x1b[31mred\x00\x7f tail " + "A" * 10240
+        got = detail_of(("server_error", hostile))
+        if any(ch in got for ch in ("\n", "\r", "\x1b", "\x00", "\x7f")):
+            problems.append("a control character survived in %r" % got[:120])
+        if len(got) > 330:
+            problems.append("an uncapped message: %d characters" % len(got))
+        if "forged" not in got or not got.rstrip("'").endswith("..."):
+            problems.append("the capped message is not marked cut: %r" % got[-40:])
+        shown.append("hostile      : %d chars -> %d" % (len(hostile), len(got)))
+        for label, detail, want in (("no detail", None, ""), ("both absent", (None, None), ""),
+                                    ("empty strings", ("", ""), ""),
+                                    ("code only", ("server_error", None), " upstream_code=server_error"),
+                                    ("message only", (None, "boom"), " upstream_message='boom'"),
+                                    ("a non-string code", (42, "boom"), " upstream_message='boom'"),
+                                    ("a code outside the grammar", ("bad code\nx", None), ""),
+                                    ("a whitespace-only message", ("c", "  \n\t "), " upstream_code=c")):
+            got = detail_of(detail)
+            if got != want:
+                problems.append("%s: %r, expected %r" % (label, got, want))
+            if "None" in got:
+                problems.append("%s: 'None' noise in %r" % (label, got))
+        # through the real log site: one WARNING record, one line, the detail in it
+        records = []
+
+        class Cap(logging.Handler):
+            def emit(self, record):
+                records.append(record.getMessage())
+        handler = Cap(logging.WARNING)
+        mod.log.addHandler(handler)
+        try:
+            stub = types.SimpleNamespace(_rt_rec={"backend": "b", "kind": "codex", "route": "r", "endpoint": "messages",
+                                                  "up_status": 200, "up_t0": None, "up_t1": None})
+            for detail in (("server_is_overloaded", hostile), None):
+                mod._RouterHandler._log_upstream_failure(stub, 200, "upstream_error_event", detail)
+        finally:
+            mod.log.removeHandler(handler)
+        if len(records) != 2 or any("\n" in r or "\x1b" in r for r in records):
+            problems.append("the log site wrote %r" % ([r[:60] for r in records],))
+        elif "upstream_code=server_is_overloaded" not in records[0] or "reason='upstream_error_event'" not in records[0]:
+            problems.append("the line lacks the code or the reason: %r" % records[0][:200])
+        elif "upstream_code=" in records[1] or "upstream_message=" in records[1]:
+            problems.append("a line without detail carries upstream_ fields: %r" % records[1][:200])
+        # the translator keeps the (scrubbed) code and message for the relay to log
+        tr_ = translator()
+        gg_drive(tr_, gm_lines(gm_created(), {"type": "error", "code": "server_is_overloaded",
+                                              "message": "tf m25 overloaded"}), True)
+        if getattr(tr_, "upstream_error", None) != ("server_is_overloaded", "tf m25 overloaded"):
+            problems.append("translator.upstream_error is %r" % (getattr(tr_, "upstream_error", None),))
+        return problems, shown
+
     def needs(fn, *names):
         """The case, failing once with the missing names before it runs (one red line, not one per call)."""
         def case():
@@ -13920,7 +14042,7 @@ def group_m(suite, fixture_root):
            needs(m11, tr), needs(m12, tr), needs(m13, tr), needs(m14, tr), needs(m15, tr), needs(m16, tr),
            needs(m17, tr), needs(m18, tr), needs(m19, tr, col), needs(m20, "ResponsesAdapter"),
            needs(m21, tr, "OpenaiAdapter"), needs(m22, tr, "CodexAdapter"),
-           needs(m23, "ResponsesAdapter"))
+           needs(m23, "ResponsesAdapter"), needs(m24, tr), needs(m25, tr, "_rt_upstream_detail"))
     try:
         for cid, fn in zip(GM_CASES, fns):
             try:
