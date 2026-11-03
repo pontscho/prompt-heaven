@@ -23,8 +23,13 @@ Usage:
   python3 mcp-gd.py --config PATH [--project-root DIR] [--download-dir DIR]
                     [--upload-root DIR ...] [--debug] [--log-file <path>]
   python3 mcp-gd.py login --config PATH [--no-browser] [--timeout S]
+  python3 mcp-gd.py init --client-json PATH --config PATH [--force]
 
-  --config PATH        the 0600 JSON config (client_id, client_secret,
+  init writes the 0600 config from Google's client_secret_*.json (Desktop app
+  client, "installed" type only); it sends nothing, prints no secret and does
+  not start login.
+
+  --config PATH       the 0600 JSON config (client_id, client_secret,
                        token_file, scopes, ...); required.
   --project-root DIR   the project root; the containment base of the upload
                        roots.
@@ -56,6 +61,7 @@ import os
 import re
 import secrets
 import select
+import shlex
 import socket
 import ssl
 import stat
@@ -3029,9 +3035,9 @@ _GD_RESERVED_KEYS = frozenset(("function", "ok", "untrusted", "note", "truncated
 # Keys whose strings keep their newlines and tabs (multi-line Google text).
 _GD_MULTILINE_KEYS = frozenset(("description", "values", "stringValue", "formattedValue"))
 _GD_TREE_DEPTH = 64
-_GD_TRUNCATED_HINT = ("items were dropped from the tail and are not returned again by "
-                      "nextPageToken: ask narrower (fields, page_size, page_token) or pass a "
-                      "larger max_answer_chars")
+_GD_TRUNCATED_HINT = ("items were dropped from the tail, so no nextPageToken is returned (it "
+                      "would skip them): retry with a smaller page_size, ask narrower (fields, "
+                      "page_token) or pass a larger max_answer_chars")
 
 
 def _gd_clean_tree(value: Any, multiline: bool = False, depth: int = 0) -> Any:
@@ -3065,7 +3071,8 @@ def _gd_reply(function: str, data: dict, params: Optional[dict] = None,
     untrusted with the fixed data-not-instructions note and its strings are
     cleaned. Over the effective max_answer_chars (24000 unless the caller passes
     its own; <= 0 disables the cut) the largest top-level list loses items from
-    the tail and `truncated` says how many. A value that cannot be cut by whole
+    the tail and `truncated` says how many; a cut reply carries no nextPageToken
+    (it would point past the dropped items). A value that cannot be cut by whole
     list items -- a base64 body above all -- is never cut: the call is refused
     with GdError('too_large').
     """
@@ -3101,7 +3108,9 @@ def _gd_reply(function: str, data: dict, params: Optional[dict] = None,
     cuts: Dict[str, int] = {}
 
     def current() -> dict:
-        return {k: (v[:cuts[k]] if k in cuts else v) for k, v in parts.items()}
+        # A page token points past the dropped items: a cut reply carries none.
+        return {k: (v[:cuts[k]] if k in cuts else v) for k, v in parts.items()
+                if not (cuts and k == "nextPageToken")}
 
     def info() -> dict:
         keys = list(cuts)
@@ -3644,8 +3653,9 @@ def fn_drive_move(params: dict) -> dict:
 
 
 def fn_drive_trash(params: dict) -> dict:
-    """Move to the trash (a PATCH of trashed:true). It can be undone in Drive;
-    nothing here can remove a file for good."""
+    """Move to the trash (a PATCH of trashed:true). Restoring is possible only in
+    the Drive UI: no gd_call function untrashes. Nothing here can remove a file
+    for good."""
     _check_drive_trash(params)
     query = [("supportsAllDrives", True), ("fields", _DRIVE_FILE_FIELDS)]
     _status, obj = _gd_request_json("PATCH", "drive", _drive_path(params["file_id"]), query,
@@ -4923,8 +4933,163 @@ def _login_main(argv: List[str]) -> None:
         sys.exit(1)
 
 
+_GD_INIT_MAX_BYTES = 65536
+_GD_INIT_AUTH_HOST = "accounts.google.com"      # the browser's host, never dialled
+_GD_INIT_TOKEN_NAME = "gd-token.json"
+
+
+class InitError(Exception):
+    """A refused `init`. The text names the rule or the key, never a value."""
+
+
+def _init_read_client(path: str) -> dict:
+    """Read Google's client_secret_*.json and return its "installed" object,
+    validated. No symlink (O_NOFOLLOW), a regular file, at most 64 KiB, strict
+    JSON. Nothing is sent anywhere; no refusal quotes a value."""
+    try:
+        fd = os.open(path, os.O_RDONLY | _O_NOFOLLOW)
+    except OSError as exc:
+        what = "a symlink" if exc.errno == errno.ELOOP else "cannot open it"
+        raise InitError("--client-json: %s" % what) from None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise InitError("--client-json: not a regular file")
+        data = b""
+        while len(data) <= _GD_INIT_MAX_BYTES:
+            chunk = os.read(fd, _GD_INIT_MAX_BYTES + 1 - len(data))
+            if not chunk:
+                break
+            data += chunk
+    except OSError as exc:
+        raise InitError("--client-json: cannot read it (%s)" % type(exc).__name__) from None
+    finally:
+        os.close(fd)
+    if len(data) > _GD_INIT_MAX_BYTES:
+        raise InitError("--client-json: larger than %d bytes" % _GD_INIT_MAX_BYTES)
+    try:
+        text = data.decode("utf-8")
+        obj = _strict_loads(text)
+        _refuse_duplicate_keys_parse(text)
+    except (ValueError, RecursionError):
+        raise InitError("--client-json: not valid strict JSON without repeated keys") from None
+    if type(obj) is not dict or type(obj.get("installed")) is not dict:
+        raise InitError("--client-json: expected a Google OAuth client of the "
+                        "'installed' (Desktop app) type; create the client as a Desktop app")
+    inner = obj["installed"]
+    for key in ("client_id", "client_secret"):
+        value = inner.get(key)
+        if type(value) is not str or not _CRED_RE.match(value):
+            raise InitError("--client-json: installed.%s must be a non-empty string of "
+                            "printable ASCII without spaces (at most 512)" % key)
+    for key, host in (("auth_uri", _GD_INIT_AUTH_HOST), ("token_uri", _GD_HOSTS["token"])):
+        if key not in inner:
+            continue
+        value = inner[key]
+        try:
+            parts = urllib.parse.urlsplit(value) if type(value) is str else None
+            ok = (parts is not None and parts.scheme == "https" and parts.netloc == host
+                  and parts.port is None and not parts.query and not parts.fragment)
+        except ValueError:
+            ok = False
+        if not ok:
+            raise InitError("--client-json: installed.%s must be an https URL on %s"
+                            % (key, host))
+    return inner
+
+
+def _init_write_config(config_path: str, obj: dict, force: bool) -> None:
+    """Write `obj` as the config: a 0600 O_EXCL temp file beside it, fsync, then
+    a link (no --force: never replaces) or a rename (--force), then fsync of the
+    directory. The temp file is removed on every failure."""
+    directory = os.path.dirname(config_path)
+    tmp = os.path.join(directory, ".%s.%s.tmp" % (os.path.basename(config_path),
+                                                   secrets.token_hex(8)))
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW, 0o600)
+    try:
+        try:
+            os.fchmod(fd, 0o600)
+            payload = (json.dumps(obj, indent=2) + "\n").encode("utf-8")
+            view = memoryview(payload)
+            while view:
+                view = view[os.write(fd, view):]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        if force:
+            os.replace(tmp, config_path)
+        else:
+            try:
+                os.link(tmp, config_path)
+            except FileExistsError:
+                raise InitError("--config: the file already exists (--force replaces it)") \
+                    from None
+            os.unlink(tmp)
+        tmp = ""
+        dfd = os.open(directory, os.O_RDONLY | _O_DIRECTORY)
+        try:
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
+    finally:
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+
+def _init_main(argv: List[str]) -> None:
+    """`mcp-gd.py init`: turn Google's client_secret_*.json into the 0600 config
+    (all owner switches closed). Usage and refusals exit 2; a failed write exits
+    1. Nothing is sent anywhere, no token is read, the secret is never printed,
+    and everything is written to stderr. It does not start `login`."""
+    parser = argparse.ArgumentParser(
+        prog="mcp-gd.py init", allow_abbrev=False,
+        description="mcp-gd init -- write the config from Google's client_secret_*.json")
+    parser.add_argument("--client-json", metavar="PATH", required=True,
+                        help="The client_secret_*.json of a Desktop app client")
+    parser.add_argument("--config", metavar="PATH", required=True,
+                        help="The 0600 JSON config to write")
+    parser.add_argument("--force", action="store_true",
+                        help="Replace an existing config")
+    args = parser.parse_args(argv)
+    try:
+        inner = _init_read_client(args.client_json)
+        if "\x00" in args.config or not args.config:
+            raise InitError("--config: not a usable path")
+        config_path = os.path.abspath(args.config)
+        base = os.path.basename(config_path)
+        if not base or base in (".", ".."):
+            raise InitError("--config: must name a file")
+        token_name = _GD_INIT_TOKEN_NAME
+        if base == token_name:
+            token_name = "gd-oauth-token.json"
+        token_file = os.path.join(os.path.dirname(config_path), token_name)
+        try:
+            _check_token_dir(token_file)
+        except ConfigError:
+            raise InitError("--config: its directory must exist, be a directory owned by "
+                            "the current user and not be writable by group/others") from None
+        if not args.force and os.path.lexists(config_path):
+            raise InitError("--config: the file already exists (--force replaces it)")
+        obj = {"client_id": inner["client_id"], "client_secret": inner["client_secret"],
+               "token_file": token_file, "scopes": list(GD_SCOPES)}
+        _init_write_config(config_path, obj, args.force)
+    except InitError as exc:
+        parser.error(str(exc))
+    except OSError as exc:
+        sys.stderr.write("mcp-gd init: failed (%s)\n" % type(exc).__name__)
+        sys.exit(1)
+    sys.stderr.write("mcp-gd init: wrote the config (0600, owner switches closed, token file "
+                     "%s).\nNext: python3 mcp-gd.py login --config %s\n"
+                     % (token_file, shlex.quote(config_path)))
+
+
 def main() -> None:
     global _CONFIG, _CONFIG_PATH, _FLAGS, _LOG_PATH
+    if len(sys.argv) > 1 and sys.argv[1] == "init":
+        _init_main(sys.argv[2:])
+        return
     if len(sys.argv) > 1 and sys.argv[1] == "login":
         _login_main(sys.argv[2:])
         return

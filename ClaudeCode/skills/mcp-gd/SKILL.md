@@ -37,6 +37,10 @@ Every function also takes `max_answer_chars` in `params` (default `24000`; `<= 0
 - **Sheets writes are RAW by default.** Under `value_input_option: "USER_ENTERED"` a cell starting
   with `=`, `+`, `-` or `@` is refused unless the owner set `allow_formulas`; `IMPORT*`, `IMAGE`,
   `HYPERLINK`, `QUERY`, `GOOGLEFINANCE` and `GOOGLETRANSLATE` stay refused even then.
+  `USER_ENTERED` parses text like the Sheets UI (leading zeros dropped, `1/2` becomes a date,
+  `TRUE` a boolean, `3e5` a number): use `RAW` for literal text. `sheets_read` returns
+  `FORMATTED_VALUE` by default, so a read then `RAW` write-back stores display strings like
+  `1,234.50` as text: read with `value_render_option: "UNFORMATTED_VALUE"` for round trips.
 - **Local files only where the launch line allows.** A download lands only under `--download-dir`
   (no flag: `save_to` is refused, inline download still works); an upload reads only from an
   `--upload-root` inside `--project-root` (no flag: `local_path` is refused, `content` /
@@ -64,7 +68,7 @@ Success (`isError: false`; the same object is the `structuredContent`):
 
 - Over the effective `max_answer_chars` the largest top-level list loses items from its tail and a
   `truncated` object says which field, how many were kept of how many, with a hint (ask narrower:
-  `fields`, `page_size`, `page_token`). A value that cannot be cut by whole items — above all a
+  `fields`, `page_size`, `page_token`). A truncated list reply carries no `nextPageToken`. A value that cannot be cut by whole items — above all a
   base64 body — is never cut: the call is refused `too_large`.
 - Google strings are cleaned: control, bidi, zero-width, tag and line-separator characters are
   dropped (`description`, sheet values keep newlines and tabs).
@@ -110,7 +114,8 @@ configuration problems: [./setup.md](./setup.md) (absolute path:
 `q`, `folder`, `page_size` (1-1000, default 100), `page_token`, `order_by`, `fields`,
 `include_trashed` (default false), `drive_id`. `folder` becomes `'<id>' in parents`; `q` is AND-ed
 in and must have balanced parentheses and closed quotes. Trashed files are excluded unless
-`include_trashed`. Reply: `files`, `nextPageToken`, `incompleteSearch`.
+`include_trashed`. Reply: `files`, `nextPageToken`, `incompleteSearch`. Follow `nextPageToken`
+until it is absent; a short page is not the end; dedupe by `id`. A truncated reply returns no token.
 
 ```json
 {"function":"drive_list","params":{"folder":"<folder id>","q":"mimeType = 'application/pdf'","page_size":20}}
@@ -126,7 +131,9 @@ bytes by default) and only if the base64 plus envelope fits `max_answer_chars`; 
 `too_large` with a hint, never cut. With `save_to` (a name relative to `--download-dir`) the body
 is streamed to disk and the reply is `{saved_to, bytes, sha256}`; an existing target is refused
 `file_exists`. Google-native docs are exported (`mime_type` picks the format, a default per type
-otherwise); a folder is refused `is_folder`.
+otherwise; ignored for files that are not Google-native); a folder is refused `is_folder`. The
+default export of a spreadsheet is `text/csv` of the FIRST sheet only: use `sheets_read` per tab, or
+pass `mime_type` for xlsx, to get the whole file.
 
 ```json
 {"function":"drive_download","params":{"file_id":"<id>"}}
@@ -150,7 +157,8 @@ goes as one multipart request, larger as a resumable upload in 8 MiB chunks. Rep
 `file_id` (required), `new_parent_id` and/or `new_name` (at least one). Reply: `file`.
 
 ### `drive_trash`
-`file_id` (required). Moves to the trash (undoable in Drive). Reply: `file`.
+`file_id` (required). Moves to the trash. Not undoable through `gd_call`: restoring is possible only in the Drive UI,
+no function untrashes. Reply: `file`.
 
 ## Calendar
 
@@ -164,7 +172,8 @@ a naive time is refused. An event `start` / `end` is `{"dateTime": ..., "timeZon
 ### `cal_events`
 `calendar_id`, `time_min`, `time_max`, `q`, `max_results` (1-250, default 50), `page_token`,
 `single_events` (default true), `order_by` (`startTime` default when single, or `updated`).
-Reply: `events`, `nextPageToken`.
+Reply: `events`, `nextPageToken`. Follow `nextPageToken` until it is absent; a short page is not
+the end; dedupe by `id`. A truncated reply returns no token (retry with a smaller `max_results`).
 
 ```json
 {"function":"cal_events","params":{"time_min":"2026-11-02T00:00:00Z","time_max":"2026-11-09T00:00:00Z"}}

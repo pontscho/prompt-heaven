@@ -174,6 +174,7 @@ GRP_P = "P. calendar"
 GRP_Q = "Q. sheets"
 GRP_R = "R. live cancel, crash and wire-log"
 GRP_S = "S. security review fixes"
+GRP_T = "T. init subcommand"
 
 SCOPE_DRIVE = "https://www.googleapis.com/auth/drive"
 SCOPE_CAL = "https://www.googleapis.com/auth/calendar"
@@ -4802,13 +4803,17 @@ def _run_m(suite, fx):
                 problems.append("limit %s: truncated %r" % (limit, info))
             elif "page_size" not in info.get("hint", "") or "max_answer_chars" not in info["hint"]:
                 problems.append("limit %s: the hint does not say how to ask narrower" % limit)
-            if reply.get("nextPageToken") != "tok":
-                problems.append("limit %s: nextPageToken lost" % limit)
+            if "nextPageToken" in reply:
+                problems.append("limit %s: nextPageToken survived a cut list" % limit)
+            elif "nextPageToken" not in info.get("hint", ""):
+                problems.append("limit %s: the hint does not say the token is withheld" % limit)
             if not 0 < len(kept) < 400:
                 problems.append("limit %s: kept %d" % (limit, len(kept)))
-        small = mod._gd_reply("drive_list", {"files": files[:3]}, {})
+        small = mod._gd_reply("drive_list", {"files": files[:3], "nextPageToken": "tok"}, {})
         if "truncated" in small or len(small["files"]) != 3:
             problems.append("a reply that fits was cut")
+        if small.get("nextPageToken") != "tok":
+            problems.append("an untruncated page lost its nextPageToken")
         two = {"files": files[:200], "extra": [{"v": "y" * 80} for _ in range(5)]}
         reply = mod._gd_reply("drive_list", two, {"max_answer_chars": 4000})
         if len(mod._strict_dumps(reply)) > 4000 or len(reply["extra"]) != 5:
@@ -5452,13 +5457,15 @@ def _run_n(suite, fx):
                 if info.get("field") != "files" or info.get("total") != 20 \
                         or not 0 < info.get("kept", 0) < 20:
                     problems.append("truncation note %r" % (info,))
-                if res.get("nextPageToken") != "tok-20":
-                    problems.append("the paging token was lost: %r" % (res.get("nextPageToken"),))
+                if "nextPageToken" in res:
+                    problems.append("the paging token survived a cut list: %r" % (res.get("nextPageToken"),))
             full = _h(e.mod, "drive_list", {"page_size": 5, "max_answer_chars": 0})
             if not _is_ok(full, "drive_list") or "truncated" in full or len(full["files"]) != 5:
                 problems.append("max_answer_chars 0 did not disable the cut")
+            elif full.get("nextPageToken") != "tok-5":
+                problems.append("an untruncated page lost its token: %r" % (full.get("nextPageToken"),))
         return problems, []
-    _guard(suite, GRP_N, "N15 reply-ceiling-truncates-list-keeps-token", truncation)
+    _guard(suite, GRP_N, "N15 reply-ceiling-truncates-list-drops-token", truncation)
 
 
 # ---------------------------------------------------------------------------
@@ -6839,13 +6846,15 @@ def _run_p(suite, fx):
                     problems.append("reply is %d characters, over 2000" % size)
                 if info.get("field") != "events" or info.get("total") != 30 or not 0 < info.get("kept", 0) < 30:
                     problems.append("truncation note %r" % (info,))
-                if res.get("nextPageToken") != "etk-30":
-                    problems.append("the paging token was lost: %r" % (res.get("nextPageToken"),))
+                if "nextPageToken" in res:
+                    problems.append("the paging token survived a cut list: %r" % (res.get("nextPageToken"),))
             full = _h(e.mod, "cal_events", {"max_results": 5, "max_answer_chars": 0})
             if not _is_ok(full, "cal_events") or "truncated" in full or len(full["events"]) != 5:
                 problems.append("max_answer_chars 0 did not disable the cut")
+            elif full.get("nextPageToken") != "etk-5":
+                problems.append("an untruncated page lost its token: %r" % (full.get("nextPageToken"),))
         return problems, []
-    _guard(suite, GRP_P, "P16 calendar-ceiling-truncates-events-keeps-token", truncation)
+    _guard(suite, GRP_P, "P16 calendar-ceiling-truncates-events-drops-token", truncation)
 
     def hosts_and_token():
         problems = []
@@ -8685,6 +8694,231 @@ def _run_s(suite, fx):
 
 
 # ---------------------------------------------------------------------------
+# T: the init subcommand (client_secret_*.json -> the 0600 config)
+# ---------------------------------------------------------------------------
+
+def _google_client(**over):
+    """Google's Desktop-client download, with the canary as the secret."""
+    inner = {"client_id": "cid-123.apps.googleusercontent.com",
+             "project_id": "p", "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+             "token_uri": "https://oauth2.googleapis.com/token",
+             "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+             "client_secret": CANARY, "redirect_uris": ["http://localhost"]}
+    for key, value in over.items():
+        if value is None:
+            inner.pop(key, None)
+        else:
+            inner[key] = value
+    return {"installed": inner}
+
+
+def _init_run(fx, label, client, *extra, cfg_name="config.json", pre=None):
+    """Run `init` on a fresh 0700 directory. `client` is a dict (dumped) or a
+    str (written as is). Returns (rc, out, err, cfg_path, client_path, dir)."""
+    home = fx.dir(label)
+    client_path = os.path.join(home, "client_secret_x.json")
+    text = client if isinstance(client, str) else json.dumps(client)
+    write(client_path, text, 0o600)
+    cfg = os.path.join(home, cfg_name)
+    if pre is not None:
+        pre(home, cfg, client_path)
+    rc, out, err = H.run_process(
+        _argv("init", "--client-json", client_path, "--config", cfg, *extra),
+        stdin_text="", timeout=30, cwd=H.REPO_ROOT)
+    return rc, out, err, cfg, client_path, home
+
+
+def _run_t(suite, fx):
+    def leaks(out, err):
+        return [] if CANARY not in out and CANARY not in err else \
+            ["the client secret leaked into the output"]
+
+    def happy():
+        rc, out, err, cfg, _cj, home = _init_run(fx, "t1", _google_client())
+        problems = leaks(out, err)
+        if rc != 0:
+            problems.append("rc %r, want 0 (%s)" % (rc, err.strip()[:200]))
+        if not os.path.isfile(cfg):
+            return problems + ["no config written"], []
+        if (os.stat(cfg).st_mode & 0o777) != 0o600:
+            problems.append("config mode %o, want 600" % (os.stat(cfg).st_mode & 0o777))
+        loaded, why = _load(cfg)
+        if loaded is None:
+            return problems + ["the real loader refused it: %s" % why], []
+        if loaded.client_secret != CANARY or not loaded.client_id.startswith("cid-123"):
+            problems.append("client id/secret not carried over")
+        if tuple(loaded.scopes) != tuple(SCOPES):
+            problems.append("scopes %r" % (loaded.scopes,))
+        if (loaded.allow_send_updates or loaded.allow_formulas
+                or loaded.attendee_domains or loaded.protected_paths):
+            problems.append("an owner switch is not closed")
+        keys = set(json.loads(open(cfg, encoding="utf-8").read()))
+        if keys != {"client_id", "client_secret", "token_file", "scopes"}:
+            problems.append("config keys %r" % sorted(keys))
+        if os.path.dirname(loaded.token_file) != home:
+            problems.append("token_file not beside the config")
+        if "login" not in err + out:
+            problems.append("the next command (login) is not printed")
+        if sorted(os.listdir(home)) != ["client_secret_x.json", "config.json"]:
+            problems.append("stray files: %r" % sorted(os.listdir(home)))
+        return problems, []
+    _guard(suite, GRP_T, "T1 init-writes-a-loadable-0600-config-no-secret-printed", happy)
+
+    def refused_cases(cases):
+        problems = []
+        for label, client, extra in cases:
+            rc, out, err, cfg, _cj, home = _init_run(fx, "t-" + label, client, *extra)
+            if rc != 2:
+                problems.append("%s: rc %r, want 2" % (label, rc))
+            if not err.strip():
+                problems.append("%s: nothing on stderr" % label)
+            last = err.strip().splitlines()[-1] if err.strip() else ""
+            if "mcp-gd.py init: error:" not in last:
+                problems.append("%s: last stderr line is not one init refusal: %r"
+                                % (label, last[:120]))
+            problems.extend("%s: %s" % (label, p) for p in leaks(out, err))
+            if os.path.lexists(cfg):
+                problems.append("%s: a config was written" % label)
+            left = sorted(os.listdir(home))
+            if left != ["client_secret_x.json"]:
+                problems.append("%s: partial files left: %r" % (label, left))
+        return problems
+
+    def web_type():
+        web = {"web": _google_client()["installed"]}
+        problems = refused_cases([("web", web, ()),
+                                  ("other", {"service_account": {"client_id": "x"}}, ()),
+                                  ("list", [1], ())])
+        rc, out, err, _c, _j, _h = _init_run(fx, "t2m", web)
+        if "installed" not in err:
+            problems.append("the message does not name the expected type 'installed'")
+        return problems, []
+    _guard(suite, GRP_T, "T2 web-and-other-types-refused-naming-installed", web_type)
+
+    def missing():
+        base = _google_client()["installed"]
+        cases = []
+        for key in ("client_id", "client_secret"):
+            cases.append(("no-" + key, _google_client(**{key: None}), ()))
+            cases.append(("empty-" + key, _google_client(**{key: ""}), ()))
+            cases.append(("int-" + key, _google_client(**{key: 5}), ()))
+        cases.append(("spaces", _google_client(client_secret="a b"), ()))
+        cases.append(("bad-json", "{not json", ()))
+        cases.append(("dup-key", '{"installed": {"client_id": "a", "client_id": "b"}}', ()))
+        del base
+        return refused_cases(cases), []
+    _guard(suite, GRP_T, "T3 missing-empty-or-mistyped-fields-refused", missing)
+
+    def symlink():
+        def pre(home, cfg, client_path):
+            real = os.path.join(home, "real.json")
+            os.rename(client_path, real)
+            os.symlink(real, client_path)
+        rc, out, err, cfg, _cj, home = _init_run(fx, "t4", _google_client(), pre=pre)
+        problems = leaks(out, err)
+        if rc != 2:
+            problems.append("symlinked client json: rc %r, want 2" % rc)
+        if "mcp-gd.py init: error:" not in err:
+            problems.append("not refused by init: %r" % err.strip()[-120:])
+        if os.path.lexists(cfg):
+            problems.append("a config was written")
+        if sorted(os.listdir(home)) != ["client_secret_x.json", "real.json"]:
+            problems.append("stray files: %r" % sorted(os.listdir(home)))
+        return problems, []
+    _guard(suite, GRP_T, "T4 client-json-symlink-refused", symlink)
+
+    def oversize():
+        big = json.dumps(_google_client(extra="x" * 70000))
+        return refused_cases([("oversize", big, ())]), []
+    _guard(suite, GRP_T, "T5 oversize-client-json-refused", oversize)
+
+    def overwrite():
+        problems = []
+
+        def pre(home, cfg, client_path):
+            write(cfg, "OLD-CONFIG", 0o600)
+        rc, out, err, cfg, _cj, home = _init_run(fx, "t6a", _google_client(), pre=pre)
+        problems.extend(leaks(out, err))
+        if rc != 2:
+            problems.append("existing config: rc %r, want 2" % rc)
+        if open(cfg, encoding="utf-8").read() != "OLD-CONFIG":
+            problems.append("the existing config was touched without --force")
+        if sorted(os.listdir(home)) != ["client_secret_x.json", "config.json"]:
+            problems.append("stray files: %r" % sorted(os.listdir(home)))
+        rc, out, err, cfg, _cj, home = _init_run(fx, "t6b", _google_client(), "--force",
+                                                  pre=pre)
+        problems.extend(leaks(out, err))
+        if rc != 0:
+            problems.append("--force: rc %r, want 0 (%s)" % (rc, err.strip()[:200]))
+        loaded, why = _load(cfg)
+        if loaded is None:
+            problems.append("--force: the config does not load: %s" % why)
+        if (os.stat(cfg).st_mode & 0o777) != 0o600:
+            problems.append("--force: mode not 600")
+        if sorted(os.listdir(home)) != ["client_secret_x.json", "config.json"]:
+            problems.append("--force: stray files: %r" % sorted(os.listdir(home)))
+        return problems, []
+    _guard(suite, GRP_T, "T6 existing-config-refused-without-force-replaced-with-it", overwrite)
+
+    def bad_host():
+        cases = [("token-host", _google_client(token_uri="https://evil.example/token"), ()),
+                 ("auth-host", _google_client(auth_uri="https://evil.example/auth"), ()),
+                 ("token-http", _google_client(token_uri="http://oauth2.googleapis.com/token"), ()),
+                 ("token-userinfo",
+                  _google_client(token_uri="https://oauth2.googleapis.com@evil.example/token"), ()),
+                 ("token-port", _google_client(token_uri="https://oauth2.googleapis.com:8443/token"), ()),
+                 ("token-int", _google_client(token_uri=7), ())]
+        return refused_cases(cases), []
+    _guard(suite, GRP_T, "T7 auth-or-token-uri-off-the-google-host-table-refused", bad_host)
+
+    def no_partial():
+        problems = []
+        # A token directory that fails the loader's directory rule, and a
+        # config directory that does not exist: nothing may be created.
+        home = fx.dir("t8")
+        client_path = os.path.join(home, "client_secret_x.json")
+        write(client_path, json.dumps(_google_client()), 0o600)
+        missing = os.path.join(home, "nodir", "config.json")
+        rc, out, err = H.run_process(
+            _argv("init", "--client-json", client_path, "--config", missing),
+            stdin_text="", timeout=30, cwd=H.REPO_ROOT)
+        problems.extend(leaks(out, err))
+        if rc != 2 or "mcp-gd.py init: error:" not in err:
+            problems.append("missing config directory: rc %r, want an init refusal" % rc)
+        if os.path.exists(os.path.join(home, "nodir")):
+            problems.append("the config directory was created")
+        wide = fx.dir("t8w", mode=0o777)
+        cfg = os.path.join(wide, "config.json")
+        rc, out, err = H.run_process(
+            _argv("init", "--client-json", client_path, "--config", cfg),
+            stdin_text="", timeout=30, cwd=H.REPO_ROOT)
+        problems.extend(leaks(out, err))
+        if rc != 2 or "mcp-gd.py init: error:" not in err:
+            problems.append("group/other-writable directory: rc %r, want an init refusal" % rc)
+        if os.listdir(wide):
+            problems.append("files left in the refused directory: %r" % os.listdir(wide))
+        return problems, []
+    _guard(suite, GRP_T, "T8 refused-directory-leaves-no-partial-file", no_partial)
+
+    def usage():
+        problems = []
+        for label, flags in (("no-args", ()), ("no-config", ("--client-json", "x")),
+                             ("no-client", ("--config", "/tmp/x")),
+                             ("unknown", ("--client-json", "x", "--config", "/tmp/x",
+                                          "--bogus"))):
+            rc, out, err = H.run_process(_argv("init", *flags), stdin_text="",
+                                         timeout=30, cwd=H.REPO_ROOT)
+            if rc != 2:
+                problems.append("%s: rc %r, want 2" % (label, rc))
+            if out.strip():
+                problems.append("%s: stdout not empty" % label)
+            if "mcp-gd.py init" not in err:
+                problems.append("%s: usage does not name the init subcommand" % label)
+        return problems, []
+    _guard(suite, GRP_T, "T9 usage-errors-exit-2", usage)
+
+
+# ---------------------------------------------------------------------------
 # driver
 # ---------------------------------------------------------------------------
 
@@ -8714,6 +8948,7 @@ def run(opts=None):
         _run_q(suite, fx)
         _run_r(suite, fx)
         _run_s(suite, fx)
+        _run_t(suite, fx)
     finally:
         fx.cleanup()
         _MODULE.clear()

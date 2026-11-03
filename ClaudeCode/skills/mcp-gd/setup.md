@@ -12,6 +12,7 @@ Command forms (from the module docstring):
 ```
 python3 Scripts/mcp-gd.py --config PATH [--project-root DIR] [--download-dir DIR] [--upload-root DIR ...] [--debug] [--log-file PATH]
 python3 Scripts/mcp-gd.py login --config PATH [--no-browser] [--timeout S]
+python3 Scripts/mcp-gd.py init --client-json PATH --config PATH [--force]
 ```
 
 ## 1. One-time Google Cloud setup
@@ -41,9 +42,11 @@ not backed by those pages.
 4. **Create the client.** In **Google Auth platform > Clients > Create Client**, choose
    application type **Desktop app** and give it a name. Google shows a **client ID** and
    a **client secret**: these are the config's `client_id` and `client_secret`. **The
-   client secret is shown only once, at creation**: copy it at once into the config file
-   and `chmod 600` it (section 2). The secret is why the config file is treated as a
-   secret file.
+   client secret is shown only once, at creation**: use **Download JSON** in that dialog
+   (it saves `client_secret_*.json`), then run `init` on it (section 2) and after that
+   `login` (section 4); you do not write the config by hand. Keep the download in a
+   private directory and delete it once `init` has written the config. The secret is why
+   the config file is treated as a secret file.
 5. **Publish the app.** In **Audience**, press **Publish app** to move the publishing
    status from **Testing** to **In production**. In Testing the refresh token expires
    after 7 days (section 5); publishing avoids that. The app stays unverified, which is
@@ -84,6 +87,34 @@ Sources (Google documentation):
 - [Google Cloud help 13464323](https://support.google.com/cloud/answer/13464323)
 
 ## 2. The config file
+
+### Writing it: `init`
+
+Download the Desktop client's JSON at client creation (section 1, step 4), then:
+
+```
+python3 Scripts/mcp-gd.py init --client-json ~/Downloads/client_secret_XXXX.json --config PATH
+python3 Scripts/mcp-gd.py login --config PATH
+```
+
+`init` (`Scripts/mcp-gd.py:_init_main`) writes `--config PATH` as a 0600 file (a temp file
+created exclusively beside it, fsynced, then renamed into place) holding `client_id`,
+`client_secret`, `token_file` and all three `scopes`; every optional key is left out, so
+every owner switch (`allow_send_updates`, `attendee_domains`, `allow_formulas`,
+`protected_paths`) keeps its closed default. `token_file` is `gd-token.json` in the
+config's own directory (edit the config if you want it elsewhere). It sends nothing,
+reads no token, never prints the secret and does **not** start `login`: it prints the
+next command. Exit 2 on a refusal, 1 on a failed write.
+
+It accepts only a client of the `installed` (Desktop app) type; a `web` client is refused.
+It also refuses a `--client-json` that is a symlink, not a regular file or over 65536
+bytes, a missing or malformed `client_id` / `client_secret`, an `auth_uri` not on
+`accounts.google.com` or a `token_uri` not on `oauth2.googleapis.com` (https, no port),
+a `--config` directory that does not exist or is not this uid's or is group/other
+writable, and an existing `--config` unless `--force` is given. A refusal leaves no
+partial file.
+
+### Reading it
 
 `--config PATH` names one JSON file. It holds the client secret, so it is read the way
 llm-router reads its own (`Scripts/mcp-gd.py:_gd_read_secret_file`):
