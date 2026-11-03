@@ -161,6 +161,16 @@ SERVERS = [
     {"file": "mcp-gd.py",       "tool": "gd_call",
      "args": ["--config", "{gd_config}"], "registered": False,
      "forced_exc_code": -32602},
+    # mcp-messagebox.py is configured by its MESSAGEBOX_* environment only and
+    # always starts; with none of it set it comes up INACTIVE (no hub, no spool,
+    # no registration). The row's env removes every MESSAGEBOX_* variable of the
+    # caller's shell and sets MESSAGEBOX_DISABLE=1, so a harness run can never
+    # register a real session at a real hub. Like the runners above it refuses
+    # the forced-exc probe's non-object params as -32602 before any handler runs.
+    {"file": "mcp-messagebox.py", "tool": "messagebox_call", "args": [], "registered": False,
+     "env": dict([(k, v) for k, v in os.environ.items() if not k.startswith("MESSAGEBOX_")],
+                 MESSAGEBOX_DISABLE="1"),
+     "forced_exc_code": -32602},
 ]
 
 # The argv token a launch path replaces with a generated mcp-sandbox config.
@@ -578,6 +588,7 @@ NEAR_MISS_FUNCTION = {
     "mcp-sandbox.py":  ("run_scrip",              "run_script"),
     "mcp-skill.py":    ("lod",                    "load"),
     "mcp-gd.py":       ("drive_lst",              "drive_list"),
+    "mcp-messagebox.py": ("sned",                 "send"),
 }
 
 # mcp-proxy.py has no `function` layer at all: it relays a tools/call to the
@@ -634,6 +645,8 @@ NEAR_MISS_PARAM = {
     # mcp-gd refuses an unknown key before it validates a value, reads a token
     # or opens a socket.
     "mcp-gd.py":       ("drive_list",     {"page_sze": 5},    "page_size"),
+    # mcp-messagebox refuses an unknown key before any value check or hub call.
+    "mcp-messagebox.py": ("send",         {"to": "x", "txt": "x"}, "text"),
 }
 
 # The false-refusal half: per newly refusing host, a call spelled exactly as the
@@ -667,6 +680,9 @@ DOCUMENTED_CALL = {
     # error (later: at the token read of a file that does not exist) -- never
     # at a socket, because the arguments are validated first.
     "mcp-gd.py":       ("drive_list",     {"page_size": 10, "max_answer_chars": 100}),
+    # Inactive in the harness: the call ends at the inactive refusal, never at
+    # a hub.
+    "mcp-messagebox.py": ("list",         {}),
 }
 ORIGINAL_PARAM_REFUSERS = ("mcp-purity.py", "mcp-postgres.py", "mcp-search.py",
                            "mcp-webfetch.py", "mcp-inspect.py", "mcp-wiki.py")

@@ -242,6 +242,14 @@ def run_mcp_gd(opts):
     return run_python_suite("test_mcp_gd", opts)
 
 
+def run_messagebox(opts):
+    return run_python_suite("test_messagebox", opts)
+
+
+def run_messagebox_hook(opts):
+    return run_python_suite("test_messagebox_hook", opts)
+
+
 def run_llm_router(opts):
     return run_python_suite("test_llm_router", opts)
 
@@ -662,7 +670,7 @@ SUITES = [
     ("read_loop", run_read_loop,
      "every MCP server's read loop carries ADR 0008's shape: a single-thread "
      "reader executor no handler can take, and one task per message -- with "
-     "the pool/coroutine split declared per server rather than inferred", 57),
+     "the pool/coroutine split declared per server rather than inferred", 59),
     # TYPED for read_loop's reason: a server that appears without a declared
     # reclaim class is the defect, so a moved count is the alarm working.  The
     # two per-server groups make it 2N + a fixed tail.
@@ -673,7 +681,7 @@ SUITES = [
      "never cancellable, a dispatch target that lets the CancelledError "
      "through, and what a cancel reclaims declared per server and MEASURED "
      "for the kill, lsp-cancel and pg-cancel classes -- the PostgreSQL "
-     "CancelRequest and its drain driven against a loopback fake server", 94),
+     "CancelRequest and its drain driven against a loopback fake server", 96),
     # TYPED for read_loop's reason above, not mcp_footprint's: a server that
     # appears without a declared row is the defect, so a moved count is the
     # alarm working.  The two per-server groups make it 2N + a fixed tail.
@@ -684,7 +692,7 @@ SUITES = [
      "every peer-chosen method, id, tool name and key logged through the "
      "generated _log_value (CWE-117), "
      "and MCP_SKELETON.md's own sample lifted by script and gated the same way",
-     70),
+     72),
     # TYPED for the same reason as the two above.  The count is 32 declared
     # sites + 20 servers + 4 roster + 11 control + 4 hygiene: the site total is
     # 20 layer-W plus 12 layer-D, so a server that gains or loses a catch-all
@@ -694,7 +702,7 @@ SUITES = [
      "the default WARNING configuration emits -- at BOTH site layers, the "
      "McpServer wrap and the module-level dispatcher, each declared per server "
      "rather than inferred, with the format string required to be a literal so "
-     "a payload cannot be interpolated into a log that IS written", 71),
+     "a payload cannot be interpolated into a log that IS written", 74),
     # TYPED for the same reason again.  The count is 6 escapers + 6 rendered
     # rows + 1 coupling + 3 unpadded + 2 documented + 2 structure + 1 jenkins
     # two-space + 1 jenkins newline + 4 roster + 12 control + 4 hygiene (the
@@ -729,7 +737,7 @@ SUITES = [
      "handshake structurally cannot see, since a server inlining the RIGHT "
      "string is indistinguishable on the wire from one reading the constant, "
      "with the fleet's agreement asserted BETWEEN the files so the suite "
-     "never holds a copy of the number it polices", 86),
+     "never holds a copy of the number it polices", 89),
     ("forge_dispatch", run_forge_dispatch,
      "forge_call dispatch: `status` answers exactly what the empty call "
      "answers on all four of its paths, each with a control proving the "
@@ -957,7 +965,7 @@ SUITES = [
      "a key outside it refused)",
      95),
     # TYPED: a fixed case table (A 13, B 8, C 9, D 9, E 5, F 10, G 2, H 16,
-    # I 11, J 2, K 18, L 10, M 9, N 15, O 19, P 18, Q 15, R 7, S 26 = 222): the skeleton
+    # I 11, J 2, K 18, L 10, M 9, N 15, O 19, P 18, Q 15, R 7, S 26, T 9 = 231): the skeleton
     # groups of plan step 3, the step 4 groups F, H, I, J, the step 5-6 groups
     # K (all twenty functions), L (local files) and M (the reply envelope), the
     # step 7 group N (Drive read/metadata: list, get, mkdir, move, trash), the
@@ -1043,10 +1051,40 @@ SUITES = [
      "temp and log file, the token_file rules, the token and config directories, "
      "the refresh scope and expiry, token_type, a non-fatal write-back, the "
      "token POST deadline, the stale-temp sweep and a trust store that ignores "
-     "SSL_CERT_FILE)", 222),
+     "SSL_CERT_FILE, and the init subcommand: a client_secret json to the "
+     "0600 config, installed type only, host table, symlink and size, no "
+     "overwrite without --force, no secret printed, no partial file)", 231),
+    # TYPED: a fixed case table, written RED first (every row but group S failed
+    # on the missing server). Group S tests the stub hub itself.
+    ("messagebox", run_messagebox,
+     "mcp-messagebox, the peer-messaging client behind one messagebox_call "
+     "tool, against an in-memory stub hub on loopback: the protocol envelope "
+     "of a plain launch, the text rule (every refused class, the "
+     "system-reminder tag, CRLF, NFC, the length limits), the token file "
+     "rules, owner detection (cli, sdk-cli, FORCE, DISABLE, no or ambiguous "
+     "sessions file, the parent-chain walk), register / poll / spool / ack "
+     "folding, duplicates and the 404 re-register, send / reply / ack / "
+     "status, no redirect followed and the token never in any output, "
+     "backoff and Retry-After, hostile hub payloads rejected without a spool "
+     "write, spool hygiene and the second-server flock, bye on EOF and "
+     "SIGTERM, the start-up sweep, the handler crash layers, and the stub "
+     "hub's own state machine", 165),
+    # TYPED: a fixed case table, written RED first (every row failed on the
+    # missing hook). The hook is a stdlib script, not an MCP server, so no
+    # fleet roster sees it.
+    ("messagebox_hook", run_messagebox_hook,
+     "messagebox-hook, the asyncRewake hand-off from a session's spool to the "
+     "model: every quiet exit 0 (disabled, no spool, no or invalid sessions "
+     "file, not cli, owner.json naming someone else, hook.lock held, unsafe "
+     "directories), the owner walk through sh wrappers with 8 hops, the exact "
+     "stderr frame and the .delivered rename, seq order, the 10-message and "
+     "16 KiB caps with the always-first rule, every failing file rejected and "
+     "never injected, the idempotent fence transform, the claim race, no "
+     "network import, and an end to end run against the real server and the "
+     "stub hub", 85),
     # TYPED: a fixed case table (A 55, B 35, C 16, D 17, E 15, F 31, G 23,
-    # H 6 x 4 kinds + H7 + H8-H9 = 27, I 16, J 44, K 29, L 20, M 23, N 42,
-    # O 18, P 4, Q 18, R 14, S 5, T 13, U 3, V 15 = 483), so a count that moves is the alarm, not noise.
+    # H 6 x 4 kinds + H7 + H8-H9 = 27, I 16, J 44, K 29, L 20, M 25, N 42,
+    # O 18, P 4, Q 18, R 14, S 5, T 13, U 3, V 15 = 485), so a count that moves is the alarm, not noise.
     ("llm_router", run_llm_router,
      "llm-router, the Anthropic Messages router: config refusals (0600, "
      "duplicate keys), bearer/Host/Origin/misplaced token, GET /v1/models, "
@@ -1061,7 +1099,7 @@ SUITES = [
      "the raw LLM relay (rawllm: /v1/chat/completions, /v1/embeddings, "
      "/v1/rerank and /v1/messages relayed untouched), "
      "secret leaks, static rules, "
-     "hygiene", 483),
+     "hygiene", 485),
     # TYPED: a fixed case table (A 18, L 49, R 23, D 26, S 22, Q-sched 16,
     # Q-http 6, T 17, P 49, U 21, G 6, E2E 6 = 259), so a count that moves is
     # the alarm.

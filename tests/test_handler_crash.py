@@ -225,6 +225,9 @@ per-command guards are narrow and return dicts"),
                         "the only _dispatch_tool server that ALSO owns a layer \
 D, and the only server SILENT at both; layer D sits after narrow ValueError and \
 RuntimeError clauses"),
+    "mcp-messagebox.py": (W_HANDLE, D_PRESENT,
+                          "layer D sits in handle_messagebox_call after the narrow \
+ToolError refusals; error.code internal, exception type only"),
     "mcp-postgres.py": (W_HANDLE, D_PRESENT,
                         "layer D sits after a narrow PgError clause that keeps \
 server-reported errors on their own channel"),
@@ -255,8 +258,8 @@ message rather than an f-string"),
 
 # Declared totals, so a silent re-classification of one server trips a case
 # rather than sliding through as "the table matches the table".
-DECLARED_W = 20
-DECLARED_D = 12
+DECLARED_W = 21
+DECLARED_D = 13
 
 # ---------------------------------------------------------------------------
 # the rule, as data

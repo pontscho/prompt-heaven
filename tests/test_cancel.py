@@ -228,6 +228,10 @@ FLEET = {
     "mcp-lua-lsp.py":  (LSP_CANCEL, "the generated _request sends "
                                     "$/cancelRequest to lua-language-server "
                                     "and drops its waiter"),
+    "mcp-messagebox.py": (REPLY_ONLY, "the hub HTTP call runs to its own timeout "
+                                      "in the worker thread; a cancelled send "
+                                      "still reaches the hub and only the reply "
+                                      "is dropped"),
     "mcp-postgres.py": (PG_CANCEL,  "a CancelRequest on a second socket stops "
                                     "the statement; the worker drains its "
                                     "error under the connection lock"),
@@ -267,7 +271,7 @@ DECLARED_TASK = 3
 DECLARED_KILL = 6
 DECLARED_LSP_CANCEL = 4
 DECLARED_PG_CANCEL = 1
-DECLARED_REPLY_ONLY = 6
+DECLARED_REPLY_ONLY = 7
 
 # A `kill` server's spawn sites a cancel does NOT reach, by (file, enclosing
 # function), each with the reason it may outlive the request that spawned it.

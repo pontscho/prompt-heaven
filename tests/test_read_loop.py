@@ -217,6 +217,10 @@ FLEET = {
                         "child clients keep ids/_pending/routes on the loop thread and the "
                         "cancel arm needs the CancelledError to land in the await; a worker "
                         "pool would be a regression; unregistered (ai-soul's endpoint)"),
+    "mcp-messagebox.py": ("messagebox-stdin", "pool",   "messagebox-call", "arg",
+                        "blocking hub HTTP calls and spool file operations need a "
+                        "thread; the one mutable object, the messagebox state, "
+                        "guards its fields with a lock"),
     "mcp-purity.py":   ("purity-stdin",   "coroutine", None,             None,
                         "coroutine handlers; sync file ops park on the DEFAULT "
                         "pool on purpose (:5810) -- safe now the reader is not there"),
@@ -239,7 +243,7 @@ FLEET = {
 
 # Declared totals, so a silent re-classification of one server trips a case
 # rather than sliding through as "the table matches the table".
-DECLARED_POOL = 12
+DECLARED_POOL = 13
 DECLARED_COROUTINE = 8
 
 # Both spellings create a task.  Gating one would fail a correct refactor.

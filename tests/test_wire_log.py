@@ -299,6 +299,9 @@ WIRE = {
                         "already structure only at both ends; declared at the "
                         "shape it has -- two safe shapes need not be merged, "
                         "they need to be declared"),
+    "mcp-messagebox.py": (OUT, FULL,
+                          "messagebox_call dispatcher; requests carry the text of "
+                          "outbound peer messages, replies carry inbound ones"),
     "mcp-postgres.py": (OUT, FULL,
                         "pg_call dispatcher; replies carry query rows"),
     "mcp-proxy.py":    (OUT, FULL,
@@ -327,7 +330,7 @@ WIRE = {
 
 # Declared totals, so a silent re-classification of one row trips a case rather
 # than sliding through as "the table matches the table".
-DECLARED_FULL = 17
+DECLARED_FULL = 18
 DECLARED_MINIMAL = 1
 DECLARED_SILENT = 2
 

@@ -185,6 +185,7 @@ CODESEARCH_CANONICAL_NAME = "_mcp_codesearch.py"
 OAUTH_CANONICAL_NAME = "_mcp_oauth.py"
 HTTPFRONT_CANONICAL_NAME = "_mcp_httpfront.py"
 DISPATCH_CANONICAL_NAME = "_mcp_dispatch.py"
+SPOOL_CANONICAL_NAME = "_mcp_spool.py"
 # The registry is part of the same contract: it is written out by hand in the
 # generator precisely so a new `_mcp_*.py` file cannot become a generation
 # source by existing, and a test that read it back off a glob would agree with
@@ -198,7 +199,8 @@ CANONICAL_NAMES = (BROTLI_CANONICAL_NAME, CHROME_CANONICAL_NAME,
                    DISPATCH_CANONICAL_NAME,
                    HTTPFRONT_CANONICAL_NAME, LOGGING_CANONICAL_NAME,
                    LSP_CANONICAL_NAME, OAUTH_CANONICAL_NAME,
-                   PAGING_CANONICAL_NAME, WEBSEARCH_CANONICAL_NAME,
+                   PAGING_CANONICAL_NAME, SPOOL_CANONICAL_NAME,
+                   WEBSEARCH_CANONICAL_NAME,
                    WEBSOCKET_CANONICAL_NAME, ZSTD_CANONICAL_NAME)
 
 # The hosts OUTSIDE `TARGET_GLOB`, mirrored for the reason the source registry
@@ -208,7 +210,7 @@ CANONICAL_NAMES = (BROTLI_CANONICAL_NAME, CHROME_CANONICAL_NAME,
 # `fleet-ok` gates these alongside the servers -- a declared host the gate did
 # not walk would be a target whose drift nothing reports.
 DECLARED_HOSTS = ("search_duckduckgo.py", "search_github.py", "llm-router.py",
-                  "fetch.py", "gpu-router.py")
+                  "fetch.py", "messagebox-hook.py", "gpu-router.py")
 
 # The sources a host takes WHOLE or not at all (G-c): the Chrome client and its
 # two decoders are one state machine whose blocks call one another, so a host
@@ -218,8 +220,8 @@ DECLARED_HOSTS = ("search_duckduckgo.py", "search_github.py", "llm-router.py",
 # back off the generator would agree with a source quietly dropped from it.
 # `sources-registered` asserts the two spellings agree.
 WHOLE_SOURCES = (BROTLI_CANONICAL_NAME, CHROME_CANONICAL_NAME,
-                 CODESEARCH_CANONICAL_NAME, WEBSEARCH_CANONICAL_NAME,
-                 ZSTD_CANONICAL_NAME)
+                 CODESEARCH_CANONICAL_NAME, SPOOL_CANONICAL_NAME,
+                 WEBSEARCH_CANONICAL_NAME, ZSTD_CANONICAL_NAME)
 
 # The one row `--census hosts` renders for a whole source whose blocks all share
 # one host set. Spelled here, not imported, because it is a page format the
@@ -601,7 +603,9 @@ def tab_host(names, source=PAGING_CANONICAL_NAME):
     and an eighth, for `secrets` and `select`, when the OAuth core arrived,
     and a ninth time, for `io`, `socketserver` and `Optional`, when the HTTP front
     arrived, and a tenth, for `difflib`, when the dispatch source's near-miss
-    suggestion arrived.
+    suggestion arrived, and an eleventh, for `stat`, `subprocess` and
+    `NamedTuple`, when the spool source (the messagebox server and its hook)
+    arrived.
     """
     return (
         '"""A tab-indented target."""\n'
@@ -626,14 +630,16 @@ def tab_host(names, source=PAGING_CANONICAL_NAME):
         "import socket\n"
         "import socketserver\n"
         "import ssl\n"
+        "import stat\n"
         "import struct\n"
+        "import subprocess\n"
         "import sys\n"
         "import time\n"
         "import unicodedata\n"
         "import urllib.parse\n"
         "import zlib\n"
         "from html.parser import HTMLParser\n"
-        "from typing import Any, Optional\n"
+        "from typing import Any, NamedTuple, Optional\n"
         "from urllib.parse import parse_qs, urlencode, urlparse\n"
         "from urllib.request import url2pathname\n"
         "\n\n"
@@ -2444,7 +2450,8 @@ def group_tabs(suite, mod):
                             "search_github.py": "tab",
                             "llm-router.py": "space",
                             "fetch.py": "tab",
-                            "gpu-router.py": "space"},
+                            "gpu-router.py": "space",
+                            "messagebox-hook.py": "space"},
         "expected both search scripts and fetch.py to be tab hosts and both routers space hosts, got %s"
         % declared_styles,
     )

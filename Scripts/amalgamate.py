@@ -79,6 +79,7 @@ CANONICAL_NAMES = ("_mcp_brotli.py", "_mcp_chrome.py", "_mcp_codesearch.py",
                    "_mcp_httpfront.py", "_mcp_json.py",
                    "_mcp_logging.py",
                    "_mcp_lsp.py", "_mcp_oauth.py", "_mcp_paging.py",
+                   "_mcp_spool.py",
                    "_mcp_websearch.py", "_mcp_websocket.py", "_mcp_zstd.py")
 CANONICAL_SOURCES = {name: SCRIPTS_DIR / name for name in CANONICAL_NAMES}
 
@@ -99,8 +100,15 @@ CANONICAL_SOURCES = {name: SCRIPTS_DIR / name for name in CANONICAL_NAMES}
 # a supervisor and reverse proxy for stable-diffusion.cpp sd-server; like
 # llm-router.py it takes `_configure_logging`, the `_log_value` sanitiser and
 # the stdlib HTTP front from Scripts/_mcp_httpfront.py.
+#
+# messagebox-hook.py is the asyncRewake hook half of mcp-messagebox: a stdlib
+# script run as `python3 -I <path>` (so it cannot import a sibling at all), not
+# an MCP server. It takes Scripts/_mcp_spool.py WHOLE -- the owner walk, the
+# text rule and the record check it must share with the server it reads for --
+# and nothing else, and it must stay free of any network import.
 DECLARED_HOSTS = ("search_duckduckgo.py", "search_github.py",
-                  "llm-router.py", "fetch.py", "gpu-router.py")
+                  "llm-router.py", "fetch.py", "messagebox-hook.py",
+                  "gpu-router.py")
 
 # Canonical sources a host takes WHOLE or not at all (G-c): the Chrome client
 # and its two decoders are one state machine whose blocks call each other, so a
@@ -114,7 +122,7 @@ DECLARED_HOSTS = ("search_duckduckgo.py", "search_github.py",
 # per-block rows. tests/test_generated_region.py mirrors this tuple the way it
 # mirrors `CANONICAL_NAMES`.
 WHOLE_SOURCES = ("_mcp_brotli.py", "_mcp_chrome.py", "_mcp_codesearch.py",
-                 "_mcp_websearch.py", "_mcp_zstd.py")
+                 "_mcp_spool.py", "_mcp_websearch.py", "_mcp_zstd.py")
 
 # The repo root, derived the same way `SCRIPTS_DIR` is and for the same reason:
 # `Scripts/` is a directory of this repository, so its parent is the root that
@@ -175,6 +183,27 @@ HAND_COPY_REASONS: Dict[Tuple[str, str], str] = {
     ("mcp-skill.py", "_web_clean"):
         "_mcp_websearch.py is a WHOLE source (G-c); mcp-skill needs its "
         "sanitizer and none of the search",
+    ("mcp-gd.py", "_O_DIRECTORY"):
+        "a different domain: mcp-gd's own file-hygiene flags; _mcp_spool.py holds "
+        "the same one-liner for the messagebox server and its hook",
+    ("mcp-gd.py", "_O_NOFOLLOW"):
+        "a different domain: mcp-gd's own file-hygiene flags; _mcp_spool.py holds "
+        "the same one-liner for the messagebox server and its hook",
+    ("mcp-skill.py", "_O_CLOEXEC"):
+        "a different domain: the skill loader's own file-hygiene flags; "
+        "_mcp_spool.py holds the same one-liner for the messagebox server and its hook",
+    ("mcp-skill.py", "_O_DIRECTORY"):
+        "a different domain: the skill loader's own file-hygiene flags; "
+        "_mcp_spool.py holds the same one-liner for the messagebox server and its hook",
+    ("mcp-skill.py", "_O_NOCTTY"):
+        "a different domain: the skill loader's own file-hygiene flags; "
+        "_mcp_spool.py holds the same one-liner for the messagebox server and its hook",
+    ("mcp-skill.py", "_O_NOFOLLOW"):
+        "a different domain: the skill loader's own file-hygiene flags; "
+        "_mcp_spool.py holds the same one-liner for the messagebox server and its hook",
+    ("mcp-skill.py", "_O_NONBLOCK"):
+        "a different domain: the skill loader's own file-hygiene flags; "
+        "_mcp_spool.py holds the same one-liner for the messagebox server and its hook",
     ("mcp-tshark.py", "_bool_param"):
         "keeps the older (params, key, default) signature",
     ("mcp-webfetch.py", "_bool_param"):
