@@ -5381,6 +5381,11 @@ def _rt_rs_count(value: Any) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 
 
+# The closed vocabularies the terminal-event debug line may echo (anything else is `other`).
+_RT_RS_LOG_STATUSES = frozenset({"completed", "incomplete", "failed", "cancelled", "in_progress", "queued"})
+_RT_RS_LOG_REASONS = frozenset({"max_output_tokens", "content_filter"})
+
+
 class ResponsesStreamTranslator:
     """The Responses stream translator (sans-IO, P9, KD-4, KD-7, KD-16).
 
@@ -5604,13 +5609,45 @@ class ResponsesStreamTranslator:
                 "output_tokens": _rt_rs_count(usage.get("output_tokens")),
                 "cache_read_input_tokens": cached}
 
+    @staticmethod
+    def _log_terminal(obj: dict) -> None:
+        """One debug line for a terminal event, so a cut answer can be explained: the response id
+        (only a plain token), the status and the incomplete reason (closed vocabularies, else
+        `other`) and the usage integers present. No upstream free text reaches it (ADR 0011)."""
+        if not log.isEnabledFor(logging.DEBUG):
+            return
+        response = obj.get("response")
+        response = response if isinstance(response, dict) else {}
+        parts = []
+        rid = response.get("id")
+        if isinstance(rid, str) and _RT_PATH_SEGMENT_RE.fullmatch(rid):
+            parts.append("id=" + rid)
+        status = response.get("status")
+        if isinstance(status, str):
+            parts.append("status=" + (status if status in _RT_RS_LOG_STATUSES else "other"))
+        details = response.get("incomplete_details")
+        reason = details.get("reason") if isinstance(details, dict) else None
+        if isinstance(reason, str):
+            parts.append("reason=" + (reason if reason in _RT_RS_LOG_REASONS else "other"))
+        usage = response.get("usage")
+        usage = usage if isinstance(usage, dict) else {}
+        for key, holder, name in (("input_tokens", usage, "input_tokens"), ("output_tokens", usage, "output_tokens"),
+                                  ("cached_tokens", usage.get("input_tokens_details"), "cached_tokens"),
+                                  ("reasoning_tokens", usage.get("output_tokens_details"), "reasoning_tokens")):
+            value = holder.get(name) if isinstance(holder, dict) else None
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                parts.append("%s=%d" % (key, value))
+        log.debug("responses terminal %s", " ".join(parts))
+
     def _on_completed(self, obj: dict) -> bytes:
+        self._log_terminal(obj)
         if self.cut_calls:
             return self.fail("api_error", "backend returned malformed tool arguments")
         return self.sink.finish("end_turn", self._usage(obj))
 
     def _on_incomplete(self, obj: dict) -> bytes:
         """max_tokens when the output cap was hit (a call it cut is dropped), else end_turn."""
+        self._log_terminal(obj)
         response = obj.get("response")
         details = response.get("incomplete_details") if isinstance(response, dict) else None
         reason = details.get("reason") if isinstance(details, dict) else None
@@ -5621,6 +5658,8 @@ class ResponsesStreamTranslator:
     def _on_error(self, obj: dict) -> bytes:
         """`error` / response.failed: the code (code, error.code or response.error.code)
         typed through _RT_RS_ERROR_CODES (default api_error), the message scrubbed (KD-9)."""
+        if obj.get("type") == "response.failed":
+            self._log_terminal(obj)
         code, message = obj.get("code"), obj.get("message")
         nested = obj.get("error")
         response = obj.get("response")

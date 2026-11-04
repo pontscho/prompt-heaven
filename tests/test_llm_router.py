@@ -12823,9 +12823,10 @@ GM_CASES = (
     "overloaded codes -> overloaded_error",  # M24
     "failure line: upstream code+message",   # M25
     "cap cuts a tool call -> max_tokens",    # M26
+    "terminal event: one debug line",        # M27
 )
 GM_IDS = ("M1", "M2", "M3", "M4", "M5", "M6", "M7", "M8", "M9", "M10", "M11", "M12", "M13", "M14", "M15",
-          "M16", "M17", "M18", "M19", "M20", "M21", "M22", "M23", "M24", "M25", "M26")
+          "M16", "M17", "M18", "M19", "M20", "M21", "M22", "M23", "M24", "M25", "M26", "M27")
 
 GM_BACKEND = "tf-codex-m"
 GM_ROUTE = "claude-tf-m"                    # the requested model (an exact route); echoed, never the upstream's
@@ -14151,6 +14152,79 @@ def group_m(suite, fixture_root):
             shown.append("%s -> %s" % (label, ev_shape(run["events"])))
         return problems, ["cap cut     : " + s for s in shown]
 
+    def m27():
+        # The terminal event writes ONE debug line: the response id (only if it is a plain token), the
+        # status, the incomplete reason (a closed vocabulary, else `other`) and the usage integers --
+        # so a max_tokens answer can be explained. Upstream free text never reaches it (ADR 0011).
+        problems, shown = [], []
+        hostile = "tf-m27-HOSTILE\nWARNING forged \x1b[31m"
+        usage = {"input_tokens": 120, "output_tokens": 64, "total_tokens": 184,
+                 "input_tokens_details": {"cached_tokens": 100},
+                 "output_tokens_details": {"reasoning_tokens": 40}}
+
+        def lines_of(event):
+            return gm_lines(gm_created(), gm_msg_added(), gm_text("tf m27"), event)
+
+        def terminal_lines(lines):
+            records = []
+
+            class Cap(logging.Handler):
+                def emit(self, record):
+                    records.append(record.getMessage())
+            handler, old = Cap(logging.DEBUG), mod.log.level
+            mod.log.addHandler(handler)
+            mod.log.setLevel(logging.DEBUG)
+            try:
+                drive(lines)
+            finally:
+                mod.log.removeHandler(handler)
+                mod.log.setLevel(old)
+            return [r for r in records if r.startswith("responses terminal")]
+
+        def field(line, key):
+            m = re.search(r"\b%s=(\S+)" % key, line)
+            return m.group(1) if m else None
+
+        inc = gm_completed(usage, kind="response.incomplete", status="incomplete",
+                           incomplete_details={"reason": "max_output_tokens"})
+        got = terminal_lines(lines_of(inc))
+        if len(got) != 1:
+            problems.append("incomplete: %d terminal line(s), expected 1: %r" % (len(got), got))
+        else:
+            for key, want in (("id", "resp_tf_m_inline"), ("status", "incomplete"),
+                              ("reason", "max_output_tokens"), ("input_tokens", "120"),
+                              ("output_tokens", "64"), ("cached_tokens", "100"), ("reasoning_tokens", "40")):
+                if field(got[0], key) != want:
+                    problems.append("incomplete: %s is %r, expected %r in %r" % (key, field(got[0], key), want, got[0]))
+            shown.append("incomplete   : " + got[0][:200])
+        done = gm_completed(gm_usage(7, 3))
+        got = terminal_lines(lines_of(done))
+        if len(got) != 1:
+            problems.append("completed: %d terminal line(s), expected 1: %r" % (len(got), got))
+        else:
+            for key, want in (("status", "completed"), ("input_tokens", "7"), ("output_tokens", "3")):
+                if field(got[0], key) != want:
+                    problems.append("completed: %s is %r, expected %r in %r" % (key, field(got[0], key), want, got[0]))
+            if "reason=" in got[0] or "reasoning_tokens=" in got[0]:
+                problems.append("completed: an absent field is printed: %r" % got[0])
+        bad = gm_completed(usage, kind="response.incomplete", status=hostile,
+                           incomplete_details={"reason": hostile})
+        bad["response"]["id"] = hostile
+        got = terminal_lines(lines_of(bad))
+        if len(got) != 1:
+            problems.append("hostile: %d terminal line(s), expected 1: %r" % (len(got), got))
+        elif "HOSTILE" in got[0] or "forged" in got[0] or "\n" in got[0] or "\x1b" in got[0] or " id=" in got[0]:
+            problems.append("hostile text reached the line: %r" % got[0][:200])
+        elif field(got[0], "reason") != "other":
+            problems.append("hostile reason is %r, expected 'other'" % field(got[0], "reason"))
+        else:
+            shown.append("hostile      : " + got[0][:200])
+        failed = gm_completed(usage, kind="response.failed", status="failed")
+        got = terminal_lines(lines_of(failed))
+        if len(got) != 1 or field(got[0], "status") != "failed":
+            problems.append("failed: expected one line with status=failed, got %r" % (got,))
+        return problems, shown
+
     def needs(fn, *names):
         """The case, failing once with the missing names before it runs (one red line, not one per call)."""
         def case():
@@ -14165,7 +14239,7 @@ def group_m(suite, fixture_root):
            needs(m17, tr), needs(m18, tr), needs(m19, tr, col), needs(m20, "ResponsesAdapter"),
            needs(m21, tr, "OpenaiAdapter"), needs(m22, tr, "CodexAdapter"),
            needs(m23, "ResponsesAdapter"), needs(m24, tr), needs(m25, tr, "_rt_upstream_detail"),
-           needs(m26, tr))
+           needs(m26, tr), needs(m27, tr))
     try:
         for cid, fn in zip(GM_CASES, fns):
             try:
