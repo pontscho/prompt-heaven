@@ -5550,6 +5550,16 @@ class ResponsesStreamTranslator:
         self.fc_arg_deltas = 0
         self.text_deltas = 0
         self.summary_events = 0
+        # Done-item facts for the terminal line (logging only; ADR 0011). The argument deltas are
+        # kept as text only while DEBUG is enabled, keyed by item id, and only as far as the
+        # translator's existing args_bytes ceiling (_RT_BUFFERED_TOOL_LIMIT, 8 MiB in total, at
+        # most _RT_BUFFERED_TOOL_COUNT keys): nothing is retained at INFO and above.
+        self.done_items = 0
+        self.fc_done = 0
+        self.fc_done_status = [0, 0, 0, 0]      # completed, incomplete, other, absent
+        self.fc_args_json = "none"              # of the LAST done function_call: valid | invalid | none
+        self.fc_args_match = "na"               # its arguments == the concatenated deltas: yes | no | na
+        self.fc_deltas: Dict[Any, List[str]] = {}
 
     @property
     def started(self) -> bool:
@@ -5662,6 +5672,9 @@ class ResponsesStreamTranslator:
             self.args_bytes += len(delta.encode("utf-8", "surrogatepass"))
             if self.args_bytes > _RT_BUFFERED_TOOL_LIMIT:
                 return self.fail("api_error", "backend tool arguments too large")
+            if log.isEnabledFor(logging.DEBUG):
+                key = obj.get("item_id") if isinstance(obj.get("item_id"), str) else None
+                self.fc_deltas.setdefault(key, []).append(delta)
         return b""
 
     def _on_summary_part(self, obj: dict) -> bytes:
@@ -5689,6 +5702,9 @@ class ResponsesStreamTranslator:
         slot = _rt_rs_item_slot(item.get("type"))
         if slot in self.open_items:
             self.open_items.remove(slot)
+        self.done_items += 1
+        if item.get("type") == "function_call":
+            self._note_call_done(item)
         if item.get("type") == "reasoning":
             streamed = self.summary_streamed
             self.summary_parts, self.summary_streamed = 0, False
@@ -5726,6 +5742,32 @@ class ResponsesStreamTranslator:
         if not isinstance(call_id, str) or not call_id:
             return self.fail("api_error", "backend returned a tool call without an id")
         return self.sink.tool_block(_rt_rs_anthropic_id(call_id), name, args_json)
+
+    def _note_call_done(self, item: dict) -> None:
+        """Debug-line facts of one done function_call (counts and closed tokens; never its content)."""
+        if not log.isEnabledFor(logging.DEBUG):
+            return
+        self.fc_done += 1
+        status = item.get("status")
+        if status is None:
+            self.fc_done_status[3] += 1
+        elif status == "completed":
+            self.fc_done_status[0] += 1
+        elif status == "incomplete":
+            self.fc_done_status[1] += 1
+        else:
+            self.fc_done_status[2] += 1
+        item_id = item.get("id")
+        pieces = self.fc_deltas.get(item_id if isinstance(item_id, str) else None)
+        deltas = "".join(pieces) if pieces else None
+        own = item.get("arguments")
+        own = own if isinstance(own, str) else None
+        text = own if own is not None else (deltas or "")
+        try:
+            self.fc_args_json = "valid" if isinstance(_rt_loads(text or "{}"), dict) else "invalid"
+        except (ValueError, RecursionError):
+            self.fc_args_json = "invalid"
+        self.fc_args_match = "na" if own is None or deltas is None else ("yes" if own == deltas else "no")
 
     @staticmethod
     def _usage(obj: dict) -> Dict[str, int]:
@@ -5775,6 +5817,11 @@ class ResponsesStreamTranslator:
                      % (self.fc_arg_deltas, self.args_bytes, self.text_deltas, self.summary_events))
         parts.append("open_item=" + (_RT_RS_ITEM_TYPES[self.open_items[-1]] if self.open_items else "none"))
         parts.append("events_total=%d" % self.events_total)
+        parts.append("done_items=%d fc_done=%d fc_done_status=%s fc_args_json=%s fc_args_matches_deltas=%s"
+                     % (self.done_items, self.fc_done,
+                        ",".join("%s:%d" % (t, n) for t, n in zip(("completed", "incomplete", "other", "absent"),
+                                                                   self.fc_done_status)),
+                        self.fc_args_json, self.fc_args_match))
         if self.ttf_item_ms >= 0:
             parts.append("ttf_item_ms=%d" % self.ttf_item_ms)
         log.debug("responses terminal %s", " ".join(parts))

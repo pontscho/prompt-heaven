@@ -12827,9 +12827,10 @@ GM_CASES = (
     "request shape: one debug line",         # M28
     "capture_dir: opt-in last body",         # M29
     "terminal line: stream counts",          # M30
+    "terminal line: done call facts",        # M31
 )
 GM_IDS = ("M1", "M2", "M3", "M4", "M5", "M6", "M7", "M8", "M9", "M10", "M11", "M12", "M13", "M14", "M15",
-          "M16", "M17", "M18", "M19", "M20", "M21", "M22", "M23", "M24", "M25", "M26", "M27", "M28", "M29", "M30")
+          "M16", "M17", "M18", "M19", "M20", "M21", "M22", "M23", "M24", "M25", "M26", "M27", "M28", "M29", "M30", "M31")
 
 GM_BACKEND = "tf-codex-m"
 GM_ROUTE = "claude-tf-m"                    # the requested model (an exact route); echoed, never the upstream's
@@ -14495,6 +14496,89 @@ def group_m(suite, fixture_root):
                ("events_total", "2")), absent=("ttf_item_ms",))
         return problems, shown
 
+    def m31():
+        # The done function_call items, as the terminal line reports them: how many output_item.done
+        # events and how many of them were function_calls, their item `status` as closed counts, and whether
+        # the LAST one's arguments parse as a JSON object and equal the concatenated deltas. Counts and closed
+        # tokens only; the status value and the arguments are never echoed (ADR 0011).
+        problems, shown = [], []
+        hostile = "tf-m31-HOSTILE\nWARNING forged \x1b[31m"
+
+        def terminal_line(lines):
+            records = []
+
+            class Cap(logging.Handler):
+                def emit(self, record):
+                    records.append(record.getMessage())
+            handler, old = Cap(logging.DEBUG), mod.log.level
+            mod.log.addHandler(handler)
+            mod.log.setLevel(logging.DEBUG)
+            try:
+                gg_drive(translator(), lines, True)
+            finally:
+                mod.log.removeHandler(handler)
+                mod.log.setLevel(old)
+            got = [r for r in records if r.startswith("responses terminal")]
+            return got[0] if len(got) == 1 else None
+
+        def field(line, key):
+            m = re.search(r"\b%s=(\S+)" % key, line)
+            return m.group(1) if m else None
+
+        def check(label, lines, want):
+            line = terminal_line(lines)
+            if line is None:
+                problems.append("%s: not exactly one terminal line" % label)
+                return
+            for key, value in want:
+                if field(line, key) != value:
+                    problems.append("%s: %s is %r, expected %r in %r" % (label, key, field(line, key), value, line[:360]))
+            if "HOSTILE" in line or "forged" in line or "\x1b" in line or "\n" in line or "command" in line:
+                problems.append("%s: hostile or argument text reached the line: %r" % (label, line[:200]))
+            shown.append("%-14s: %s" % (label, line[:360]))
+
+        inc = gm_completed(gm_usage(5, 2), kind="response.incomplete", status="incomplete",
+                           incomplete_details={"reason": "max_output_tokens"})
+        good = '{"command":"ls"}'
+        deltas = (gm_args(0, "call_tfm31", '{"comm'), gm_args(0, "call_tfm31", 'and":"ls"}'))
+
+        def done_item(status="completed", args=good, drop_status=False, drop_args=False):
+            ev = gm_call_done(0, "call_tfm31", "Bash", args)
+            if drop_status:
+                del ev["item"]["status"]
+            else:
+                ev["item"]["status"] = status
+            if drop_args:
+                del ev["item"]["arguments"]
+            return ev
+
+        zero = "completed:0,incomplete:0,other:0,absent:0"
+        check("complete in inc", gm_lines(gm_created(), gm_call_added(0, "call_tfm31", "Bash"), *deltas,
+                                          done_item(), inc),
+              (("done_items", "1"), ("fc_done", "1"), ("fc_done_status", "completed:1,incomplete:0,other:0,absent:0"),
+               ("fc_args_json", "valid"), ("fc_args_matches_deltas", "yes"), ("open_item", "none")))
+        check("cut", gm_lines(gm_created(), gm_call_added(0, "call_tfm31", "Bash"), *deltas, inc),
+              (("done_items", "0"), ("fc_done", "0"), ("fc_done_status", zero),
+               ("fc_args_json", "none"), ("fc_args_matches_deltas", "na"), ("open_item", "function_call")))
+        check("invalid json", gm_lines(gm_created(), gm_call_added(0, "call_tfm31", "Bash"),
+                                       gm_args(0, "call_tfm31", '{"comm'), done_item("incomplete", '{"comm'), inc),
+              (("done_items", "1"), ("fc_done", "1"), ("fc_done_status", "completed:0,incomplete:1,other:0,absent:0"),
+               ("fc_args_json", "invalid"), ("fc_args_matches_deltas", "yes")))
+        check("absent status", gm_lines(gm_created(), gm_call_added(0, "call_tfm31", "Bash"), *deltas,
+                                        done_item(drop_status=True, args='{"command":"pwd"}'), inc),
+              (("fc_done_status", "completed:0,incomplete:0,other:0,absent:1"), ("fc_args_json", "valid"),
+               ("fc_args_matches_deltas", "no")))
+        check("hostile status", gm_lines(gm_created(), gm_call_added(0, "call_tfm31", "Bash"), *deltas,
+                                         done_item(hostile), inc),
+              (("fc_done_status", "completed:0,incomplete:0,other:1,absent:0"), ("fc_args_json", "valid")))
+        check("deltas only", gm_lines(gm_created(), gm_call_added(0, "call_tfm31", "Bash"), *deltas,
+                                      done_item(drop_args=True), inc),
+              (("fc_args_json", "valid"), ("fc_args_matches_deltas", "na")))
+        check("non-object", gm_lines(gm_created(), gm_call_added(0, "call_tfm31", "Bash"),
+                                     done_item(args="[1]"), inc),
+              (("fc_args_json", "invalid"), ("fc_args_matches_deltas", "na")))
+        return problems, shown
+
     def needs(fn, *names):
         """The case, failing once with the missing names before it runs (one red line, not one per call)."""
         def case():
@@ -14510,7 +14594,7 @@ def group_m(suite, fixture_root):
            needs(m21, tr, "OpenaiAdapter"), needs(m22, tr, "CodexAdapter"),
            needs(m23, "ResponsesAdapter"), needs(m24, tr), needs(m25, tr, "_rt_upstream_detail"),
            needs(m26, tr), needs(m27, tr), needs(m28, "ResponsesAdapter"), needs(m29, "ResponsesAdapter"),
-           needs(m30, tr))
+           needs(m30, tr), needs(m31, tr))
     try:
         for cid, fn in zip(GM_CASES, fns):
             try:
