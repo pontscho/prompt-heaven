@@ -7,13 +7,14 @@ description: Loadable knowledge packs activated on-demand or via Skill permissio
 sources:
   - ClaudeCode/skills
 verified:
-  commit: bb818d9
-  date: 2026-10-29
+  commit: be43ed1
+  date: 2026-11-04
 links:
   - overview
   - agents
   - tests
   - requirements-yaml
+  - mcp-gd
   - 0005-approve-the-wrapper-not-the-command
   - 0009-the-first-reader-is-a-cold-model
   - 0020-the-prompt-is-its-own-block
@@ -55,6 +56,8 @@ description is what Claude matches against to auto-activate the skill.
 | `p:mcp-inspect` | Read-only system inspection and syntax/format validation routing for `inspect_call`, replacing `ps` / `lsof` / `df` / `stat` / `--version` one-liners and the validate-by-shell idioms `ClaudeCode/skills/mcp-inspect/SKILL.md`. Its `md_outline` function (aliases `outline`, `headers`, `toc`, `md`, `markdown`) replaces `wc -l f.md; grep -n "^#" f.md`: a `wc -l`-exact line count plus one `line level text` row per ATX header, fenced code skipped, `max_level` / `limit` / `offset` paging; Setext headers and fences nested in blockquotes or list items are not handled `Scripts/mcp-inspect.py:h_md_outline` |
 | `p:mcp-forge` | `project-forge.yaml` build orchestration |
 | `p:writer-skill` / `p:writer-agent` | Authoring new skills and agents |
+| `p:humanizer` | Rewrites AI-sounding prose (READMEs, PR descriptions, commit messages, articles, docs) so it reads like the writer without changing what it says, in English and Hungarian; 26 numbered patterns in six groups, strongest first, each with a before/after pair, plus a draft-check-final procedure that forbids adding any fact the source lacks `ClaudeCode/skills/humanizer/SKILL.md`. It exists because the other writing skills help draft or shape text and none answers "does this read like a chatbot wrote it". It is a patched fork of blader/humanizer v3.0.0 (MIT, patterns from Wikipedia's "Signs of AI writing") rather than a copy, because four upstream rules are wrong here: section 10 (unhyphenate predicative compounds) is removed since it degrades permanent compounds; section 8 goes from a dash ban to about one dash per paragraph, since upstream itself marks dashes weak alone and the Hungarian gondolatjel is ordinary punctuation; section 21 goes from "straight quotes" to "match the target's convention", since Hungarian uses the low-high pair; section 12's word list is scoped so it does not fire on domain terms such as `robust`, `key` or `gate`. Section 26 is new: the structural patterns carry into Hungarian at the same strength and only the vocabulary lists get Hungarian equivalents, including the *kerül* passive and the participle rider. Upstream numbering is kept, removed sections included, and a fork note at the top lists every divergence so the file stays diffable when upstream moves. The conversational half lives outside this repo on purpose, in the Voice section of the Safranek persona: a skill fires only when invoked, which is the wrong mechanism for how every reply sounds, so the persona carries the short hard rules and this skill is the long-form catalogue |
+| `p:mcp-gd` | The model-facing half of the Google Drive, Calendar and Sheets server behind `gd_call` (functions, reply envelope, refusal codes, rules), plus an operator guide for Google Cloud setup, config, launch and login `ClaudeCode/skills/mcp-gd/SKILL.md` `ClaudeCode/skills/mcp-gd/setup.md` — see [[mcp-gd]] |
 | `p:wiki` | This documentation-wiki engine ([[wiki-engine]]) |
 | `p:recap` | Session recap into the AI Soul memory system |
 | `p:feature-plan` / `p:task-plan` / `p:implement` | Migrated `/p:` workflow chain: plan -> `requirements.yaml` -> execute. Both file names are defaults, overridable per run so features planned in parallel each keep their own pair: `/p:feature-plan --output <plan.md>`, `/p:task-plan --plan <plan.md> --yaml <out.yaml>`, `/p:implement [<yaml>] --doc <plan.md>`; `/p:implement` resolves one `YAML_PATH` and one `DOC_PATH` and threads both into every task-script call and mason brief `ClaudeCode/skills/_lib/handoff-contracts.md` `ClaudeCode/skills/implement/SKILL.md`. Plan slots are per YAML file, so a live `roadmap_item` blocks only the file the run would overwrite `ClaudeCode/skills/task-plan/SKILL.md` |
