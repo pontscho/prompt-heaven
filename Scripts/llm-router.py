@@ -5347,6 +5347,42 @@ def _rt_rs_translate(body: dict, route: RouteSpec, backend: str,
     return out, dropped
 
 
+_RT_RS_LOG_ITEM_TYPES = frozenset({"message", "function_call", "function_call_output", "reasoning"})
+_RT_RS_LOG_EFFORTS = frozenset({"low", "medium", "high", "xhigh"})
+
+
+def _rt_rs_log_shape(body: dict, raw: bytes) -> None:
+    """One debug line for the SHAPE of the Responses body about to be sent, so a request the
+    upstream cuts can be explained: integers and closed-vocabulary tokens only, never a text
+    (ADR 0011). *raw* is the serialised body the sender posts."""
+    if not log.isEnabledFor(logging.DEBUG):
+        return
+    instructions = body.get("instructions")
+    tools = body.get("tools")
+    tools = tools if isinstance(tools, list) else []
+    items = body.get("input")
+    items = items if isinstance(items, list) else []
+    counts: Dict[str, int] = {}
+    reasoning = enc_bytes = biggest = 0
+    for item in items:
+        kind = item.get("type") if isinstance(item, dict) else None
+        kind = kind if isinstance(kind, str) and kind in _RT_RS_LOG_ITEM_TYPES else "other"
+        counts[kind] = counts.get(kind, 0) + 1
+        biggest = max(biggest, len(_rt_dumps(item)))
+        if kind == "reasoning":
+            reasoning += 1
+            enc = item.get("encrypted_content")
+            enc_bytes += len(enc) if isinstance(enc, str) else 0
+    effort = body.get("reasoning")
+    effort = effort.get("effort") if isinstance(effort, dict) else None
+    effort = "none" if effort is None else (effort if effort in _RT_RS_LOG_EFFORTS else "other")
+    log.debug("responses request instructions_chars=%d tools=%d tools_bytes=%d input_items=%d items=%s "
+              "reasoning_items=%d reasoning_enc_bytes=%d max_item_bytes=%d body_bytes=%d effort=%s parallel=%d",
+              len(instructions) if isinstance(instructions, str) else 0, len(tools), len(_rt_dumps(tools)),
+              len(items), ",".join("%s:%d" % (k, counts[k]) for k in sorted(counts)), reasoning, enc_bytes,
+              biggest, len(raw), effort, 1 if body.get("parallel_tool_calls") is True else 0)
+
+
 # --- Responses stream translation (Plan Step 10) ---
 # One sans-IO state machine for both client modes: a stream client gets its
 # default AnthropicSseEncoder sink, a non-stream client the _RtMessageCollector
@@ -5723,7 +5759,9 @@ class ResponsesAdapter(Adapter):
                     self._pending.pop(next(iter(self._pending)), None)
                 except (StopIteration, RuntimeError):
                     break
-        return row.path, _rt_dumps(translated)
+        raw = _rt_dumps(translated)
+        _rt_rs_log_shape(translated, raw)
+        return row.path, raw
 
     def count_tokens(self, inbound: InboundRequest) -> Union[Tuple[str, bytes], dict]:
         """A local estimate (D4, _rt_ms_estimate) over the translated body; nothing is sent."""

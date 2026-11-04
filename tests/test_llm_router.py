@@ -12824,9 +12824,10 @@ GM_CASES = (
     "failure line: upstream code+message",   # M25
     "cap cuts a tool call -> max_tokens",    # M26
     "terminal event: one debug line",        # M27
+    "request shape: one debug line",         # M28
 )
 GM_IDS = ("M1", "M2", "M3", "M4", "M5", "M6", "M7", "M8", "M9", "M10", "M11", "M12", "M13", "M14", "M15",
-          "M16", "M17", "M18", "M19", "M20", "M21", "M22", "M23", "M24", "M25", "M26", "M27")
+          "M16", "M17", "M18", "M19", "M20", "M21", "M22", "M23", "M24", "M25", "M26", "M27", "M28")
 
 GM_BACKEND = "tf-codex-m"
 GM_ROUTE = "claude-tf-m"                    # the requested model (an exact route); echoed, never the upstream's
@@ -14225,6 +14226,64 @@ def group_m(suite, fixture_root):
             problems.append("failed: expected one line with status=failed, got %r" % (got,))
         return problems, shown
 
+    def m28():
+        # One debug line per outgoing Responses request summarises the SHAPE of the body that is sent
+        # (integers and closed-vocabulary tokens only), so a request the upstream cuts can be explained.
+        # No client text -- system, a tool description, a tool_result -- reaches it (ADR 0011).
+        problems, shown = [], []
+        hostile = "tf-m28-HOSTILE\nWARNING forged \x1b[31m"
+        enc = "QUJDREVGR0g="
+        body = {"model": GM_ROUTE, "max_tokens": 256, "stream": True, "system": "sys " + hostile,
+                "tools": [{"name": "Bash", "description": "d1 " + hostile, "input_schema": {"type": "object"}},
+                          {"name": "Read", "input_schema": {"type": "object"}}],
+                "messages": [{"role": "user", "content": "tf m28 go"},
+                             {"role": "assistant", "content": [
+                                 {"type": "thinking", "thinking": "t " + hostile, "signature": GM_SIG_PREFIX + enc},
+                                 {"type": "tool_use", "id": "toolu_tfm28", "name": "Bash", "input": {"command": "ls"}}]},
+                             {"role": "user", "content": [
+                                 {"type": "tool_result", "tool_use_id": "toolu_tfm28", "content": "r " + hostile}]}]}
+        adapter = (getattr(mod, "ADAPTERS", None) or {}).get("codex") or getattr(mod, GK_ADAPTER["codex"])()
+        inbound = gm_inbound(mod, "codex")
+        inbound = inbound._replace(body=body)
+        records = []
+
+        class Cap(logging.Handler):
+            def emit(self, record):
+                records.append(record.getMessage())
+        handler, old = Cap(logging.DEBUG), mod.log.level
+        mod.log.addHandler(handler)
+        mod.log.setLevel(logging.DEBUG)
+        try:
+            _path, raw = adapter.upstream_request(inbound)
+        finally:
+            mod.log.removeHandler(handler)
+            mod.log.setLevel(old)
+        got = [r for r in records if r.startswith("responses request")]
+        if len(got) != 1:
+            return ["%d 'responses request' line(s), expected 1: %r" % (len(got), got)], []
+        line = got[0]
+        sent = json.loads(raw.decode("utf-8"))
+        items = sent["input"]
+        counts = {}
+        for item in items:
+            counts[item["type"]] = counts.get(item["type"], 0) + 1
+        dump = lambda obj: len(json.dumps(obj, separators=(",", ":"), ensure_ascii=True))  # noqa: E731
+        want = ("responses request instructions_chars=%d tools=%d tools_bytes=%d input_items=%d items=%s "
+                "reasoning_items=%d reasoning_enc_bytes=%d max_item_bytes=%d body_bytes=%d effort=%s parallel=%d"
+                % (len(sent["instructions"]), len(sent["tools"]), dump(sent["tools"]), len(items),
+                   ",".join("%s:%d" % (k, counts[k]) for k in sorted(counts)), counts.get("reasoning", 0),
+                   len(enc), max(dump(i) for i in items), len(raw),
+                   sent["reasoning"].get("effort", "none"), 1 if sent["parallel_tool_calls"] else 0))
+        if line != want:
+            problems.append("line %r, expected %r" % (line[:300], want))
+        if counts != {"message": 1, "reasoning": 1, "function_call": 1, "function_call_output": 1}:
+            problems.append("fixture shape drifted: %r" % (counts,))
+        for r in records:
+            if "HOSTILE" in r or "forged" in r or "\x1b" in r or "tf m28" in r:
+                problems.append("client text reached a log line: %r" % r[:200])
+        shown.append("request line : " + line[:300])
+        return problems, shown
+
     def needs(fn, *names):
         """The case, failing once with the missing names before it runs (one red line, not one per call)."""
         def case():
@@ -14239,7 +14298,7 @@ def group_m(suite, fixture_root):
            needs(m17, tr), needs(m18, tr), needs(m19, tr, col), needs(m20, "ResponsesAdapter"),
            needs(m21, tr, "OpenaiAdapter"), needs(m22, tr, "CodexAdapter"),
            needs(m23, "ResponsesAdapter"), needs(m24, tr), needs(m25, tr, "_rt_upstream_detail"),
-           needs(m26, tr), needs(m27, tr))
+           needs(m26, tr), needs(m27, tr), needs(m28, "ResponsesAdapter"))
     try:
         for cid, fn in zip(GM_CASES, fns):
             try:
