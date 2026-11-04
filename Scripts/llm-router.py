@@ -1090,6 +1090,16 @@ def _rt_opt_quirks(value: Any, where: str) -> Tuple[str, ...]:
     return tuple(value)
 
 
+def _rt_opt_abs_dir(value: Any, where: str) -> str:
+    """A validator for an absolute directory path (capture_dir): a non-empty str that is absolute and
+    holds no NUL or other control character; the refusal names the rule, never the value. Existence,
+    symlink and mode are checked per request (_rt_rs_capture), not here."""
+    if not isinstance(value, str) or not value or not os.path.isabs(value) \
+            or any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
+        raise ConfigError(f"{where}: must be an absolute path without control characters")
+    return value
+
+
 _RT_TEMPERATURE = _rt_opt_float(0.0, 2.0)
 _RT_TOP_P = _rt_opt_float(0.0, 1.0)
 
@@ -5383,6 +5393,56 @@ def _rt_rs_log_shape(body: dict, raw: bytes) -> None:
               biggest, len(raw), effort, 1 if body.get("parallel_tool_calls") is True else 0)
 
 
+_RT_CAPTURE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def _rt_rs_capture(route_name: str, directory: str, raw: bytes) -> None:
+    """The opt-in `capture_dir` route option: keep the exact *raw* body just built as
+    <directory>/<route name>.last.json (0600), only the latest per route, so a request the upstream
+    cuts can be replayed offline. The body holds the conversation: the directory must already exist,
+    be a real directory (not a symlink) and be closed to group and world (mode & 0o077 == 0), else
+    the capture is skipped with ONE fixed-text warning. The file is written to a temp name in the
+    same directory (O_EXCL, O_NOFOLLOW) and renamed over the final name, so a partial file is never
+    visible. Any OSError is swallowed: a capture failure never fails the request. Neither the path, the
+    OS error nor the body is logged (ADR 0011), only the byte count."""
+    name = (_RT_CAPTURE_NAME_RE.sub("_", route_name)[:64] or "_") + ".last.json"
+    tmp = ".%s.%s.tmp" % (name, secrets.token_hex(8))
+    dfd = -1
+    made = False
+    try:
+        try:
+            dfd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            info = os.fstat(dfd)
+        except (OSError, ValueError):
+            log.warning("responses body capture skipped: capture_dir is not a usable directory")
+            return
+        if not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o077:
+            log.warning("responses body capture skipped: capture_dir is not a usable directory")
+            return
+        fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600, dir_fd=dfd)
+        made = True
+        try:
+            os.fchmod(fd, 0o600)
+            view = memoryview(raw)
+            while view:
+                view = view[os.write(fd, view):]
+        finally:
+            os.close(fd)
+        os.replace(tmp, name, src_dir_fd=dfd, dst_dir_fd=dfd)
+        made = False
+        log.debug("responses body captured bytes=%d", len(raw))
+    except OSError:
+        log.warning("responses body capture failed: the file could not be written")
+    finally:
+        if made and dfd >= 0:
+            try:
+                os.unlink(tmp, dir_fd=dfd)
+            except OSError:
+                pass
+        if dfd >= 0:
+            os.close(dfd)
+
+
 # --- Responses stream translation (Plan Step 10) ---
 # One sans-IO state machine for both client modes: a stream client gets its
 # default AnthropicSseEncoder sink, a non-stream client the _RtMessageCollector
@@ -5761,6 +5821,9 @@ class ResponsesAdapter(Adapter):
                     break
         raw = _rt_dumps(translated)
         _rt_rs_log_shape(translated, raw)
+        capture = inbound.route.options.get("capture_dir")
+        if capture is not None:
+            _rt_rs_capture(inbound.route.name, capture, raw)
         return row.path, raw
 
     def count_tokens(self, inbound: InboundRequest) -> Union[Tuple[str, bytes], dict]:
@@ -5963,6 +6026,7 @@ class CodexAdapter(ResponsesImageAdapter):
         "count_divisor": _rt_opt_int(1, 16),
         "reasoning_effort": _rt_opt_enum(_RT_RS_EFFORTS),
         "verbosity": _rt_opt_enum(("low", "medium", "high")),
+        "capture_dir": _rt_opt_abs_dir,     # opt-in: the last outgoing body per route, 0600 (_rt_rs_capture)
     }
     MODALITIES = frozenset({"chat", "image"})
     # Beside the profile row's /codex/responses (J42 pins it), under the row's base (.../backend-api).
@@ -6064,6 +6128,7 @@ class OpenaiAdapter(ResponsesImageAdapter):
         "temperature": _RT_TEMPERATURE,
         "top_p": _RT_TOP_P,
         "max_tokens_cap": _rt_opt_int(1),
+        "capture_dir": _rt_opt_abs_dir,     # opt-in: the last outgoing body per route, 0600 (_rt_rs_capture)
     }
     MODALITIES = frozenset({"chat", "image"})
     IMAGE_PATHS = {"generations": "/v1/images/generations", "edits": "/v1/images/edits"}

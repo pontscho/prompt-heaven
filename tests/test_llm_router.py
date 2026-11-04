@@ -12825,9 +12825,10 @@ GM_CASES = (
     "cap cuts a tool call -> max_tokens",    # M26
     "terminal event: one debug line",        # M27
     "request shape: one debug line",         # M28
+    "capture_dir: opt-in last body",         # M29
 )
 GM_IDS = ("M1", "M2", "M3", "M4", "M5", "M6", "M7", "M8", "M9", "M10", "M11", "M12", "M13", "M14", "M15",
-          "M16", "M17", "M18", "M19", "M20", "M21", "M22", "M23", "M24", "M25", "M26", "M27", "M28")
+          "M16", "M17", "M18", "M19", "M20", "M21", "M22", "M23", "M24", "M25", "M26", "M27", "M28", "M29")
 
 GM_BACKEND = "tf-codex-m"
 GM_ROUTE = "claude-tf-m"                    # the requested model (an exact route); echoed, never the upstream's
@@ -13194,8 +13195,7 @@ def group_m(suite, fixture_root):
     Responses adapters' `json_response`, M20 maps the non-2xx shapes.  Every streamed case
     first asserts a well-formed Anthropic stream (gg_wellformed), then its own rule.
     Before Step 10 lands every case FAILS naming the missing class, never crashes the group."""
-    del fixture_root            # in-process only: nothing is written
-    results = {}
+    results = {}            # in-process only; M29 alone writes, into its own sandboxes under fixture_root
     try:
         mod = H.load_module_from_path("ph_llm_router_m", SERVER)
     except Exception as exc:  # noqa: BLE001 -- an import failure fails the group
@@ -14284,6 +14284,137 @@ def group_m(suite, fixture_root):
         shown.append("request line : " + line[:300])
         return problems, shown
 
+    def m29():
+        # The opt-in `capture_dir` route option keeps the exact bytes of the LAST outgoing Responses body
+        # per route, 0600, via a temp file and a rename. Absent -> nothing is written. A directory that is
+        # group-readable, a symlink or missing -> no file, the request is still built and returned, ONE
+        # fixed-text warning, and no path (nor any client text) in any log line (ADR 0011).
+        problems, shown = [], []
+        adapter = (getattr(mod, "ADAPTERS", None) or {}).get("codex") or getattr(mod, GK_ADAPTER["codex"])()
+        base = gm_inbound(mod, "codex")
+        secret = "tf-m29-SECRET-body"
+
+        def request(options, route_name=GM_ROUTE, text=secret):
+            body = dict(base.body)
+            body["messages"] = [{"role": "user", "content": text}]
+            inbound = base._replace(body=body, route=base.route._replace(name=route_name, options=options))
+            records = []
+
+            class Cap(logging.Handler):
+                def emit(self, record):
+                    records.append((record.levelno, record.getMessage()))
+            handler, old = Cap(logging.DEBUG), mod.log.level
+            mod.log.addHandler(handler)
+            mod.log.setLevel(logging.DEBUG)
+            try:
+                _path, raw = adapter.upstream_request(inbound)
+            finally:
+                mod.log.removeHandler(handler)
+                mod.log.setLevel(old)
+            return raw, records
+
+        def listing(directory):
+            return sorted(os.listdir(directory))
+
+        def leaks(label, records, *needles):
+            return ["%s: a log line carries %r: %r" % (label, n, m[:160])
+                    for _lv, m in records for n in needles if n and n in m]
+
+        # 1. option absent -> no file anywhere, no capture line.
+        box = new_sandbox(fixture_root, "m29-absent")
+        raw, records = request({})
+        if listing(box):
+            problems.append("absent: the sandbox holds %s" % listing(box))
+        if any("captured" in m for _lv, m in records):
+            problems.append("absent: a capture line was logged")
+        # 2. option set -> exact bytes, 0600, replaced (not appended) by the second request.
+        box = new_sandbox(fixture_root, "m29-set")
+        final = os.path.join(box, GM_ROUTE + ".last.json")
+        raw1, records = request({"capture_dir": box})
+        try:
+            with open(final, "rb") as handle:
+                data = handle.read()
+            mode = os.stat(final).st_mode & 0o777
+        except OSError as exc:
+            data, mode = None, None
+            problems.append("set: no capture file (%s)" % type(exc).__name__)
+        if data is not None and data != raw1:
+            problems.append("set: the file is not the exact bytes sent (%d vs %d)" % (len(data), len(raw1)))
+        if mode is not None and mode != 0o600:
+            problems.append("set: mode %o, expected 600" % mode)
+        lines = [m for lv, m in records if m.startswith("responses body captured")]
+        if lines != ["responses body captured bytes=%d" % len(raw1)]:
+            problems.append("set: capture line(s) %r, expected bytes=%d" % (lines, len(raw1)))
+        problems += leaks("set", records, box, secret)
+        raw2, _records = request({"capture_dir": box}, text="tf m29 second, a different and longer body " * 4)
+        with open(final, "rb") as handle:
+            data = handle.read()
+        if data != raw2 or raw2 == raw1:
+            problems.append("set: the second request did not replace the file (%d bytes, sent %d)"
+                            % (len(data), len(raw2)))
+        if listing(box) != [GM_ROUTE + ".last.json"]:
+            problems.append("set: the directory holds %s (a temp file is left)" % listing(box))
+        # the route name is sanitised to [A-Za-z0-9._-] and cut at 64
+        request({"capture_dir": box}, route_name="a/b cé" + "x" * 80)
+        odd = [n for n in listing(box) if n != GM_ROUTE + ".last.json"]
+        if len(odd) != 1 or not odd[0].startswith("a_b_c_xxxx") or len(odd[0]) != 64 + len(".last.json") \
+                or re.search(r"[^A-Za-z0-9._-]", odd[0]):
+            problems.append("set: sanitised route file name is %r" % (odd,))
+        shown.append("set          : %s mode %s bytes %d" % (GM_ROUTE + ".last.json",
+                                                              oct(mode) if mode else mode, len(raw1)))
+        # 3. a group-readable directory, a symlink and a missing directory -> skipped, request returned.
+        real = new_sandbox(fixture_root, "m29-real")
+        loose = new_sandbox(fixture_root, "m29-loose")
+        os.chmod(loose, 0o750)
+        link = os.path.join(new_sandbox(fixture_root, "m29-linkbox"), "link")
+        os.symlink(real, link)
+        missing = os.path.join(real, "nope-m29")
+        for label, directory, watch in (("0750 dir", loose, loose), ("symlink", link, real),
+                                        ("missing", missing, real)):
+            try:
+                raw, records = request({"capture_dir": directory})
+            except Exception as exc:  # noqa: BLE001 -- a capture failure must never fail the request
+                problems.append("%s: the request failed with %s" % (label, type(exc).__name__))
+                continue
+            if not raw or not json.loads(raw.decode("utf-8")).get("input"):
+                problems.append("%s: no request body returned" % label)
+            if listing(watch):
+                problems.append("%s: files appeared: %s" % (label, listing(watch)))
+            warns = [m for lv, m in records if lv >= logging.WARNING]
+            if len(warns) != 1:
+                problems.append("%s: %d warning(s), expected 1: %r" % (label, len(warns), warns))
+            if any("captured" in m for _lv, m in records):
+                problems.append("%s: a capture line was logged" % label)
+            problems += leaks(label, records, directory, real, loose, secret, os.path.basename(directory))
+        os.chmod(loose, 0o700)
+        # 4. config validation: a relative path, a control character and a non-string are refused;
+        # an absolute path is accepted on codex and openai only (any other kind refuses the name).
+        for kind in ("CodexAdapter", "OpenaiAdapter"):
+            cls = getattr(mod, kind, None)
+            if cls is None:
+                problems.append("%s: missing" % kind)
+                continue
+            for label, value in (("relative", "rel/dir"), ("empty", ""), ("NUL", "/tmp/a\x00b"),
+                                 ("newline", "/tmp/a\nb"), ("non-string", 5)):
+                try:
+                    cls.validate_options({"capture_dir": value}, "routes.x.options")
+                except mod.ConfigError as exc:
+                    if "capture_dir" not in str(exc) or "\x00" in str(exc):
+                        problems.append("%s %s: refusal text %r" % (kind, label, str(exc)[:120]))
+                else:
+                    problems.append("%s: capture_dir %s was accepted" % (kind, label))
+            try:
+                got = cls.validate_options({"capture_dir": "/tmp/m29"}, "routes.x.options")
+            except mod.ConfigError as exc:
+                problems.append("%s: an absolute path was refused: %s" % (kind, str(exc)[:120]))
+            else:
+                if got != {"capture_dir": "/tmp/m29"}:
+                    problems.append("%s: validated to %r" % (kind, got))
+        for name, cls in sorted((getattr(mod, "KIND_CLASSES", None) or {}).items()):
+            if name not in ("codex", "openai") and "capture_dir" in getattr(cls, "ROUTE_OPTIONS", {}):
+                problems.append("kind %s accepts capture_dir" % name)
+        return problems, shown
+
     def needs(fn, *names):
         """The case, failing once with the missing names before it runs (one red line, not one per call)."""
         def case():
@@ -14298,7 +14429,7 @@ def group_m(suite, fixture_root):
            needs(m17, tr), needs(m18, tr), needs(m19, tr, col), needs(m20, "ResponsesAdapter"),
            needs(m21, tr, "OpenaiAdapter"), needs(m22, tr, "CodexAdapter"),
            needs(m23, "ResponsesAdapter"), needs(m24, tr), needs(m25, tr, "_rt_upstream_detail"),
-           needs(m26, tr), needs(m27, tr), needs(m28, "ResponsesAdapter"))
+           needs(m26, tr), needs(m27, tr), needs(m28, "ResponsesAdapter"), needs(m29, "ResponsesAdapter"))
     try:
         for cid, fn in zip(GM_CASES, fns):
             try:
