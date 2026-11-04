@@ -372,7 +372,7 @@ Remove these outright. Nothing here needs rewriting.
 
 ### 26. Hungarian equivalents (added in this fork)
 
-The structural patterns in §1 to §6, §13, §19, §20, §22, §23, and §24 transfer to Hungarian unchanged, because they are choices about what a sentence does, not about English. Apply them by the same rules and with the same strength. The vocabulary lists in §12 and §16 are English-specific; use the equivalents below instead. Sections §10 and §21 do not apply to Hungarian at all.
+The structural patterns in §1 to §6, §13, §19, §20, §22, §23, and §24 transfer to Hungarian unchanged, because they are choices about what a sentence does, not about English. Apply them by the same rules and with the same strength. The vocabulary lists in §12 and §16 are English-specific; use the equivalents below instead. Section §10 does not apply to Hungarian at all, and §21 applies in its patched form: keep the Hungarian `„…"` pair.
 
 Surface forms to watch for, section by section:
 
@@ -394,7 +394,7 @@ Two Hungarian-specific cautions. The gondolatjel is standard punctuation here an
 
 ## When not to act
 
-Each pattern describes a default choice, and a person can make any one of them on purpose. Act on a *weak alone* tell only when several tells share a passage. Leave a watched phrase alone inside a quotation, a title, a proper name, or a passage that discusses the phrase rather than uses it. Salutations and sign-offs on a letter or comment predate chatbots. Text written before November 30, 2022 is not AI-written. People who judge by feel do little better than chance, and human writing keeps absorbing AI habits. Several tells together are the safeguard.
+Each pattern describes a default choice, and a person can make any one of them on purpose. Act on a *weak alone* tell only when several tells share a passage. Leave a watched phrase alone inside a quotation, a title, a proper name, or a passage that discusses the phrase rather than uses it. Salutations and sign-offs on a letter or comment predate chatbots. Text written well before late 2022 is very unlikely to be AI-written, so a tell in it is a human habit. People who judge by feel do little better than chance, and human writing keeps absorbing AI habits. Several tells together are the safeguard.
 
 Do not over-correct. Writing stripped to clipped, uniform, telegraphic sentences has failed this skill as badly as writing full of tells. Keep the details that carry the writer's voice unless they hurt the meaning:
 
