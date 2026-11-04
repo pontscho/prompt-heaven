@@ -5480,6 +5480,15 @@ def _rt_rs_count(value: Any) -> int:
 # The closed vocabularies the terminal-event debug line may echo (anything else is `other`).
 _RT_RS_LOG_STATUSES = frozenset({"completed", "incomplete", "failed", "cancelled", "in_progress", "queued"})
 _RT_RS_LOG_REASONS = frozenset({"max_output_tokens", "content_filter"})
+# The output item types the terminal line counts (a slot is the index; anything else is `other`).
+_RT_RS_ITEM_TYPES = ("reasoning", "message", "function_call", "other")
+
+
+def _rt_rs_item_slot(item_type: Any) -> int:
+    """The _RT_RS_ITEM_TYPES slot of an output item type; unknown or non-string -> `other`."""
+    if isinstance(item_type, str) and item_type in _RT_RS_ITEM_TYPES[:3]:
+        return _RT_RS_ITEM_TYPES.index(item_type)
+    return 3
 
 
 class ResponsesStreamTranslator:
@@ -5528,6 +5537,19 @@ class ResponsesStreamTranslator:
         # response (response.incomplete, max_output_tokens), refused as malformed otherwise.
         self.cut_calls = 0
         self.refusal: Optional[str] = None    # the message of the translator's own fail(); the relay logs it
+        # Debug-line counters (integer increments only; ADR 0011): output items added per type
+        # (_RT_RS_ITEM_TYPES order), the added-not-done item types, and the event counts.
+        # The relay injects a monotonic clock and the request's start (this unit is sans-IO: no
+        # clock of its own); without them ttf_item_ms stays unmeasured and is not printed.
+        self.clock: Optional[Callable[[], float]] = None
+        self.t0 = 0.0
+        self.items_added = [0, 0, 0, 0]
+        self.open_items: List[int] = []
+        self.ttf_item_ms = -1
+        self.events_total = 0
+        self.fc_arg_deltas = 0
+        self.text_deltas = 0
+        self.summary_events = 0
 
     @property
     def started(self) -> bool:
@@ -5600,6 +5622,7 @@ class ResponsesStreamTranslator:
             obj = None
         if not isinstance(obj, dict):
             return self.fail("api_error", "backend sent a malformed stream event")
+        self.events_total += 1
         event_type = obj.get("type") if isinstance(obj.get("type"), str) else name
         method = _RT_RS_EVENT_HANDLERS.get(event_type)
         if method is None:
@@ -5613,6 +5636,11 @@ class ResponsesStreamTranslator:
     def _on_item_added(self, obj: dict) -> bytes:
         """A function_call item counts against _RT_BUFFERED_TOOL_COUNT."""
         item = obj.get("item")
+        slot = _rt_rs_item_slot(item.get("type")) if isinstance(item, dict) else 3
+        if self.ttf_item_ms < 0 and self.clock is not None:
+            self.ttf_item_ms = max(0, int((self.clock() - self.t0) * 1000))
+        self.items_added[slot] += 1
+        self.open_items.append(slot)
         if isinstance(item, dict) and item.get("type") == "function_call":
             self.calls += 1
             if self.calls > _RT_BUFFERED_TOOL_COUNT:
@@ -5620,6 +5648,7 @@ class ResponsesStreamTranslator:
         return b""
 
     def _on_text(self, obj: dict) -> bytes:
+        self.text_deltas += 1
         delta = obj.get("delta")
         if isinstance(delta, str) and delta:
             return self.sink.text(delta)
@@ -5627,6 +5656,7 @@ class ResponsesStreamTranslator:
 
     def _on_args_delta(self, obj: dict) -> bytes:
         """Counted only: the authoritative arguments arrive at output_item.done."""
+        self.fc_arg_deltas += 1
         delta = obj.get("delta")
         if isinstance(delta, str):
             self.args_bytes += len(delta.encode("utf-8", "surrogatepass"))
@@ -5636,12 +5666,14 @@ class ResponsesStreamTranslator:
 
     def _on_summary_part(self, obj: dict) -> bytes:
         """A summary part after an earlier one of the same item adds a "\\n\\n" delta."""
+        self.summary_events += 1
         self.summary_parts += 1
         if self.summary_parts > 1 and self.summary_streamed:
             return self.sink.thinking("\n\n")
         return b""
 
     def _on_summary_delta(self, obj: dict) -> bytes:
+        self.summary_events += 1
         delta = obj.get("delta")
         if isinstance(delta, str) and delta:
             self.summary_streamed = True
@@ -5654,6 +5686,9 @@ class ResponsesStreamTranslator:
         item = obj.get("item")
         if not isinstance(item, dict):
             return b""
+        slot = _rt_rs_item_slot(item.get("type"))
+        if slot in self.open_items:
+            self.open_items.remove(slot)
         if item.get("type") == "reasoning":
             streamed = self.summary_streamed
             self.summary_parts, self.summary_streamed = 0, False
@@ -5705,11 +5740,13 @@ class ResponsesStreamTranslator:
                 "output_tokens": _rt_rs_count(usage.get("output_tokens")),
                 "cache_read_input_tokens": cached}
 
-    @staticmethod
-    def _log_terminal(obj: dict) -> None:
+    def _log_terminal(self, obj: dict) -> None:
         """One debug line for a terminal event, so a cut answer can be explained: the response id
         (only a plain token), the status and the incomplete reason (closed vocabularies, else
-        `other`) and the usage integers present. No upstream free text reaches it (ADR 0011)."""
+        `other`), the usage integers present and the counts gathered while the stream was
+        consumed (items added per closed type, argument and text delta counts, the type of the
+        item still open, events seen, ms to the first item). No upstream free text, name or id
+        reaches it (ADR 0011)."""
         if not log.isEnabledFor(logging.DEBUG):
             return
         response = obj.get("response")
@@ -5733,6 +5770,13 @@ class ResponsesStreamTranslator:
             value = holder.get(name) if isinstance(holder, dict) else None
             if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
                 parts.append("%s=%d" % (key, value))
+        parts.append("items_added=" + ",".join("%s:%d" % (t, n) for t, n in zip(_RT_RS_ITEM_TYPES, self.items_added)))
+        parts.append("fc_arg_deltas=%d fc_arg_bytes=%d text_deltas=%d reasoning_summary_events=%d"
+                     % (self.fc_arg_deltas, self.args_bytes, self.text_deltas, self.summary_events))
+        parts.append("open_item=" + (_RT_RS_ITEM_TYPES[self.open_items[-1]] if self.open_items else "none"))
+        parts.append("events_total=%d" % self.events_total)
+        if self.ttf_item_ms >= 0:
+            parts.append("ttf_item_ms=%d" % self.ttf_item_ms)
         log.debug("responses terminal %s", " ".join(parts))
 
     def _on_completed(self, obj: dict) -> bytes:
@@ -9428,7 +9472,7 @@ class _RouterHandler(BaseHTTPRequestHandler):
         t0 = time.monotonic()
         # Per request (a keep-alive connection reuses the handler): the summary fields.
         self._rt_rec = {"endpoint": "-", "route": "-", "kind": "-", "stream": 0, "status": 0,
-                        "up_status": 0, "in": 0, "out": 0, "up_t0": None, "up_t1": None,
+                        "up_status": 0, "in": 0, "out": 0, "up_t0": None, "up_t1": None, "t0": t0,
                         "end": "json", "dropped_thinking": None, "refreshed": 0,
                         "learn_retry": 0, "sampling_dropped": (), "effort": None,
                         "backend": "-", "fail_reason": ""}
@@ -9827,6 +9871,8 @@ class _RouterHandler(BaseHTTPRequestHandler):
             return
         policy = (ADAPTERS[backend.kind].image_stream_policy if image
                   else ADAPTERS[backend.kind].stream_policy)(inbound)
+        if isinstance(translator, ResponsesStreamTranslator):
+            translator.clock, translator.t0 = time.monotonic, rec["t0"]    # for ttf_item_ms
         ctype = (resp.getheader("Content-Type") or "").split(";", 1)[0].strip().lower()
         if ctype != "text/event-stream" and (policy.require_event_stream or ctype != ""):
             log.debug("upstream not an event stream: content_type=%s", _log_value(ctype))

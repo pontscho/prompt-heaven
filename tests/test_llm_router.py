@@ -12826,9 +12826,10 @@ GM_CASES = (
     "terminal event: one debug line",        # M27
     "request shape: one debug line",         # M28
     "capture_dir: opt-in last body",         # M29
+    "terminal line: stream counts",          # M30
 )
 GM_IDS = ("M1", "M2", "M3", "M4", "M5", "M6", "M7", "M8", "M9", "M10", "M11", "M12", "M13", "M14", "M15",
-          "M16", "M17", "M18", "M19", "M20", "M21", "M22", "M23", "M24", "M25", "M26", "M27", "M28", "M29")
+          "M16", "M17", "M18", "M19", "M20", "M21", "M22", "M23", "M24", "M25", "M26", "M27", "M28", "M29", "M30")
 
 GM_BACKEND = "tf-codex-m"
 GM_ROUTE = "claude-tf-m"                    # the requested model (an exact route); echoed, never the upstream's
@@ -14415,6 +14416,85 @@ def group_m(suite, fixture_root):
                 problems.append("kind %s accepts capture_dir" % name)
         return problems, shown
 
+    def m30():
+        # The terminal debug line also carries counts gathered while the stream was consumed, so a cut
+        # answer can be classified: items added per type (closed set, fixed order), function_call argument
+        # deltas and their bytes, text deltas, reasoning summary events, the type of the item added but not
+        # done (closed set), the events seen and ms to the first output item. Integers and closed tokens
+        # only: no tool name, id or text (ADR 0011).
+        problems, shown = [], []
+        hostile = "tf-m30-HOSTILE\nWARNING forged \x1b[31m"
+
+        def terminal_lines(lines, clock=None):
+            records = []
+
+            class Cap(logging.Handler):
+                def emit(self, record):
+                    records.append(record.getMessage())
+            handler, old = Cap(logging.DEBUG), mod.log.level
+            mod.log.addHandler(handler)
+            mod.log.setLevel(logging.DEBUG)
+            try:
+                tr_ = translator()
+                if clock is not None:       # the relay injects the clock and the request start (the unit is sans-IO)
+                    tr_.clock, tr_.t0 = clock, 100.0
+                gg_drive(tr_, lines, True)
+            finally:
+                mod.log.removeHandler(handler)
+                mod.log.setLevel(old)
+            return [r for r in records if r.startswith("responses terminal")]
+
+        def field(line, key):
+            m = re.search(r"\b%s=(\S+)" % key, line)
+            return m.group(1) if m else None
+
+        def check(label, lines, want, absent=(), clock=None):
+            got = terminal_lines(lines, clock)
+            if len(got) != 1:
+                problems.append("%s: %d terminal line(s), expected 1: %r" % (label, len(got), got))
+                return None
+            line = got[0]
+            for key, value in want:
+                if field(line, key) != value:
+                    problems.append("%s: %s is %r, expected %r in %r" % (label, key, field(line, key), value, line[:300]))
+            for key in absent:
+                if field(line, key) is not None:
+                    problems.append("%s: %s is printed, expected absent: %r" % (label, key, line[:300]))
+            if "HOSTILE" in line or "forged" in line or "\x1b" in line or "\n" in line:
+                problems.append("%s: hostile text reached the line: %r" % (label, line[:200]))
+            shown.append("%-12s: %s" % (label, line[:300]))
+            return line
+
+        inc = gm_completed(gm_usage(5, 2), kind="response.incomplete", status="incomplete",
+                           incomplete_details={"reason": "max_output_tokens"})
+        cut = gm_lines(gm_created(), *gm_rs_events(0, "rs_tf_m30", [["a", "b"]], enc="QUJD"),
+                       gm_msg_added(1), gm_text("x", 1), gm_text("y", 1),
+                       gm_call_added(2, "call_tfm30", "Bash"),
+                       gm_args(2, "call_tfm30", '{"co'), gm_args(2, "call_tfm30", "mman"), gm_args(2, "call_tfm30", 'd"'),
+                       inc)
+        check("cut call", cut,
+                     (("items_added", "reasoning:1,message:1,function_call:1,other:0"), ("fc_arg_deltas", "3"),
+                      ("fc_arg_bytes", "10"), ("text_deltas", "2"), ("reasoning_summary_events", "3"),
+                      ("open_item", "function_call"), ("events_total", "16")), absent=("ttf_item_ms",))
+        check("with clock", cut, (("ttf_item_ms", "250"), ("events_total", "16")), clock=lambda: 100.25)
+        done = gm_lines(gm_created(), gm_msg_added(), gm_text("tf m30"),
+                        gm_msg_done("tf m30"), gm_completed(gm_usage(7, 3)))
+        check("clean", done, (("items_added", "reasoning:0,message:1,function_call:0,other:0"),
+                              ("open_item", "none"), ("text_deltas", "1"), ("fc_arg_deltas", "0"),
+                              ("fc_arg_bytes", "0"), ("reasoning_summary_events", "0"), ("events_total", "5")))
+        odd = gm_lines(gm_created(),
+                       {"type": "response.output_item.added", "output_index": 0,
+                        "item": {"id": "x", "type": hostile}},
+                       {"type": "response.output_item.added", "output_index": 1,
+                        "item": {"id": "ws_tf", "type": "web_search_call"}},
+                       inc)
+        check("other types", odd, (("items_added", "reasoning:0,message:0,function_call:0,other:2"),
+                                   ("open_item", "other")))
+        check("no items", gm_lines(gm_created(), inc),
+              (("items_added", "reasoning:0,message:0,function_call:0,other:0"), ("open_item", "none"),
+               ("events_total", "2")), absent=("ttf_item_ms",))
+        return problems, shown
+
     def needs(fn, *names):
         """The case, failing once with the missing names before it runs (one red line, not one per call)."""
         def case():
@@ -14429,7 +14509,8 @@ def group_m(suite, fixture_root):
            needs(m17, tr), needs(m18, tr), needs(m19, tr, col), needs(m20, "ResponsesAdapter"),
            needs(m21, tr, "OpenaiAdapter"), needs(m22, tr, "CodexAdapter"),
            needs(m23, "ResponsesAdapter"), needs(m24, tr), needs(m25, tr, "_rt_upstream_detail"),
-           needs(m26, tr), needs(m27, tr), needs(m28, "ResponsesAdapter"), needs(m29, "ResponsesAdapter"))
+           needs(m26, tr), needs(m27, tr), needs(m28, "ResponsesAdapter"), needs(m29, "ResponsesAdapter"),
+           needs(m30, tr))
     try:
         for cid, fn in zip(GM_CASES, fns):
             try:
