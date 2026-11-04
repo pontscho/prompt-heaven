@@ -4337,6 +4337,7 @@ class MistralStreamTranslator:
         self.seen_chunk = False
         self.request_dropped = dropped
         self.offered = _rt_offered_tools(inbound)   # F26: a call naming another tool is refused
+        self.refusal: Optional[str] = None          # the message of the translator's own fail(); the relay logs it
 
     @property
     def dropped_thinking(self) -> int:
@@ -4363,6 +4364,7 @@ class MistralStreamTranslator:
         if self.closed:
             return b""
         self.tools, self.args_bytes = {}, 0
+        self.refusal = message
         return self.encoder.error(err_type, message)
 
     def feed(self, line: bytes) -> bytes:
@@ -4385,7 +4387,9 @@ class MistralStreamTranslator:
             return self.fail("api_error", "backend sent a malformed stream chunk")
         error = self._chunk_error(chunk)
         if error is not None:
-            return self.fail(*error)
+            out = self.fail(*error)
+            self.refusal = None     # the message is the upstream's (scrubbed) text, not the translator's own
+            return out
         self.seen_chunk = True
         usage = chunk.get("usage")
         if isinstance(usage, dict):
@@ -4476,6 +4480,10 @@ class MistralStreamTranslator:
             return self.fail("api_error", "backend ended the stream early")
         if self.finish_reason == "error":
             return self.fail("api_error", "backend reported an error")
+        # The output cap (length / model_length) cuts the last tool call mid-arguments: that call
+        # is dropped and the answer ends max_tokens. Under any other finish_reason unparseable
+        # arguments stay the backend's protocol violation.
+        cut_by_cap = self.finish_reason in ("length", "model_length")
         blocks: List[Tuple[str, str, str]] = []
         for key in sorted(self.tools, key=_rt_ms_tool_key):
             tool = self.tools[key]
@@ -4487,6 +4495,8 @@ class MistralStreamTranslator:
             except (ValueError, RecursionError):
                 args_json = ""
             if not args_json:
+                if cut_by_cap:
+                    continue
                 return self.fail("api_error", "backend returned malformed tool arguments")
             if not tool["name"]:
                 return self.fail("api_error", "backend returned a tool call without a name")
@@ -4714,6 +4724,8 @@ class MistralAdapter(Adapter):
         for call in tool_calls if isinstance(tool_calls, list) else ():
             block = _rt_ms_tool_use(call)
             if block is None:
+                if finish_reason in ("length", "model_length"):
+                    continue        # cut by the output cap: dropped, as the stream's finish() does
                 return 502, _rt_error_body("api_error", "backend returned malformed tool arguments")
             if block["name"] not in offered:     # F26; the name is not echoed
                 return 502, _rt_error_body("api_error", _RT_UNOFFERED_TOOL)
@@ -5410,6 +5422,11 @@ class ResponsesStreamTranslator:
         self.upstream_error: Optional[Tuple[Optional[str], Optional[str]]] = None
         # F26: the tool names this request offered; a function_call naming any other is refused.
         self.offered: FrozenSet[str] = _rt_offered_tools(inbound)
+        # function_call items held back at output_item.done (status incomplete, or arguments that
+        # do not parse): the terminal event judges them -- dropped when the output cap ended the
+        # response (response.incomplete, max_output_tokens), refused as malformed otherwise.
+        self.cut_calls = 0
+        self.refusal: Optional[str] = None    # the message of the translator's own fail(); the relay logs it
 
     @property
     def started(self) -> bool:
@@ -5432,6 +5449,7 @@ class ResponsesStreamTranslator:
         if self.closed:
             return b""
         self.lines, self.size = [], 0
+        self.refusal = message
         return self.sink.error(err_type, message)
 
     def finish(self) -> bytes:
@@ -5560,8 +5578,10 @@ class ResponsesStreamTranslator:
             args_json = _rt_dumps(tool_input).decode("ascii") if isinstance(tool_input, dict) else ""
         except (ValueError, RecursionError):
             args_json = ""
-        if not args_json:
-            return self.fail("api_error", "backend returned malformed tool arguments")
+        if not args_json or item.get("status") == "incomplete":
+            # Maybe cut by the output cap: whether it was is known only at the terminal event.
+            self.cut_calls += 1
+            return b""
         name, call_id = item.get("name"), item.get("call_id")
         if not isinstance(name, str) or not name:
             return self.fail("api_error", "backend returned a tool call without a name")
@@ -5585,13 +5605,17 @@ class ResponsesStreamTranslator:
                 "cache_read_input_tokens": cached}
 
     def _on_completed(self, obj: dict) -> bytes:
+        if self.cut_calls:
+            return self.fail("api_error", "backend returned malformed tool arguments")
         return self.sink.finish("end_turn", self._usage(obj))
 
     def _on_incomplete(self, obj: dict) -> bytes:
-        """max_tokens when the output cap was hit, else end_turn."""
+        """max_tokens when the output cap was hit (a call it cut is dropped), else end_turn."""
         response = obj.get("response")
         details = response.get("incomplete_details") if isinstance(response, dict) else None
         reason = details.get("reason") if isinstance(details, dict) else None
+        if self.cut_calls and reason != "max_output_tokens":
+            return self.fail("api_error", "backend returned malformed tool arguments")
         return self.sink.finish("max_tokens" if reason == "max_output_tokens" else "end_turn", self._usage(obj))
 
     def _on_error(self, obj: dict) -> bytes:
@@ -9163,8 +9187,9 @@ class _RouterHandler(BaseHTTPRequestHandler):
         """The one WARNING line of an upstream failure (the default sink).
 
         status is what the client was answered (a stream: the 200 head it already got, the
-        failure travelling in-band). reason is a FIXED category or an exception TYPE NAME,
-        never an exception message, an upstream text or a body (ADR 0011); every value goes
+        failure travelling in-band). reason is a FIXED category, an exception TYPE NAME or
+        `translator_refused: ` plus the translator's own FIXED message, never an exception
+        message, an upstream text or a body (ADR 0011); every value goes
         through _log_value, so none can forge a line (CWE-117). The one deliberate
         exception: `detail`, an upstream error EVENT's (code, scrubbed message), is
         appended by _rt_upstream_detail -- cleaned, capped and quoted -- so an operator can
@@ -9821,6 +9846,15 @@ class _RouterHandler(BaseHTTPRequestHandler):
                     rec["fail_reason"] = str(item[1])   # a type name from _rt_pump; _log_value-ed when logged
                     chunk = translator.fail("api_error", "backend %s: the stream was cut (%s)"
                                             % (backend.name, _rt_one_line(item[1])))
+                if isinstance(item, bytes) and translator.closed and not rec["fail_reason"] \
+                        and getattr(translator, "upstream_error", None) is None:
+                    # The translator closed the stream with its own fail() (a refused tool call, a
+                    # malformed chunk): name it, so the line is not a bare upstream_error_event. Its
+                    # message is a fixed string of the translator's, never upstream text (ADR 0011);
+                    # read only when no message_stop follows.
+                    refusal = getattr(translator, "refusal", None)
+                    if isinstance(refusal, str) and refusal:
+                        rec["fail_reason"] = "translator_refused: " + refusal
                 write(chunk)
                 if translator.closed or not isinstance(item, bytes):
                     rec["up_t1"] = time.monotonic()

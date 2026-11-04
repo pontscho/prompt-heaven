@@ -1497,3 +1497,24 @@ Measured: a mask on `/v1/images/edits` without an `init_image` does not preserve
 ## Addendum (2026-10-28): sd-router.py is built; kind sdcpp accepts an api_key as a bearer
 
 Two statements of this ADR no longer hold. The sentence that a backend of kind sdcpp refuses api_key and any auth_header but none is superseded: an sdcpp backend now accepts an optional api_key, sent as `Authorization: Bearer <key>` (auth_header omitted or authorization; none or x-api-key together with a key is a configuration error naming the backend's auth_header; a key over a non-loopback http:// base_url stays refused by the existing rule; the key never reaches a log, a repr or an echoed upstream error). The sentence that Scripts/sd-router.py is not being built now is superseded: the supervisor and reverse proxy in front of sd-server exists, and its decision, alternatives, deviations and declared limits are recorded in [[0034-sd-router-a-supervisor-and-proxy-for-sd-server]]; the operational description is in [[sd-router]].
+
+## Addendum (2026-11-04): A tool call cut off by the output cap is dropped, not refused; the log names a translator's own refusal
+
+A production chat request whose model was writing a tool call longer than max_tokens failed every turn on a codex route and a mistral route with an in-band api_error "backend returned malformed tool arguments", and the WARNING line showed only a bare reason='upstream_error_event'. Deviation 24 above made any tool arguments that are not a JSON object a refusal on the Mistral stream and the Responses kinds alike; that holds only when the output cap is not the cause.
+
+### The rule
+
+The cap, not the backend, truncated the arguments, so the call is dropped and the answer ends stop_reason max_tokens (tool_use when a complete call precedes the cut one).
+
+- Mistral: MistralStreamTranslator.finish() reads finish_reason length or model_length before it parses the buffered arguments and skips a call that does not parse. Under any other finish_reason the refusal is unchanged. The non-stream MistralAdapter._message() does the same, and there drops any call _rt_ms_tool_use rejects, nameless ones included.
+- codex and openai: ResponsesStreamTranslator._on_item_done no longer refuses at output_item.done. It counts a call with unparseable arguments or status incomplete in cut_calls and emits nothing; the terminal event judges. response.incomplete with max_output_tokens drops the call and finishes max_tokens; response.completed and any other incomplete reason refuse it as before, and at EOF the message is "ended the stream early". A non-string arguments value is still refused at once.
+
+### The log line
+
+When the translator closes the stream with its own fail(), the relay now sets the failure reason to translator_refused: followed by the translator's fixed message (translator.refusal, read in _relay_loop). A Mistral error chunk clears it again and a Responses error event sets upstream_error, which the relay checks first, so upstream text still never reaches reason (ADR 0011). Tests: G24, M26 and P5, 488 typed cases in the llm_router suite.
+
+### Declared limits
+
+- The cut-call rule was proven against synthetic streams in both event orders. Whether the real codex upstream sends output_item.done for a call the cap cut, and with which status, is not measured.
+- A call cut so that its arguments are exactly empty still parses as {} and goes out as a tool_use with empty input.
+- A Mistral refusal at EOF without [DONE] keeps stream_ended_early, so it is not named.

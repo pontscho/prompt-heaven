@@ -3,7 +3,7 @@ name: llm-router
 type: component
 status: active
 title: llm-router — an Anthropic Messages router for Claude Code
-description: The stdlib-only HTTP server between Claude Code and several kinds of LLM backend -- an Anthropic Messages front that routes each request by its exact model string to a passthrough, llama.cpp, Mistral, codex, openai, sdcpp (a local stable-diffusion.cpp sd-server, image routes only) or rawllm (an inferNO-style server, typically behind a gpu-router, relayed raw on the OpenAI chat, embeddings and rerank endpoints and on /v1/messages) adapter, codex and openai speaking the OpenAI Responses API through one profile table; its command line and login subcommand, its 0600 JSON config and the OAuth write-back into it, the per-kind header allow-list and llama.cpp quirk rows, reasoning across kinds, images per kind and the route's vision key, the OpenAI-shaped image generation and edit endpoints behind the route's modality key, the raw LLM relay with its body caps and in-flight cap, the inbound and outbound security rules, how it is tested and what it declares rather than gates.
+description: The stdlib-only HTTP server between Claude Code and several kinds of LLM backend -- an Anthropic Messages front that routes each request by its exact model string to a passthrough, llama.cpp, Mistral, codex, openai, sdcpp (a local stable-diffusion.cpp sd-server, image routes only) or rawllm (an inferNO-style server, typically behind a gpu-router, relayed raw on the OpenAI chat, embeddings and rerank endpoints and on /v1/messages) adapter, codex and openai speaking the OpenAI Responses API through one profile table; its command line and login subcommand, its 0600 JSON config and the OAuth write-back into it, the per-kind header allow-list and llama.cpp quirk rows, reasoning across kinds, images per kind and the route's vision key, the OpenAI-shaped image generation and edit endpoints behind the route's modality key, the raw LLM relay with its body caps and in-flight cap, a tool call cut off by the output cap dropped with the answer ending max_tokens, the inbound and outbound security rules and the upstream-failure line that names a translator's own refusal, how it is tested and what it declares rather than gates.
 sources:
   - Scripts/llm-router.py
   - Scripts/_mcp_oauth.py
@@ -669,6 +669,15 @@ emitted whole, in index order, at the end of the turn
 as a JSON string or an object; it must amount to a JSON object with finite
 numbers, and the client gets it re-serialized, compact and ASCII-escaped; a
 list or anything else is an `event: error` (in a non-stream answer, a 502).
+Arguments that do not parse are refused the same way unless the turn ended on
+the output cap, `finish_reason` `length` or `model_length`: the cap cut that
+call mid-arguments, so it is dropped and the answer ends `max_tokens`, or
+`tool_use` when a complete call precedes it, because a tool block forces that
+stop reason `Scripts/llm-router.py:MistralStreamTranslator.finish`. Under the
+same two finish reasons the non-stream path drops every call
+`Scripts/llm-router.py:_rt_ms_tool_use` rejects, a nameless one included,
+where the stream still refuses a nameless call whose arguments parse
+`Scripts/llm-router.py:MistralAdapter._message`.
 count_tokens is never forwarded: it is a local estimate, the translated body's
 UTF-8 bytes divided by `count_divisor` `Scripts/llm-router.py:_rt_ms_estimate`
 — with every translated image part's data URL or url left out and a fixed
@@ -771,6 +780,24 @@ offered set and the refusal text are shared
 `Scripts/llm-router.py:_RT_UNOFFERED_TOOL`. passthrough and llamacpp are
 exempt by declaration: they relay the backend's own Anthropic `tool_use` blocks
 and never mint one.
+A `function_call` whose `arguments` do not parse, or whose item status is
+`incomplete`, is held back at `response.output_item.done` and counted, because
+only the terminal event says whether the output cap cut it
+`Scripts/llm-router.py:ResponsesStreamTranslator._on_item_done`.
+`response.incomplete` with reason `max_output_tokens` drops it and ends
+`max_tokens` (`tool_use` after a complete call)
+`Scripts/llm-router.py:ResponsesStreamTranslator._on_incomplete`;
+`response.completed` or any other incomplete reason refuses the answer with
+"backend returned malformed tool arguments"
+`Scripts/llm-router.py:ResponsesStreamTranslator._on_completed`; and an EOF
+before a terminal event is "backend ended the stream early", as for any stream
+`Scripts/llm-router.py:ResponsesStreamTranslator.finish`. An `arguments` value
+that is not a string is still refused at `output_item.done`. The non-stream
+path runs the same translator, so it follows the same rule. Both kinds drop a
+cut call because, in production, a model writing a tool call of about 25-30 KB
+under `max_tokens` 8192 failed every turn on a codex and on a mistral route
+with "malformed tool arguments", and the log line said only
+`upstream_error_event`.
 Responses streams get their own bounds: a line up to
 `Scripts/llm-router.py:_RT_RS_SSE_LINE_LIMIT` (8 MiB), an event up to
 `Scripts/llm-router.py:_RT_RS_SSE_EVENT_LIMIT` (16 MiB).
@@ -1472,9 +1499,23 @@ one WARNING line on the default sink (no `--debug` needed):
 answered (a stream that failed after its 200 head: 200, the failure travelling in-band);
 `reason` is a fixed category (`stalled`, `stream_ended_early`, `line_too_long`,
 `upstream_error_event`, `upstream_status`, `stream_failed`, `login_required`,
-`timeout`, `busy`, `upstream_error`) or the type name of the exception that cut the
-connection (`RemoteDisconnected`, `SSLEOFError`, ...), never its message, an upstream
-text or a body; every value goes through `_log_value`, so none can forge a line.
+`timeout`, `busy`, `upstream_error`), the type name of the exception that cut the
+connection (`RemoteDisconnected`, `SSLEOFError`, ...), or, when the translator
+closed the stream with its own `fail()` on an upstream line (a tool call or a
+chunk it refused), `translator_refused: ` followed by that refusal's fixed
+message, such as `translator_refused: backend sent a malformed stream chunk`
+`Scripts/llm-router.py:_relay_loop`; never an exception message, an upstream
+text or a body. The translators record the refusal in `fail()` and clear it
+when the message was upstream text: a Mistral error chunk resets it, and a
+Responses error event sets `upstream_error`, which the relay checks first
+`Scripts/llm-router.py:MistralStreamTranslator.feed`
+`Scripts/llm-router.py:ResponsesStreamTranslator._on_error`. Such an event's
+code and scrubbed message go to the line's one deliberate tail instead,
+`upstream_code=` and `upstream_message=`, the message with every non-printable
+character made a space, cut to `Scripts/llm-router.py:_RT_UPSTREAM_MESSAGE_CAP`
+(200) characters and quoted, and only when no other reason was set
+`Scripts/llm-router.py:_rt_upstream_detail`. Every value goes through
+`_log_value`, so none can forge a line.
 It is written where the outcome is known — the POST handler, the JSON answer, the
 stream relay — not by the sans-IO translators. Nothing the token endpoint says
 reaches a log line, an exception message or a client envelope except an
@@ -1498,7 +1539,9 @@ passthrough `tests/test_llm_router.py:group_d`, the llama.cpp quirk rows
 `tests/test_llm_router.py:group_e`, Mistral request translation
 `tests/test_llm_router.py:group_f`, the Mistral stream, including the
 unoffered-tool refusal on the stream and the non-stream path (review finding
-F26, R-0093; not test case F26) `tests/test_llm_router.py:group_g`, idle deadlines, the drain and a client that
+F26, R-0093; not test case F26) and a tool call cut by the output cap on the
+stream and the non-stream path, with a `tool_calls` control still refused (G24)
+`tests/test_llm_router.py:group_g`, idle deadlines, the drain and a client that
 hangs up, per backend kind `tests/test_llm_router.py:group_h`, secret leaks
 `tests/test_llm_router.py:group_i`, static AST rules over the router
 source, the declared hand copies and sandbox hygiene
@@ -1507,12 +1550,18 @@ source, the declared hand copies and sandbox hygiene
 kinds and OAuth: Anthropic-to-Responses request translation
 `tests/test_llm_router.py:group_k`, the config write-back — flock, merge,
 directory-relative rename `tests/test_llm_router.py:group_l`, the Responses
-stream and the non-stream collector `tests/test_llm_router.py:group_m`, the
+stream and the non-stream collector, a cut `function_call`, its
+`output_item.done` marked `incomplete`, marked `completed` or absent, dropped
+under `max_output_tokens` and refused under `response.completed`, a
+`content_filter` end or EOF (M26)
+`tests/test_llm_router.py:group_m`, the
 token store — single-flight refresh, the forced refresh on 401, the shared
 failure, the bounded wait, a login landing mid-refresh, and the learned Mistral
 effort `tests/test_llm_router.py:group_n` — and the `login` subcommand against
 a scripted auth peer `tests/test_llm_router.py:group_o`, the `upstream failed:`
-line `tests/test_llm_router.py:group_p`, the image endpoints
+line, with a mistral translator's refusal of a non-JSON chunk named in
+`reason` while the chunk's own text stays out of stderr (P5)
+`tests/test_llm_router.py:group_p`, the image endpoints
 `tests/test_llm_router.py:group_q`, the `sdcpp` kind
 `tests/test_llm_router.py:group_r`, the codex image routes
 `tests/test_llm_router.py:group_s`, the streamed image answers
@@ -1794,6 +1843,17 @@ read before relying on one of them. In brief:
   inside a larger string, or split across lines, is not caught.
 - **The Mistral token count is an estimate,** and Mistral tool calls appear
   whole at the end of the turn, never streamed.
+- **A cut tool call is judged on synthetic streams only.** The order in which
+  codex sends a cut `function_call`'s `output_item.done` and the
+  `response.incomplete` that ends the response is unmeasured; both orders, and
+  no `output_item.done` at all, are handled and tested on synthetic events
+  (M26). A cut call whose arguments are exactly empty still parses as `{}` and
+  goes out as a `tool_use` with empty input (on codex and openai, unless its
+  item is marked `incomplete`), as it did before the cap rule.
+- **A Mistral refusal at EOF is not named.** The `translator_refused:` reason is
+  set only for an upstream line; when a Mistral stream ends without `[DONE]`,
+  `finish()` runs on the EOF and the reason stays `stream_ended_early`, even
+  when it refused a tool call `Scripts/llm-router.py:_relay_loop`.
 - **An image's token charge is a fixed, rough figure.** Providers price an
   image by its pixels, which the router never decodes; the local estimate
   charges `Scripts/llm-router.py:_RT_IMAGE_TOKEN_ESTIMATE` per image, and since

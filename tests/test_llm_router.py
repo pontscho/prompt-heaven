@@ -8297,6 +8297,7 @@ GG_CASES = (
     "thinking then a tool call",         # G21
     "non-stream thinking + text",        # G22
     "unoffered tool -> error",           # G23
+    "cap cuts a tool call -> max_tokens",  # G24
 )
 GG_LIVE = (14, 17)                          # GG_CASES[14:17] (G15-G17) run against the live rig
 
@@ -9690,8 +9691,72 @@ def group_g(suite, fixture_root):
         shown.append("control    -> %s" % ev_shape(run["events"]))
         return problems, ["unoffered   : " + s for s in shown]
 
+    def g24():
+        # The output cap (finish_reason length / model_length) cuts the last tool call mid-arguments.
+        # That call is dropped and the answer ends max_tokens -- not refused as malformed arguments;
+        # a complete call before it stays (the encoder then forces tool_use). With any other
+        # finish_reason the same arguments stay the backend's protocol violation (G12).
+        problems, shown = [], []
+        cut = '{"file_path": "/tf/g24 truncated by the cap'
+        usage = ms_usage(3, 64)
+        for reason in ("length", "model_length"):
+            label = "finish_reason %s, only a cut call" % reason
+            run, more = drive(ms_lines(MS_ROLE, ms_text("tf g24"), ms_tools(ms_tool(0, cut, "tfToolG24", "Read")),
+                                       ms_stop(reason, usage)))
+            if run is None:
+                return more, []
+            problems += gg_wellformed(label, run) + gg_complete(label, run, "max_tokens", usage)
+            if any(b["type"] == "tool_use" for b in gg_blocks(run["events"])):
+                problems.append("%s: a tool_use block was emitted for the cut call" % label)
+            shown.append("%s -> %s" % (label, ev_shape(run["events"])))
+        label = "a complete call, then a cut one"
+        run, more = drive(ms_lines(MS_ROLE, ms_tools(ms_tool(0, '{"command": "ls"}', "tfToolG24a", "Bash")),
+                                   ms_tools(ms_tool(1, cut, "tfToolG24b", "Read")), ms_stop("length", usage)))
+        if run is None:
+            return more, []
+        problems += gg_wellformed(label, run) + gg_complete(label, run, "tool_use", usage)
+        blocks = [b for b in gg_blocks(run["events"]) if b["type"] == "tool_use"]
+        if [(b["name"], b["json"]) for b in blocks] != [("Bash", '{"command":"ls"}')]:
+            problems.append("%s: tool blocks %r, expected only the complete Bash call"
+                            % (label, [(b["name"], b["json"]) for b in blocks]))
+        shown.append("%s -> %s" % (label, ev_shape(run["events"])))
+        label = "control: the same cut call under finish_reason tool_calls"
+        run, more = drive(ms_lines(MS_ROLE, ms_tools(ms_tool(0, cut, "tfToolG24", "Read")),
+                                   ms_stop("tool_calls", usage)))
+        if run is None:
+            return more, []
+        problems += gg_wellformed(label, run) + gg_failed(label, run)
+        shown.append("%s -> %s" % (label, ev_shape(run["events"])))
+        # The non-stream path: MistralAdapter.json_response (_message) read the arguments before
+        # the finish_reason too.
+        adapter, why = (getattr(mod, "ADAPTERS", None) or {}).get("mistral"), None
+        if adapter is None:
+            adapter, why = gf_adapter(mod, "json_response")
+        if adapter is None:
+            return problems + [why], ["cap cut     : " + s for s in shown]
+        calls = [{"id": "tfToolG24a", "type": "function", "function": {"name": "Bash", "arguments": '{"command":"ls"}'}},
+                 {"id": "tfToolG24b", "type": "function", "function": {"name": "Read", "arguments": cut}}]
+        for label, tool_calls, finish, want_status, want_stop, want_tools in (
+                ("non-stream, only a cut call", calls[1:], "length", 200, "max_tokens", 0),
+                ("non-stream, a complete call then a cut one", calls, "length", 200, "tool_use", 1),
+                ("non-stream control: cut call, finish_reason tool_calls", calls[1:], "tool_calls", 502, None, 0)):
+            body = json.dumps(ms_answer({"role": "assistant", "content": "tf g24", "tool_calls": tool_calls},
+                                        finish, usage)).encode("utf-8")
+            got = adapter.json_response(gg_inbound(mod, stream=False), 200, body)
+            if not (isinstance(got, tuple) and len(got) == 2 and isinstance(got[1], dict)):
+                problems.append("%s: json_response returned %r" % (label, type(got).__name__))
+                continue
+            status, obj = got
+            tools = [b for b in obj.get("content") or [] if isinstance(b, dict) and b.get("type") == "tool_use"]
+            if status != want_status or obj.get("stop_reason") != want_stop or len(tools) != want_tools:
+                problems.append("%s: %r stop_reason %r with %d tool_use block(s), expected %r %r with %d"
+                                % (label, status, obj.get("stop_reason"), len(tools), want_status, want_stop,
+                                   want_tools))
+            shown.append("%s -> %r %r" % (label, status, obj.get("stop_reason")))
+        return problems, ["cap cut     : " + s for s in shown]
+
     fns = (g1, g2, g3, g4, g5, g6, g7, g8, g9, g10, g11, g12, g13, g14, g15, g16, g17, g18, g19, g20, g21, g22,
-           g23)
+           g23, g24)
     lo, hi = GG_LIVE
     try:
         for cid, fn in zip(GG_CASES[:lo] + GG_CASES[hi:], fns[:lo] + fns[hi:]):
@@ -12757,9 +12822,10 @@ GM_CASES = (
     "oauth 403: fixed text, status kept",  # M23
     "overloaded codes -> overloaded_error",  # M24
     "failure line: upstream code+message",   # M25
+    "cap cuts a tool call -> max_tokens",    # M26
 )
 GM_IDS = ("M1", "M2", "M3", "M4", "M5", "M6", "M7", "M8", "M9", "M10", "M11", "M12", "M13", "M14", "M15",
-          "M16", "M17", "M18", "M19", "M20", "M21", "M22", "M23", "M24", "M25")
+          "M16", "M17", "M18", "M19", "M20", "M21", "M22", "M23", "M24", "M25", "M26")
 
 GM_BACKEND = "tf-codex-m"
 GM_ROUTE = "claude-tf-m"                    # the requested model (an exact route); echoed, never the upstream's
@@ -14029,6 +14095,62 @@ def group_m(suite, fixture_root):
             problems.append("translator.upstream_error is %r" % (getattr(tr_, "upstream_error", None),))
         return problems, shown
 
+    def m26():
+        # The output cap (response.incomplete, max_output_tokens) cuts the last function_call: the
+        # call is dropped and the answer ends max_tokens, whichever way the upstream orders it --
+        # output_item.done (status incomplete, or "completed" with the cut arguments) before the
+        # response.incomplete, or no output_item.done at all. A complete call before it stays. A
+        # call with unparseable arguments in any other ending is still the backend's violation.
+        problems, shown = [], []
+        cut = '{"file_path": "/tf/m26 truncated by the cap'
+        cid, usage = "call_tfM26", gm_usage(3, 64)
+
+        def ended(reason="max_output_tokens"):
+            return gm_completed(usage, kind="response.incomplete", status="incomplete",
+                                incomplete_details={"reason": reason})
+
+        def cut_done(status):
+            return {"type": "response.output_item.done", "output_index": 1,
+                    "item": gm_call(cid, "Read", cut, status)}
+
+        def body(*tail):
+            return gm_lines(gm_created(), gm_msg_added(), gm_text("tf m26"), gm_call_added(1, cid, "Read"),
+                            gm_args(1, cid, cut), *tail)
+
+        good = gm_tool_events([(0, "call_tfM26ok", "Bash", '{"command":"ls"}')])
+        table = (("item done (incomplete), then response.incomplete", body(cut_done("incomplete"), ended()),
+                  "max_tokens", 0),
+                 ("item done (completed, cut arguments), then response.incomplete",
+                  body(cut_done("completed"), ended()), "max_tokens", 0),
+                 ("response.incomplete alone, no item done", body(ended()), "max_tokens", 0),
+                 ("a complete call, then a cut one",
+                  gm_lines(gm_created(), *good, gm_call_added(1, cid, "Read"), gm_args(1, cid, cut),
+                           cut_done("incomplete"), ended()), "tool_use", 1),
+                 ("control: cut arguments, then response.incomplete (content_filter)",
+                  body(cut_done("completed"), ended("content_filter")), None, 0),
+                 ("control: cut arguments, then response.completed",
+                  body(cut_done("completed"), gm_completed(usage)), None, 0),
+                 ("control: cut arguments, then EOF", body(cut_done("completed")), None, 0))
+        for label, lines, stop, tools in table:
+            run = drive(lines)
+            problems += gg_wellformed(label, run, requested=GM_ROUTE)
+            if stop is None:
+                problems += gg_failed(label, run)
+                _etype, msg = gm_error(run["events"])
+                if label.endswith("EOF"):
+                    pass            # the stream ended early: no terminal event to judge the call by
+                elif not (isinstance(msg, str) and "malformed tool arguments" in msg):
+                    problems.append("%s: the error message %r does not say 'malformed tool arguments'"
+                                    % (label, gi_redact(str(msg))[:120]))
+            else:
+                problems += gg_complete(label, run, stop)
+            got = [b for b in gg_blocks(run["events"]) if b["type"] == "tool_use"]
+            if len(got) != tools or any(b["name"] != "Bash" for b in got):
+                problems.append("%s: %d tool_use block(s) %s, expected %d (the complete Bash call only)"
+                                % (label, len(got), [b["name"] for b in got], tools))
+            shown.append("%s -> %s" % (label, ev_shape(run["events"])))
+        return problems, ["cap cut     : " + s for s in shown]
+
     def needs(fn, *names):
         """The case, failing once with the missing names before it runs (one red line, not one per call)."""
         def case():
@@ -14042,7 +14164,8 @@ def group_m(suite, fixture_root):
            needs(m11, tr), needs(m12, tr), needs(m13, tr), needs(m14, tr), needs(m15, tr), needs(m16, tr),
            needs(m17, tr), needs(m18, tr), needs(m19, tr, col), needs(m20, "ResponsesAdapter"),
            needs(m21, tr, "OpenaiAdapter"), needs(m22, tr, "CodexAdapter"),
-           needs(m23, "ResponsesAdapter"), needs(m24, tr), needs(m25, tr, "_rt_upstream_detail"))
+           needs(m23, "ResponsesAdapter"), needs(m24, tr), needs(m25, tr, "_rt_upstream_detail"),
+           needs(m26, tr))
     try:
         for cid, fn in zip(GM_CASES, fns):
             try:
@@ -17783,8 +17906,10 @@ GP_CASES = (
     "stream ended early: WARNING",       # P2
     "429: WARNING, no body text",        # P3
     "idle stall: WARNING stalled",       # P4
+    "translator refusal: named",         # P5
 )
-GP_IDS = ("P1", "P2", "P3", "P4")
+GP_IDS = ("P1", "P2", "P3", "P4", "P5")
+GP_MS_BACKEND = "tfp-ms"                 # P5: a mistral backend whose peer sends a stream chunk that is not JSON
 GP_BACKEND = "tfp"
 GP_BODY_SECRET = "tf-p3-body-SENTINEL-" + secrets.token_hex(8)
 GP_LINE_RE = re.compile(r"^\S+ \S+ \S+ WARNING upstream failed: (?P<fields>.*)$")
@@ -17797,6 +17922,7 @@ def gp_scripts():
         "tf-p3": [("respond_json", 429, {"type": "error", "error": {
             "type": "rate_limit_error", "message": "tf rate limit: " + GP_BODY_SECRET}})],
         "tf-p4": [("respond_sse", AN_HEAD + AN_DELTA, (0, 0, 0, 0, 0, 0, 6))],   # a silence past idle_timeout
+        "tf-p5": [("respond_sse", ["data: tf p5 not json", ""])],   # the translator refuses the chunk itself
     }
 
 
@@ -17816,8 +17942,11 @@ def gp_config(peer_url):
                                      "allow_private": True, "allow_loopback": True,
                                      "api_key": TF_KEY_PASS, "auth_header": "x-api-key"}},
            "routes": {}}
+    cfg["backends"][GP_MS_BACKEND] = {"kind": "mistral", "base_url": peer_url, "idle_timeout": 2,
+                                      "allow_private": True, "allow_loopback": True, "api_key": TF_KEY_MISTRAL}
     for name in ("p1", "p2", "p3", "p4"):
         cfg["routes"]["claude-tf-" + name] = {"backend": GP_BACKEND, "model": "tf-" + name}
+    cfg["routes"]["claude-tf-p5"] = {"backend": GP_MS_BACKEND, "model": "tf-p5"}
     return cfg
 
 
@@ -17827,7 +17956,8 @@ def gp_fields(text, route):
     for line in text.splitlines():
         m = GP_LINE_RE.match(line)
         if m and ("route='%s'" % route) in m.group("fields"):
-            found = dict(f.split("=", 1) for f in m.group("fields").split(" ") if "=" in f)
+            # a quoted value (a repr) may hold spaces: P5's reason is a category plus a message
+            found = dict(re.findall(r"(\w+)=('(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"|\S+)", m.group("fields")))
     return found
 
 
@@ -17921,7 +18051,25 @@ def group_p(suite, fixture_root):
                     close_stream(conn, resp)
                 return gp_check(proc, "claude-tf-p4", {"status": "200", "reason": "'stalled'"})
 
-            for cid, fn in zip(GP_CASES, (p1, p2, p3, p4)):
+            def p5():
+                # The translator closed the stream with its own fail() (no upstream error event, no
+                # relay-side reason): the line names the fixed category and the translator's fixed
+                # message -- not a bare upstream_error_event -- and never the chunk's own text.
+                conn, resp, problems = open_stream(client, gd_body("claude-tf-p5", stream=True))
+                if problems:
+                    return problems, []
+                try:
+                    read_stream(resp)
+                finally:
+                    close_stream(conn, resp)
+                problems, detail = gp_check(proc, "claude-tf-p5", {
+                    "status": "200", "kind": "'mistral'",
+                    "reason": "'translator_refused: backend sent a malformed stream chunk'"})
+                if "tf p5 not json" in proc.stderr_text():
+                    problems.append("stderr carries the upstream chunk text")
+                return problems + gp_leaks(proc), detail
+
+            for cid, fn in zip(GP_CASES, (p1, p2, p3, p4, p5)):
                 try:
                     got[cid] = fn()
                 except Exception as exc:  # noqa: BLE001 -- a broken case fails, never aborts the group
