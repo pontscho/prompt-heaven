@@ -4784,6 +4784,8 @@ _RT_RS_SSE_EVENT_LIMIT = 16 * 1024 * 1024   # one Responses SSE event (read only
 
 # reasoning.effort values the Responses API accepts (the reasoning_effort route option).
 _RT_RS_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh")
+# The upper bound of the max_output_tokens route option (a sanity bound, 2^20; not an upstream limit).
+_RT_RS_MAX_OUTPUT_TOKENS = 1048576
 # The output_config.effort levels Claude Code sends (2.1.299 capture); anything else is ignored.
 _RT_OC_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 # thinking.budget_tokens -> effort: the first band whose bound the budget does not exceed;
@@ -5354,6 +5356,11 @@ def _rt_rs_translate(body: dict, route: RouteSpec, backend: str,
             cap = options.get("max_tokens_cap")
             capped = cap is not None and isinstance(max_tokens, int) and not isinstance(max_tokens, bool)
             out["max_output_tokens"] = min(max_tokens, cap) if capped else max_tokens
+    # The route's explicit max_output_tokens is sent as is, on every profile, and wins over the value
+    # derived above; absent, the body is untouched (no key on a profile without sampling).
+    fixed = options.get("max_output_tokens")
+    if fixed is not None:
+        out["max_output_tokens"] = fixed
     return out, dropped
 
 
@@ -5386,11 +5393,14 @@ def _rt_rs_log_shape(body: dict, raw: bytes) -> None:
     effort = body.get("reasoning")
     effort = effort.get("effort") if isinstance(effort, dict) else None
     effort = "none" if effort is None else (effort if effort in _RT_RS_LOG_EFFORTS else "other")
+    mot = body.get("max_output_tokens")
     log.debug("responses request instructions_chars=%d tools=%d tools_bytes=%d input_items=%d items=%s "
-              "reasoning_items=%d reasoning_enc_bytes=%d max_item_bytes=%d body_bytes=%d effort=%s parallel=%d",
+              "reasoning_items=%d reasoning_enc_bytes=%d max_item_bytes=%d body_bytes=%d effort=%s parallel=%d "
+              "max_output_tokens=%s",
               len(instructions) if isinstance(instructions, str) else 0, len(tools), len(_rt_dumps(tools)),
               len(items), ",".join("%s:%d" % (k, counts[k]) for k in sorted(counts)), reasoning, enc_bytes,
-              biggest, len(raw), effort, 1 if body.get("parallel_tool_calls") is True else 0)
+              biggest, len(raw), effort, 1 if body.get("parallel_tool_calls") is True else 0,
+              mot if isinstance(mot, int) and not isinstance(mot, bool) else "none")
 
 
 _RT_CAPTURE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]")
@@ -6117,6 +6127,7 @@ class CodexAdapter(ResponsesImageAdapter):
         "count_divisor": _rt_opt_int(1, 16),
         "reasoning_effort": _rt_opt_enum(_RT_RS_EFFORTS),
         "verbosity": _rt_opt_enum(("low", "medium", "high")),
+        "max_output_tokens": _rt_opt_int(1, _RT_RS_MAX_OUTPUT_TOKENS),   # opt-in: sent as is (_rt_rs_translate)
         "capture_dir": _rt_opt_abs_dir,     # opt-in: the last outgoing body per route, 0600 (_rt_rs_capture)
     }
     MODALITIES = frozenset({"chat", "image"})
@@ -6219,6 +6230,7 @@ class OpenaiAdapter(ResponsesImageAdapter):
         "temperature": _RT_TEMPERATURE,
         "top_p": _RT_TOP_P,
         "max_tokens_cap": _rt_opt_int(1),
+        "max_output_tokens": _rt_opt_int(1, _RT_RS_MAX_OUTPUT_TOKENS),   # opt-in: sent as is, wins over the client's
         "capture_dir": _rt_opt_abs_dir,     # opt-in: the last outgoing body per route, 0600 (_rt_rs_capture)
     }
     MODALITIES = frozenset({"chat", "image"})

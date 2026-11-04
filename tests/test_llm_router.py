@@ -12828,9 +12828,10 @@ GM_CASES = (
     "capture_dir: opt-in last body",         # M29
     "terminal line: stream counts",          # M30
     "terminal line: done call facts",        # M31
+    "max_output_tokens route option",        # M32
 )
 GM_IDS = ("M1", "M2", "M3", "M4", "M5", "M6", "M7", "M8", "M9", "M10", "M11", "M12", "M13", "M14", "M15",
-          "M16", "M17", "M18", "M19", "M20", "M21", "M22", "M23", "M24", "M25", "M26", "M27", "M28", "M29", "M30", "M31")
+          "M16", "M17", "M18", "M19", "M20", "M21", "M22", "M23", "M24", "M25", "M26", "M27", "M28", "M29", "M30", "M31", "M32")
 
 GM_BACKEND = "tf-codex-m"
 GM_ROUTE = "claude-tf-m"                    # the requested model (an exact route); echoed, never the upstream's
@@ -14271,11 +14272,13 @@ def group_m(suite, fixture_root):
             counts[item["type"]] = counts.get(item["type"], 0) + 1
         dump = lambda obj: len(json.dumps(obj, separators=(",", ":"), ensure_ascii=True))  # noqa: E731
         want = ("responses request instructions_chars=%d tools=%d tools_bytes=%d input_items=%d items=%s "
-                "reasoning_items=%d reasoning_enc_bytes=%d max_item_bytes=%d body_bytes=%d effort=%s parallel=%d"
+                "reasoning_items=%d reasoning_enc_bytes=%d max_item_bytes=%d body_bytes=%d effort=%s parallel=%d "
+                "max_output_tokens=%s"
                 % (len(sent["instructions"]), len(sent["tools"]), dump(sent["tools"]), len(items),
                    ",".join("%s:%d" % (k, counts[k]) for k in sorted(counts)), counts.get("reasoning", 0),
                    len(enc), max(dump(i) for i in items), len(raw),
-                   sent["reasoning"].get("effort", "none"), 1 if sent["parallel_tool_calls"] else 0))
+                   sent["reasoning"].get("effort", "none"), 1 if sent["parallel_tool_calls"] else 0,
+                   sent.get("max_output_tokens", "none")))
         if line != want:
             problems.append("line %r, expected %r" % (line[:300], want))
         if counts != {"message": 1, "reasoning": 1, "function_call": 1, "function_call_output": 1}:
@@ -14579,6 +14582,93 @@ def group_m(suite, fixture_root):
               (("fc_args_json", "invalid"), ("fc_args_matches_deltas", "na")))
         return problems, shown
 
+    def m32():
+        # The opt-in `max_output_tokens` route option of the Responses kinds (codex, openai). Rule: when
+        # set it is sent as is, on every profile, and it wins over what the profile row derives (the
+        # client's max_tokens, cut by max_tokens_cap, on openai-apikey); when absent the body is exactly
+        # what it was before (no key on the two OAuth profiles, the client's max_tokens on apikey). The
+        # `responses request` shape line ends with max_output_tokens=<N|none>, the EFFECTIVE value. The
+        # F45 learn never names it. Config: an integer 1..1048576, bool/float/str/0/negative/too big refused.
+        problems, shown = [], []
+        limit = 1048576
+        body = gk_body([{"role": "user", "content": "tf m32"}], max_tokens=256)
+
+        def build(profile, **options):
+            cls = getattr(mod, GK_ADAPTER[GK_KIND[profile]])
+            records = []
+
+            class Cap(logging.Handler):
+                def emit(self, record):
+                    records.append(record.getMessage())
+            handler, old = Cap(logging.DEBUG), mod.log.level
+            mod.log.addHandler(handler)
+            mod.log.setLevel(logging.DEBUG)
+            try:
+                _path, raw = cls().upstream_request(gk_inbound(mod, dict(body), gk_route(mod, **options), profile))
+            finally:
+                mod.log.removeHandler(handler)
+                mod.log.setLevel(old)
+            lines = [r for r in records if r.startswith("responses request")]
+            return json.loads(raw.decode("utf-8")), (lines[0] if len(lines) == 1 else None)
+
+        for profile in GK_PROFILES:
+            apikey = profile == "openai-apikey"
+            cases = (("absent", {}, 256 if apikey else None),
+                     ("set", {"max_output_tokens": 9000}, 9000),
+                     ("set over cap", {"max_output_tokens": 9000, "max_tokens_cap": 100} if apikey
+                      else {"max_output_tokens": 9000}, 9000))
+            if apikey:
+                cases += (("cap only", {"max_tokens_cap": 100}, 100),)
+            for label, options, want in cases:
+                out, line = build(profile, **options)
+                got = out.get("max_output_tokens")
+                if got != want or (want is None and "max_output_tokens" in out):
+                    problems.append("%s %s: body max_output_tokens %r, expected %r" % (profile, label, got, want))
+                if line is None:
+                    problems.append("%s %s: not exactly one 'responses request' line" % (profile, label))
+                elif not line.endswith(" max_output_tokens=%s" % ("none" if want is None else want)):
+                    problems.append("%s %s: shape line does not end with the effective value: %r"
+                                    % (profile, label, line[-120:]))
+                else:
+                    shown.append("%-14s %-12s: ...%s" % (profile, label, line[-70:]))
+            absent, _line = build(profile)
+            extra = set(absent) - GK_TOP_KEYS
+            if extra:
+                problems.append("%s: unexpected key(s) %s" % (profile, sorted(extra)))
+        # The F45 learn: a 400 naming max_output_tokens is not a sampling name, never learned.
+        refusal = json.dumps({"error": {"message": "Unsupported parameter: 'max_output_tokens' is not "
+                                                   "supported with this model.", "param": "max_output_tokens",
+                                        "code": "unsupported_parameter"}}).encode("utf-8")
+        if mod._rt_unsupported_sampling(refusal, ("temperature", "top_p")) is not None:
+            problems.append("F45: a max_output_tokens 400 was learned as a sampling name")
+        inbound = gk_inbound(mod, dict(body), gk_route(mod, max_output_tokens=9000), "openai-apikey")
+        if "max_output_tokens" in mod.OpenaiAdapter().sampling_sent(inbound):
+            problems.append("F45: sampling_sent lists max_output_tokens")
+        # config validation on both kinds; no other kind takes the option
+        for kind in ("CodexAdapter", "OpenaiAdapter"):
+            cls = getattr(mod, kind)
+            for label, value in (("string", "100"), ("float", 100.5), ("bool", True), ("zero", 0),
+                                 ("negative", -5), ("too large", limit + 1), ("null", None)):
+                try:
+                    cls.validate_options({"max_output_tokens": value}, "routes.x.options")
+                except mod.ConfigError as exc:
+                    if "max_output_tokens" not in str(exc):
+                        problems.append("%s %s: refusal does not name the option: %r" % (kind, label, str(exc)[:120]))
+                else:
+                    problems.append("%s: max_output_tokens %s was accepted" % (kind, label))
+            for value in (1, 4096, limit):
+                try:
+                    got = cls.validate_options({"max_output_tokens": value}, "routes.x.options")
+                except mod.ConfigError as exc:
+                    problems.append("%s: %d refused: %s" % (kind, value, str(exc)[:120]))
+                else:
+                    if got != {"max_output_tokens": value}:
+                        problems.append("%s: %d validated to %r" % (kind, value, got))
+        for name, cls in sorted((getattr(mod, "KIND_CLASSES", None) or {}).items()):
+            if name not in ("codex", "openai") and "max_output_tokens" in getattr(cls, "ROUTE_OPTIONS", {}):
+                problems.append("kind %s accepts max_output_tokens" % name)
+        return problems, shown
+
     def needs(fn, *names):
         """The case, failing once with the missing names before it runs (one red line, not one per call)."""
         def case():
@@ -14594,7 +14684,7 @@ def group_m(suite, fixture_root):
            needs(m21, tr, "OpenaiAdapter"), needs(m22, tr, "CodexAdapter"),
            needs(m23, "ResponsesAdapter"), needs(m24, tr), needs(m25, tr, "_rt_upstream_detail"),
            needs(m26, tr), needs(m27, tr), needs(m28, "ResponsesAdapter"), needs(m29, "ResponsesAdapter"),
-           needs(m30, tr), needs(m31, tr))
+           needs(m30, tr), needs(m31, tr), needs(m32, "CodexAdapter", "OpenaiAdapter"))
     try:
         for cid, fn in zip(GM_CASES, fns):
             try:
