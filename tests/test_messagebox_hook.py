@@ -22,7 +22,8 @@ written and nothing but loopback is dialled.
 Groups:
   A  fast exits -- disabled, no spool, no or invalid sessions file, not cli,
      owner.json missing or naming someone else, hook.lock held, unsafe
-     directories; and what a fast exit leaves behind (nothing)
+     directories; and what a fast exit leaves behind (nothing); a young
+     session waits, bounded, for a spool the server has not made yet
   B  the owner walk -- through sh wrappers, the hop limit, MESSAGEBOX_WALK_PID
   C  delivery -- the exact stderr frame, the .delivered rename, ordering by
      seq, the 10-message and 16 KiB caps with the always-first rule
@@ -425,6 +426,69 @@ def _run_a(suite, fx):
             problems.append("an out-of-range override was honoured: %r" % cfg.poll_s)
         return problems, ()
     _guard(suite, GRP_A, "A11 the poll override needs MESSAGEBOX_SESSIONS_DIR; the default is 0.5 s", poll_rule)
+
+    def young_world(label):
+        """A session that started NOW with no spool yet: the SessionStart race.
+        (The fixtures' fixed 2023 startedAt makes every other world 'old', which
+        is why A1 and friends exit at once; this one must be young to wait.)"""
+        w = HW(fx, label, session=False, spool=False)
+        start_ms = int(time.time() * 1000)
+        MB.make_session(w.sessions, w.pid, started_ms=start_ms)
+        spool = os.path.join(w.root, "%d-%d" % (w.pid, start_ms // 1000))
+        return w, spool, start_ms // 1000
+
+    def server_starts_late():
+        w, spool, start_s = young_world("a12")
+        proc = w.start(MESSAGEBOX_HOOK_WAIT_S="30")
+        time.sleep(0.6)
+        problems = []
+        if proc.poll() is not None:
+            return ["exited %r before the server had made the spool" % proc.poll()], ()
+        os.mkdir(spool, 0o700)
+        os.chmod(spool, 0o700)
+        time.sleep(0.4)                 # the spool is there, owner.json is not yet
+        if proc.poll() is not None:
+            return ["exited %r with a spool but no owner.json" % proc.poll()], ()
+        MB._write(os.path.join(spool, "owner.json"), MB.json.dumps(
+            {"instanceKey": "k" * 22, "ccPid": w.pid, "ccStart": start_s, "peerId": "pe_" + "P" * 22}))
+        MB._write(os.path.join(spool, mid("A") + ".json"), MB.json.dumps(MB.inbound(mid("A"), text="hello")))
+        rc, out, err = finish(proc, 6)
+        if rc != 2 or not re.fullmatch(r"\n" + frame_re(mid("A")), err):
+            problems.append("rc %r err %r" % (rc, err[:120]))
+        if not os.path.lexists(os.path.join(spool, mid("A") + ".delivered")):
+            problems.append("not .delivered")
+        return problems, ()
+    _guard(suite, GRP_A, "A12 a young session: the hook waits for a spool and owner.json that appear late, then delivers", server_starts_late)
+
+    def deadline_is_quiet():
+        w, spool, _start_s = young_world("a13")
+        t0 = time.time()
+        # startedAt is whole seconds in the deadline, so at least 2 of the 3 s are kept
+        rc, out, err = w.run(timeout=10, MESSAGEBOX_HOOK_WAIT_S="3")
+        took = time.time() - t0
+        problems = []
+        _quiet_zero(rc, out, err, problems, "past the deadline")
+        if took < 1.5:
+            problems.append("did not wait: %.2f s" % took)
+        if took > 6:
+            problems.append("waited past its bound: %.2f s" % took)
+        if os.path.lexists(spool):
+            problems.append("the hook created the spool")
+        return problems, ()
+    _guard(suite, GRP_A, "A13 a spool that never appears: quiet exit 0 at the deadline, nothing created", deadline_is_quiet)
+
+    def wait_rule():
+        mod = _hook()
+        problems = []
+        for env, want in (({}, 90), ({"MESSAGEBOX_HOOK_WAIT_S": "5"}, 5), ({"MESSAGEBOX_HOOK_WAIT_S": "0"}, 0),
+                          ({"MESSAGEBOX_HOOK_WAIT_S": "600"}, 600),
+                          ({"MESSAGEBOX_HOOK_WAIT_S": "601"}, 90), ({"MESSAGEBOX_HOOK_WAIT_S": "-1"}, 90),
+                          ({"MESSAGEBOX_HOOK_WAIT_S": "x"}, 90)):
+            got = mod.config_from_env(env).wait_s
+            if got != want:
+                problems.append("%r: wait_s %r, want %r" % (env, got, want))
+        return problems, ()
+    _guard(suite, GRP_A, "A14 the wait bound: 90 s by default, MESSAGEBOX_HOOK_WAIT_S 0-600, else the default", wait_rule)
 
 
 # ---------------------------------------------------------------------------

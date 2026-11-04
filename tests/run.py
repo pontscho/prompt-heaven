@@ -1081,7 +1081,7 @@ SUITES = [
      "16 KiB caps with the always-first rule, every failing file rejected and "
      "never injected, the idempotent fence transform, the claim race, no "
      "network import, and an end to end run against the real server and the "
-     "stub hub", 85),
+     "stub hub", 88),
     # TYPED: a fixed case table (A 55, B 35, C 16, D 17, E 15, F 31, G 23,
     # H 6 x 4 kinds + H7 + H8-H9 = 27, I 16, J 44, K 29, L 20, M 25, N 42,
     # O 18, P 4, Q 18, R 14, S 5, T 13, U 3, V 15 = 485), so a count that moves is the alarm, not noise.

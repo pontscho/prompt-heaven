@@ -8,10 +8,15 @@ the user's settings. It reads ONLY the local spool directory
 never talks to the network: the server acks `enqueued` when it sees the
 `.delivered` file this hook leaves, and `rejected` when it sees `.rejected`.
 
-  * exits 0 at once, printing nothing, when MESSAGEBOX_DISABLE=1, when no
-    owned spool directory exists, when its owner.json does not name this
-    Claude Code pid and start time, when the owning session's `entrypoint` is
-    not `cli` (unless MESSAGEBOX_FORCE=1), or when hook.lock is held;
+  * exits 0 at once, printing nothing, when MESSAGEBOX_DISABLE=1, when the
+    owning session's `entrypoint` is not `cli` (unless MESSAGEBOX_FORCE=1), or
+    when hook.lock is held;
+  * exits 0 printing nothing when no owned spool directory exists or its
+    owner.json does not name this Claude Code pid and start time -- but a
+    session younger than MESSAGEBOX_HOOK_WAIT_S (default 90 s, 0-600) is given
+    that long from its start to get there first: SessionStart runs the hook
+    while the MCP server is still starting, and an early exit would leave an
+    idle fresh session with no hook until the next Stop;
   * otherwise loops every 0.5 s with no deadline of its own (the session's
     exit kills it by signal). When `<msgId>.json` files exist it orders them
     by seq (a cheap pre-read, never trusted), then for each, up to 10 messages
@@ -61,6 +66,8 @@ from typing import Any, List, NamedTuple, Optional
 
 WALK_MAX_HOPS = 8                # the hook runs under sh -c: more hops than the server
 POLL_DEFAULT_S = 0.5
+SPOOL_WAIT_DEFAULT_S = 90        # a young session's server may still be starting
+SPOOL_WAIT_MAX_S = 600
 MAX_MESSAGES = 10                # per wake
 MAX_TEXT_BYTES = 16384           # of text, per wake (the first message always)
 LIST_MAX_NAMES = 2000            # files looked at in one wake
@@ -391,6 +398,7 @@ class Config(NamedTuple):
     root: str
     walk_pid: Optional[int]
     poll_s: float
+    wait_s: int
 
 
 def _env_int(env, key: str, lo: int, hi: int) -> Optional[int]:
@@ -407,6 +415,7 @@ def config_from_env(env) -> Config:
     poll_ms = None
     if sessions_override is not None:
         poll_ms = _env_int(env, "MESSAGEBOX_HOOK_POLL_MS_FOR_TEST", 10, 5000)
+    wait_s = _env_int(env, "MESSAGEBOX_HOOK_WAIT_S", 0, SPOOL_WAIT_MAX_S)
     return Config(
         disable=env.get("MESSAGEBOX_DISABLE") == "1",
         force=env.get("MESSAGEBOX_FORCE") == "1",
@@ -414,6 +423,7 @@ def config_from_env(env) -> Config:
         root=env.get("MESSAGEBOX_ROOT") or os.path.join(home, ".claude", "messagebox"),
         walk_pid=_env_int(env, "MESSAGEBOX_WALK_PID", 2, 2 ** 31 - 1),
         poll_s=(poll_ms / 1000.0) if poll_ms is not None else POLL_DEFAULT_S,
+        wait_s=wait_s if wait_s is not None else SPOOL_WAIT_DEFAULT_S,
     )
 
 
@@ -466,6 +476,30 @@ def owner_json_names(spool_fd: int, owner: Owner) -> bool:
     return (isinstance(data, dict) and type(data.get("ccPid")) is int
             and type(data.get("ccStart")) is int
             and data["ccPid"] == owner.pid and data["ccStart"] == owner.start)
+
+
+def await_spool(cfg: Config, owner: Owner) -> Optional[int]:
+    """An fd on the owned spool whose owner.json names `owner`, or None.
+
+    SessionStart runs the hook while the MCP server is still starting: the spool
+    appears when it activates and owner.json only after its first hub register.
+    Giving up at once would leave an idle fresh session with no hook until the
+    next Stop, so while the session is younger than cfg.wait_s (its own
+    startedAt, seconds) and for at most cfg.wait_s from now, look again every
+    poll. An older session -- every Stop of a long-lived one -- gets exactly one
+    look, so a server that is off or has no hub does not leave a waiter per
+    turn. open_spool's checks apply on every look."""
+    deadline = min(time.time() + cfg.wait_s, owner.start + cfg.wait_s)
+    while True:
+        fd = open_spool(cfg.root, owner)
+        if fd is not None:
+            if owner_json_names(fd, owner):
+                return fd
+            os.close(fd)
+        if time.time() >= deadline:
+            return None
+        time.sleep(cfg.poll_s)
+
 
 def take_lock(spool_fd: int) -> Optional[int]:
     """hook.lock, held for the process's life; None when another hook has it."""
@@ -626,8 +660,8 @@ def main() -> None:
                            cfg.walk_pid if cfg.walk_pid is not None else os.getppid())
         if owner.entrypoint != "cli" and not cfg.force:
             os._exit(0)
-        spool_fd = open_spool(cfg.root, owner)
-        if spool_fd is None or not owner_json_names(spool_fd, owner):
+        spool_fd = await_spool(cfg, owner)
+        if spool_fd is None:
             os._exit(0)
         if take_lock(spool_fd) is None:
             os._exit(0)
