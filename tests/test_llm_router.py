@@ -12829,9 +12829,10 @@ GM_CASES = (
     "terminal line: stream counts",          # M30
     "terminal line: done call facts",        # M31
     "max_output_tokens route option",        # M32
+    "parallel_tool_calls route option",      # M33
 )
 GM_IDS = ("M1", "M2", "M3", "M4", "M5", "M6", "M7", "M8", "M9", "M10", "M11", "M12", "M13", "M14", "M15",
-          "M16", "M17", "M18", "M19", "M20", "M21", "M22", "M23", "M24", "M25", "M26", "M27", "M28", "M29", "M30", "M31", "M32")
+          "M16", "M17", "M18", "M19", "M20", "M21", "M22", "M23", "M24", "M25", "M26", "M27", "M28", "M29", "M30", "M31", "M32", "M33")
 
 GM_BACKEND = "tf-codex-m"
 GM_ROUTE = "claude-tf-m"                    # the requested model (an exact route); echoed, never the upstream's
@@ -14669,6 +14670,91 @@ def group_m(suite, fixture_root):
                 problems.append("kind %s accepts max_output_tokens" % name)
         return problems, shown
 
+    def m33():
+        # The opt-in `parallel_tool_calls` route option of the Responses kinds (codex, openai): a closed
+        # string vocabulary "omit" | "true" | "false". Rule: an explicit option wins over the inbound
+        # tool_choice.disable_parallel_tool_use; "omit" removes the key from the body; unset keeps the
+        # body byte for byte (true unless the inbound disable flag is true). The `responses request`
+        # shape line shows the EFFECTIVE state as parallel=1|0|omit. Config: anything else is refused
+        # with the option named (bool, null, other strings, case variants).
+        problems, shown = [], []
+        tools = [{"name": "Read", "input_schema": {"type": "object"}}]
+
+        def build(profile, choice, **options):
+            cls = getattr(mod, GK_ADAPTER[GK_KIND[profile]])
+            extra = {"tool_choice": choice} if choice is not None else {}
+            body = gk_body([{"role": "user", "content": "tf m33"}], tools=tools, **extra)
+            records = []
+
+            class Cap(logging.Handler):
+                def emit(self, record):
+                    records.append(record.getMessage())
+            handler, old = Cap(logging.DEBUG), mod.log.level
+            mod.log.addHandler(handler)
+            mod.log.setLevel(logging.DEBUG)
+            try:
+                _path, raw = cls().upstream_request(gk_inbound(mod, body, gk_route(mod, **options), profile))
+            finally:
+                mod.log.removeHandler(handler)
+                mod.log.setLevel(old)
+            lines = [r for r in records if r.startswith("responses request")]
+            return raw, json.loads(raw.decode("utf-8")), (lines[0] if len(lines) == 1 else None)
+
+        disable = {"type": "auto", "disable_parallel_tool_use": True}
+        keep = {"type": "auto", "disable_parallel_tool_use": False}
+        absent = object()
+        # (label, inbound tool_choice, route option, expected body value or absent, expected shape token)
+        cases = (("unset", None, None, True, "1"), ("unset + disable", disable, None, False, "0"),
+                 ("unset + keep", keep, None, True, "1"),
+                 ("true", None, "true", True, "1"), ("true + disable", disable, "true", True, "1"),
+                 ("false", None, "false", False, "0"), ("false + keep", keep, "false", False, "0"),
+                 ("omit", None, "omit", absent, "omit"), ("omit + disable", disable, "omit", absent, "omit"),
+                 ("omit + keep", keep, "omit", absent, "omit"))
+        for profile in GK_PROFILES:
+            for label, choice, option, want, token in cases:
+                options = {} if option is None else {"parallel_tool_calls": option}
+                raw, out, line = build(profile, choice, **options)
+                got = out.get("parallel_tool_calls", absent)
+                if got is not want and got != want:
+                    problems.append("%s %s: body parallel_tool_calls %r, expected %r"
+                                    % (profile, label, "absent" if got is absent else got,
+                                       "absent" if want is absent else want))
+                if want is absent and b"parallel_tool_calls" in raw:
+                    problems.append("%s %s: the key is in the raw body" % (profile, label))
+                if line is None:
+                    problems.append("%s %s: not exactly one 'responses request' line" % (profile, label))
+                elif " parallel=%s " % token not in line:
+                    problems.append("%s %s: shape line lacks parallel=%s: %r" % (profile, label, token, line[:300]))
+                elif label in ("unset", "omit", "false", "true"):
+                    shown.append("%-14s %-6s: %s" % (profile, label, line[line.index(" effort="):][:60]))
+            extra = set(build(profile, None)[1]) - GK_TOP_KEYS
+            if extra:
+                problems.append("%s: unexpected key(s) %s" % (profile, sorted(extra)))
+        # config validation on both kinds; no other kind takes the option
+        for kind in ("CodexAdapter", "OpenaiAdapter"):
+            cls = getattr(mod, kind)
+            for label, value in (("bool true", True), ("bool false", False), ("null", None), ("int", 1),
+                                 ("empty", ""), ("case variant", "Omit"), ("yes", "yes"), ("list", ["omit"])):
+                try:
+                    cls.validate_options({"parallel_tool_calls": value}, "routes.x.options")
+                except mod.ConfigError as exc:
+                    if "parallel_tool_calls" not in str(exc):
+                        problems.append("%s %s: refusal does not name the option: %r" % (kind, label, str(exc)[:120]))
+                else:
+                    problems.append("%s: parallel_tool_calls %s was accepted" % (kind, label))
+            for value in ("omit", "true", "false"):
+                try:
+                    got = cls.validate_options({"parallel_tool_calls": value}, "routes.x.options")
+                except mod.ConfigError as exc:
+                    problems.append("%s: %r refused: %s" % (kind, value, str(exc)[:120]))
+                else:
+                    if got != {"parallel_tool_calls": value}:
+                        problems.append("%s: %r validated to %r" % (kind, value, got))
+        for name, cls in sorted((getattr(mod, "KIND_CLASSES", None) or {}).items()):
+            if name not in ("codex", "openai") and "parallel_tool_calls" in getattr(cls, "ROUTE_OPTIONS", {}):
+                problems.append("kind %s accepts parallel_tool_calls" % name)
+        return problems, shown
+
     def needs(fn, *names):
         """The case, failing once with the missing names before it runs (one red line, not one per call)."""
         def case():
@@ -14684,7 +14770,8 @@ def group_m(suite, fixture_root):
            needs(m21, tr, "OpenaiAdapter"), needs(m22, tr, "CodexAdapter"),
            needs(m23, "ResponsesAdapter"), needs(m24, tr), needs(m25, tr, "_rt_upstream_detail"),
            needs(m26, tr), needs(m27, tr), needs(m28, "ResponsesAdapter"), needs(m29, "ResponsesAdapter"),
-           needs(m30, tr), needs(m31, tr), needs(m32, "CodexAdapter", "OpenaiAdapter"))
+           needs(m30, tr), needs(m31, tr), needs(m32, "CodexAdapter", "OpenaiAdapter"),
+           needs(m33, "CodexAdapter", "OpenaiAdapter"))
     try:
         for cid, fn in zip(GM_CASES, fns):
             try:

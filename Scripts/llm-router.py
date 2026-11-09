@@ -5334,7 +5334,13 @@ def _rt_rs_translate(body: dict, route: RouteSpec, backend: str,
     choice = body.get("tool_choice")
     if choice is not None:
         out["tool_choice"] = _rt_rs_tool_choice(choice)
-    out["parallel_tool_calls"] = not (isinstance(choice, dict) and choice.get("disable_parallel_tool_use") is True)
+    # The route's explicit parallel_tool_calls ("true" | "false" | "omit") wins over the inbound
+    # disable_parallel_tool_use; "omit" sends no key at all; unset keeps the derived value.
+    parallel = options.get("parallel_tool_calls")
+    if parallel is None:
+        out["parallel_tool_calls"] = not (isinstance(choice, dict) and choice.get("disable_parallel_tool_use") is True)
+    elif parallel != "omit":
+        out["parallel_tool_calls"] = parallel == "true"
 
     out["store"] = False
     out["stream"] = True            # always streamed upstream; a non-stream client is collected (Step 10)
@@ -5395,11 +5401,12 @@ def _rt_rs_log_shape(body: dict, raw: bytes) -> None:
     effort = "none" if effort is None else (effort if effort in _RT_RS_LOG_EFFORTS else "other")
     mot = body.get("max_output_tokens")
     log.debug("responses request instructions_chars=%d tools=%d tools_bytes=%d input_items=%d items=%s "
-              "reasoning_items=%d reasoning_enc_bytes=%d max_item_bytes=%d body_bytes=%d effort=%s parallel=%d "
+              "reasoning_items=%d reasoning_enc_bytes=%d max_item_bytes=%d body_bytes=%d effort=%s parallel=%s "
               "max_output_tokens=%s",
               len(instructions) if isinstance(instructions, str) else 0, len(tools), len(_rt_dumps(tools)),
               len(items), ",".join("%s:%d" % (k, counts[k]) for k in sorted(counts)), reasoning, enc_bytes,
-              biggest, len(raw), effort, 1 if body.get("parallel_tool_calls") is True else 0,
+              biggest, len(raw), effort,
+              "omit" if "parallel_tool_calls" not in body else (1 if body["parallel_tool_calls"] is True else 0),
               mot if isinstance(mot, int) and not isinstance(mot, bool) else "none")
 
 
@@ -6128,6 +6135,7 @@ class CodexAdapter(ResponsesImageAdapter):
         "reasoning_effort": _rt_opt_enum(_RT_RS_EFFORTS),
         "verbosity": _rt_opt_enum(("low", "medium", "high")),
         "max_output_tokens": _rt_opt_int(1, _RT_RS_MAX_OUTPUT_TOKENS),   # opt-in: sent as is (_rt_rs_translate)
+        "parallel_tool_calls": _rt_opt_enum(("omit", "true", "false")),  # opt-in: wins over the inbound flag
         "capture_dir": _rt_opt_abs_dir,     # opt-in: the last outgoing body per route, 0600 (_rt_rs_capture)
     }
     MODALITIES = frozenset({"chat", "image"})
@@ -6231,6 +6239,7 @@ class OpenaiAdapter(ResponsesImageAdapter):
         "top_p": _RT_TOP_P,
         "max_tokens_cap": _rt_opt_int(1),
         "max_output_tokens": _rt_opt_int(1, _RT_RS_MAX_OUTPUT_TOKENS),   # opt-in: sent as is, wins over the client's
+        "parallel_tool_calls": _rt_opt_enum(("omit", "true", "false")),  # opt-in: wins over the inbound flag
         "capture_dir": _rt_opt_abs_dir,     # opt-in: the last outgoing body per route, 0600 (_rt_rs_capture)
     }
     MODALITIES = frozenset({"chat", "image"})
