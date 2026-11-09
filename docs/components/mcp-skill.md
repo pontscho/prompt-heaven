@@ -346,9 +346,28 @@ say `Scripts/mcp-skill.py:_sanitize_run_result`:
   `Scripts/mcp-skill.py:_RUN_OUT_FILES_SHOWN` (64) of them, with a `[N more out
   file(s) not shown]` line for the rest. A `base64` (or unknown-encoding) file is
   one `encoding: <kind>, N encoded chars (content not shown)` line, never its
-  content.
+  content in the text part (a `.pdf` or `.typ` additionally travels as a
+  resource block, below).
 - **`(no output)`** when none of the above has anything to show
   `Scripts/mcp-skill.py:_render_sections`.
+
+**Produced documents are resource blocks.** An out file whose extension is
+`.pdf` or `.typ` (`Scripts/mcp-skill.py:_DOC_TYPES`) is also added to the tool
+result as an MCP `EmbeddedResource` content block after the text block —
+`{type: "resource", resource: {uri, mimeType, blob}}` for a PDF
+(`application/pdf`), `{..., text}` for a Typst source (`text/x-typst`) — chosen
+by extension and never by UTF-8 validity `Scripts/mcp-skill.py:_doc_block`
+`Scripts/mcp-skill.py:McpServer._handle_tool_call`. The `uri` is
+`skill-out://<skill>/<path under out/>`, every segment percent-encoded, and a
+path that is not a plain relative path under `out/` is not emitted
+`Scripts/mcp-skill.py:_doc_uri`. Blocks are sorted by path, so a `report.pdf`
+and its `report.typ` come as a pair in a stable order. A `.typ` that is not
+strict UTF-8 or holds a control character besides LF, CR and TAB is not emitted;
+the text part names it on a `[out/<name> not emitted as a document: <reason>]`
+line, and it lists the emitted ones on one `[documents emitted as resources:
+...]` line, never the base64. The server adds no bytes beyond the runner's
+out-file limits. Other extensions, and a refusal, are unchanged (ADR 0032,
+2026-11-09 addendum).
 
 So a clean run answers its stdout and nothing else. `durationMs` is no longer
 reported to the model, and no line names the skill, tier or script. Every peer
@@ -462,6 +481,11 @@ contract by literal: a clean run is its stdout, a failing run opens with one
 status line, an empty run answers `(no output)`), `J13` (the runner's message
 unframed after the fixed text) and `L4` (the empty-valued load's text is now
 compared with the plain load's directly `tests/test_mcp_skill.py:_run_schema`).
+Group M `tests/test_mcp_skill.py:_run_documents` pins the produced documents
+(`M1`-`M8`: the pair as resource blocks, the text part without the base64, other
+extensions unchanged, a bad `.typ` not emitted and said so, encoding by
+extension, the uri and its order, a refusal without blocks, and the path through
+a real proxy and the stub runner's `docs` mode), run red first (5 of 8 failed).
 Its
 case count is declared once, in `tests/run.py:SUITES`, and checked against the
 run; the forge target is `mcp_skill`.
@@ -493,6 +517,12 @@ a smoke row with near-miss and documented-call probes
 - **Semantic injection is not prevented.** The sanitizer removes invisible and
   display-steering characters; it cannot stop an approved skill's plain text
   from saying something misleading, and no frame marks that text as data.
+- **A document's base64 now leaves the server.** For `.pdf` and `.typ` out
+  files the bytes are in the result sent to the client (not in the text part);
+  the cap is still the runner's out-file limits, nothing is added, and neither
+  file's content is inspected beyond the `.typ` UTF-8 and control-character
+  rule. A `.typ` is not sanitized, so bidi and zero-width characters survive
+  inside the resource.
 - **The ai-soul-side bounds above are trusted, not re-checked**, and the
   Unicode-version skew between the two classifiers is a known residual.
 - **No change notification.** A new or edited skill reaches a client only when

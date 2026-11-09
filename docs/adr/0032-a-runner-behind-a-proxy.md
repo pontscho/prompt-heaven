@@ -665,3 +665,27 @@ The frame was the only thing that marked where untrusted text ends. Household-ti
 The sanitizer is unchanged. Every peer string still goes through the declared hand copy of `_web_clean` `Scripts/mcp-skill.py:_web_clean`, with tab and newline kept for bodies, so bidi controls, zero-width and tag characters and C0/C1 controls are still removed. H1 and H2 still pin its parity with `Scripts/_mcp_websearch.py`. The ceilings, the runner client, the file hygiene and `--allow-private-scripts` are untouched. `_RUNNER_FRAMING_ALLOWANCE` keeps its name: it sizes the JSON-RPC envelope and the SSE lines, which are not the reversed frame.
 
 Rows `mcp_skill:G1` and `G3` now pin the absence of the frame (no marker, no note, no nonce drawn). `J7` checks hostile output sanitized under the `[stderr]` / `[out/<name>]` labels. `J12` checks the ceiling plus the unframed contract by literal (clean, failing, killed, empty, out file). `J13` checks the runner's message as plain text after the fixed line. `L4` compares the empty-valued load with the plain load directly. All six were rewritten; the suite stays at 95 cases. The shape is on [[mcp-skill]].
+
+## Addendum (2026-11-09): produced documents travel as EmbeddedResource blocks; base64 is no longer never shown
+
+Decided by Zoltán on 2026-11-09, agreed with the ai-soul side as a frozen interface. It reverses one sentence of the 2026-10-12 addendum above ("A base64 file gets a one-line note and its content is not shown") for two extensions, and nothing else.
+
+### What changed
+
+A `run` whose runner produced an out file with the extension `.pdf` or `.typ` (lower-cased, the last path segment) answers one extra MCP content block per such file, after the text block `Scripts/mcp-skill.py:_sanitize_run_result` `Scripts/mcp-skill.py:_doc_block` `Scripts/mcp-skill.py:McpServer._handle_tool_call`. A `.pdf` is `{type: "resource", resource: {uri, mimeType: "application/pdf", blob: <base64>}}`; a `.typ` is `{type: "resource", resource: {uri, mimeType: "text/x-typst", text: <UTF-8 text>}}`. The block kind follows the extension, never UTF-8 validity. The `uri` is `skill-out://<skill>/<path under out/>`, each segment percent-encoded; a path with an empty, `.` or `..` segment, a backslash, a control character or no `out/` prefix is not emitted. The blocks are sorted by the runner's path, so a model that writes `report.pdf` and `report.typ` gets them paired by stem, in a stable order. Any other extension keeps today's behaviour: a section in the text part, no block.
+
+A `.typ` that is not strict UTF-8, or holds a control character (Unicode category `Cc`) other than LF, CR and TAB, is not emitted; the text part says so on a line of its own (`[out/<name> not emitted as a document: <reason>]`) and the file keeps today's section. The same line names any other allowlisted file that could not be emitted (unsafe path, undecodable content). The text part also lists the emitted names on one line, `[documents emitted as resources: ...]`, and never carries the base64 of a document: the existing `[out/<name>]` section for a base64 file is still the one-line metadata note. A refusal from the runner carries no resource block.
+
+### Why
+
+A model that made a PDF with Typst could say it had, and could not hand the file to the person who asked for it: the bytes stopped at the server. The client (ai-soul) can store or show an EmbeddedResource; it cannot do anything with a sentence. The `.typ` source is sent too so the document can be edited and re-typeset instead of regenerated.
+
+### Declared limits
+
+- **The base64 now leaves this server.** For these two extensions the document's bytes are in the result sent to the client, which is the opposite of "never shown". The text part, and so the model's own context, still never holds them; what the client does with the block is the client's.
+- **The cap stays the runner's.** The server adds no byte beyond what the runner already returned under its out-file limits (1 MiB per file, 16 files, 16 MiB reply bound). A `.pdf` blob is those bytes re-encoded, a `.typ` text is those bytes decoded; the 100000-character answer ceiling counts the text part only. A larger document is truncated or dropped by the runner, as before.
+- **Extension, not content.** A `.pdf` is a blob whether or not it is a PDF, and nothing inspects it; a `.typ` is text whether or not it is Typst. The extension allowlist is two entries in `Scripts/mcp-skill.py:_DOC_TYPES`.
+- **A `.typ` is untrusted text.** It is passed through unsanitized (the sanitizer would change the file), so bidi and zero-width characters survive inside the resource although they are removed from the text part. Only the control-character rule above applies.
+- **The name is the runner's.** The `uri` is derived from the path the sandboxed script chose; two runs can reuse a `uri`, and the server keeps no store.
+
+Rows `mcp_skill:M1`-`M8` (new group M, run red first: 5 of 8 failed against the old server; the suite went from 95 to 103 cases) pin the pair as blocks, the text part, other extensions unchanged, a bad `.typ` not emitted and said so, encoding by extension, the uri and its order, a refusal without blocks and the whole path through a real `mcp-proxy --http` and the stub runner's `docs` mode.

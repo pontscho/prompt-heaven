@@ -177,6 +177,18 @@ and run RED first against the server that refused every schema key.
      runner client with exactly the plain run's params, no timeoutMs 0;
      L6 load with name "" is refused as "name is required". Run RED first.
 
+Group M pins the produced documents (ADR 0032 amendment, base64 is no longer
+never shown): an out file whose EXTENSION is .pdf (blob resource,
+application/pdf) or .typ (text resource, text/x-typst) is added as a
+{type: resource} content block after the text block, uri
+skill-out://<skill>/<path under out/>, sorted by path; a .typ that is not
+UTF-8 or holds a control char besides LF/CR/TAB is not emitted and the text
+part says so; the text part never carries the base64. Written RED first.
+  M  documents -- M1 the pair as resource blocks, M2 the text part, M3 other
+     extensions unchanged, M4 a bad .typ not emitted, M5 encoded by
+     extension, M6 uri percent-safety/no traversal/order, M7 a refusal has no
+     resources, M8 end to end through the proxy and the stub's `docs` mode.
+
 Usage:
   python3 tests/test_mcp_skill.py [--brief] [--keep]
 Exit code 0 iff every case passes.
@@ -184,6 +196,7 @@ Exit code 0 iff every case passes.
 
 import ast
 import asyncio
+import base64
 import http.server
 import json
 import logging
@@ -222,6 +235,7 @@ GRP_I = "I. runner client"
 GRP_J = "J. run"
 GRP_K = "K. handler crash"
 GRP_L = "L. params schema"
+GRP_M = "M. documents"
 LOGGER = "mcp-skill"
 
 GENERATOR = H.repo_path("Scripts", "amalgamate.py")
@@ -3601,6 +3615,269 @@ def _run_schema(suite, fx):
 
 
 # ---------------------------------------------------------------------------
+# M: produced documents as EmbeddedResource content blocks
+# ---------------------------------------------------------------------------
+
+PDF_BYTES = b"%PDF-1.7\n\xff\xfe\x00\x80 binary body\n%%EOF\n"
+TYP_TEXT = "#set page(width: 10cm)\n= Report " + chr(0xE9) + "\n\ttabbed\r\n"
+
+
+def _b64(data):
+    return base64.b64encode(data).decode("ascii")
+
+
+def _doc_result(out_files, **over):
+    res = {k: None for k in _RESULT_KEYS}
+    res.update(exitCode=0, timedOut=False, durationMs=5, stdout="made\n",
+               stderr="", stdoutTruncated=False, stderrTruncated=False,
+               outFiles=out_files, outFilesTruncated=False)
+    res.update(over)
+    return {"structuredContent": res, "isError": False}
+
+
+def _doc_wire(out_files, skill="doc", **over):
+    """The tools/call result McpServer would put on the wire for a run that
+    produced `out_files` (the runner's result is injected under the real
+    dispatcher's seam: handle_skill_call)."""
+    mod = _mod()
+    meta = {"skill": skill, "tier": "household", "file": "scripts/run.py"}
+    saved = mod.handle_skill_call
+    mod.handle_skill_call = lambda _args: mod._sanitize_run_result(
+        _doc_result(out_files, **over), meta)
+    try:
+        reply = mod.McpServer()._handle_tool_call(
+            1, {"name": TOOL, "arguments": {"function": "run",
+                                            "params": {}}})
+    finally:
+        mod.handle_skill_call = saved
+    return reply.get("result") or {}
+
+
+def _resources(result):
+    return [c for c in result.get("content") or []
+            if isinstance(c, dict) and c.get("type") == "resource"]
+
+
+def _doc_text(result):
+    return "".join(c.get("text", "") for c in result.get("content") or []
+                   if isinstance(c, dict) and c.get("type") == "text")
+
+
+def _run_documents(suite, fx):
+    def pair():
+        """M1: report.pdf + report.typ become two resource blocks after the
+        text block, the pdf a blob, the typ text; uri, mimeType, order."""
+        problems = []
+        result = _doc_wire([
+            {"path": "out/report.typ", "encoding": "utf8",
+             "content": TYP_TEXT},
+            {"path": "out/report.pdf", "encoding": "base64",
+             "content": _b64(PDF_BYTES)}])
+        content = result.get("content") or []
+        kinds = [c.get("type") for c in content]
+        if kinds != ["text", "resource", "resource"]:
+            return ["content block types %r, want text, resource, resource"
+                    % (kinds,)], []
+        pdf, typ = (c.get("resource") or {} for c in content[1:])
+        want_pdf = {"uri": "skill-out://doc/report.pdf",
+                    "mimeType": "application/pdf", "blob": _b64(PDF_BYTES)}
+        want_typ = {"uri": "skill-out://doc/report.typ",
+                    "mimeType": "text/x-typst", "text": TYP_TEXT}
+        if pdf != want_pdf:
+            problems.append("pdf resource %r, want %r" % (pdf, want_pdf))
+        if typ != want_typ:
+            problems.append("typ resource %r, want %r" % (typ, want_typ))
+        if result.get("isError") is not False:
+            problems.append("isError %r" % (result.get("isError"),))
+        return problems, ["blocks      : %r" % (kinds,)]
+    _guard(suite, GRP_M, "M1 pdf-and-typ-become-resource-blocks", pair)
+
+    def text_part():
+        """M2: the text part still says what was produced and never carries
+        the base64 (nor the pdf bytes)."""
+        problems = []
+        result = _doc_wire([
+            {"path": "out/report.pdf", "encoding": "base64",
+             "content": _b64(PDF_BYTES)},
+            {"path": "out/report.typ", "encoding": "utf8",
+             "content": TYP_TEXT}])
+        text = _doc_text(result)
+        if _b64(PDF_BYTES) in text:
+            problems.append("the base64 is in the text part")
+        for needle in ("made", "report.pdf", "report.typ"):
+            if needle not in text:
+                problems.append("%r missing from the text part %r"
+                                % (needle, text[:200]))
+        return problems, ["text        : %r" % text[:200]]
+    _guard(suite, GRP_M, "M2 text-part-says-what-was-produced-no-base64",
+           text_part)
+
+    def others_unchanged():
+        """M3: an extension off the allowlist (and a .pdf-looking name that
+        is not one) adds no resource block; the text part is today's."""
+        problems = []
+        outs = [{"path": "out/blob.bin", "encoding": "base64",
+                 "content": "AAECAwQF/w=="},
+                {"path": "out/result.txt", "encoding": "utf8",
+                 "content": "result ok\n"},
+                {"path": "out/pdf", "encoding": "base64",
+                 "content": _b64(PDF_BYTES)},
+                {"path": "out/x.pdf.txt", "encoding": "utf8",
+                 "content": "no\n"}]
+        result = _doc_wire(outs)
+        if _resources(result):
+            problems.append("resource blocks for non-allowlisted files: %r"
+                            % (_resources(result),))
+        text = _doc_text(result)
+        if len(result.get("content") or []) != 1:
+            problems.append("%d content blocks, want only the text block"
+                            % len(result.get("content") or []))
+        if "[out/result.txt]\nresult ok\n" not in text:
+            problems.append("today's out file section is gone: %r"
+                            % text[:160])
+        return problems, []
+    _guard(suite, GRP_M, "M3 other-extensions-unchanged", others_unchanged)
+
+    def typ_refused():
+        """M4: a .typ that is not UTF-8, or holds a control char other than
+        LF CR TAB, is not emitted as a resource (today's behaviour kept) and
+        the text part says so; the pdf beside it is still emitted."""
+        problems = []
+        cases = (("invalid utf-8", {"path": "out/bad.typ",
+                                    "encoding": "base64",
+                                    "content": _b64(b"#set \xff\xfe oops")}),
+                 ("control char (utf8)", {"path": "out/bad.typ",
+                                          "encoding": "utf8",
+                                          "content": "a\x01b\n"}),
+                 ("control char (base64)", {"path": "out/bad.typ",
+                                            "encoding": "base64",
+                                            "content": _b64(b"a\x1bb")}),
+                 ("NUL", {"path": "out/bad.typ", "encoding": "base64",
+                          "content": _b64(b"a\x00b")}))
+        for label, bad in cases:
+            result = _doc_wire([bad, {"path": "out/ok.pdf",
+                                      "encoding": "base64",
+                                      "content": _b64(PDF_BYTES)}])
+            uris = [(c.get("resource") or {}).get("uri")
+                    for c in _resources(result)]
+            if uris != ["skill-out://doc/ok.pdf"]:
+                problems.append("%s: resources %r, want only ok.pdf"
+                                % (label, uris))
+            text = _doc_text(result)
+            if "bad.typ" not in text or "not emitted" not in text:
+                problems.append("%s: the text part does not say bad.typ was "
+                                "not emitted: %r" % (label, text[:200]))
+        return problems, []
+    _guard(suite, GRP_M, "M4 bad-typ-not-emitted-and-said-so", typ_refused)
+
+    def by_extension():
+        """M5: encoded by EXTENSION, never by UTF-8 validity: a .typ that
+        arrived base64 is a text resource when valid, a .pdf that happens to
+        be valid UTF-8 text is still a blob."""
+        problems = []
+        ascii_pdf = b"%PDF-1.4\nplain ascii\n%%EOF\n"
+        result = _doc_wire([
+            {"path": "out/a.pdf", "encoding": "utf8",
+             "content": ascii_pdf.decode("ascii")},
+            {"path": "out/a.typ", "encoding": "base64",
+             "content": _b64(TYP_TEXT.encode("utf-8"))}])
+        res = [c.get("resource") or {} for c in _resources(result)]
+        if len(res) != 2:
+            return ["%d resources, want 2" % len(res)], []
+        if res[0].get("blob") != _b64(ascii_pdf) or "text" in res[0]:
+            problems.append("a.pdf is not a blob resource: %r" % (res[0],))
+        if res[1].get("text") != TYP_TEXT or "blob" in res[1]:
+            problems.append("a.typ is not a text resource: %r" % (res[1],))
+        return problems, []
+    _guard(suite, GRP_M, "M5 encoded-by-extension-not-by-utf8-validity",
+           by_extension)
+
+    def uris_and_order():
+        """M6: uri = skill-out://<skill>/<path under out/>, segments
+        percent-encoded, a traversal or hostile path never emitted, the
+        resources sorted by path."""
+        problems = []
+        pdf = _b64(PDF_BYTES)
+        result = _doc_wire([
+            {"path": "out/z.pdf", "encoding": "base64", "content": pdf},
+            {"path": "out/sub/my report#1.pdf", "encoding": "base64",
+             "content": pdf},
+            {"path": "out/../up.pdf", "encoding": "base64", "content": pdf},
+            {"path": "out/a/../b.pdf", "encoding": "base64", "content": pdf},
+            {"path": "/abs/c.pdf", "encoding": "base64", "content": pdf},
+            {"path": "out//d.pdf", "encoding": "base64", "content": pdf},
+            {"path": "out/e\\f.pdf", "encoding": "base64", "content": pdf},
+            {"path": "out/g\nh.pdf", "encoding": "base64", "content": pdf},
+            {"path": "out/a.pdf", "encoding": "base64", "content": pdf},
+            {"path": "out/%2e%2e.pdf", "encoding": "base64",
+             "content": pdf}], skill="my-skill")
+        uris = [(c.get("resource") or {}).get("uri")
+                for c in _resources(result)]
+        # sorted by the runner's raw path: '%' < 'a' < 's' < 'z'
+        want = ["skill-out://my-skill/%252e%252e.pdf",
+                "skill-out://my-skill/a.pdf",
+                "skill-out://my-skill/sub/my%20report%231.pdf",
+                "skill-out://my-skill/z.pdf"]
+        if uris != want:
+            problems.append("uris %r, want %r" % (uris, want))
+        for uri in uris:
+            if ".." in uri.split("skill-out://", 1)[-1].split("/"):
+                problems.append("a traversal reached a uri: %r" % uri)
+        return problems, ["uris        : %r" % (uris,)]
+    _guard(suite, GRP_M, "M6 uri-percent-safe-no-traversal-sorted",
+           uris_and_order)
+
+    def no_resource_on_failure():
+        """M7: a runner refusal never carries a resource block."""
+        mod = _mod()
+        out = mod._sanitize_run_result(
+            {"structuredContent": {"error": {"code": "busy",
+                                             "message": "x"}},
+             "isError": True},
+            {"skill": "doc", "tier": "household", "file": "s"})
+        extra = [k for k in out if k.startswith("__") and k != "__raw_text__"]
+        problems = []
+        if extra:
+            problems.append("a refusal carries %r" % (extra,))
+        return problems, []
+    _guard(suite, GRP_M, "M7 refusal-carries-no-resources",
+           no_resource_on_failure)
+
+    def live_stub():
+        """M8: through a real mcp-proxy --http and the stub runner in `docs`
+        mode, a stdio `run` answers a text block and the two resources."""
+        problems = []
+        proxy = _stub_proxy(fx)
+        root = _run_root(fx, "m8", lambda r: _run_skill(r, "doc"))
+        tok = _token_file(fx, "m8", proxy.token)
+        try:
+            proxy.set_mode("docs")
+            with _runner_client(proxy.url, tok, "--household-root",
+                                root) as cl:
+                resp = cl.rpc("tools/call", {"name": TOOL, "arguments": {
+                    "function": "run",
+                    "params": {"name": "doc",
+                               "script": "scripts/run.py"}}})
+        finally:
+            proxy.set_mode("normal")
+        result = resp.get("result") or {}
+        res = [c.get("resource") or {} for c in _resources(result)]
+        uris = [r.get("uri") for r in res]
+        if uris != ["skill-out://doc/report.pdf",
+                    "skill-out://doc/report.typ"]:
+            problems.append("resource uris %r (reply %r)"
+                            % (uris, str(resp)[:200]))
+        elif (res[0].get("blob") != _b64(PDF_BYTES)
+              or res[1].get("text") != TYP_TEXT):
+            problems.append("resource payloads differ from what the "
+                            "runner produced")
+        if _b64(PDF_BYTES) in _doc_text(result):
+            problems.append("the base64 is in the text part")
+        return problems, ["uris        : %r" % (uris,)]
+    _guard(suite, GRP_M, "M8 stub-runner-docs-end-to-end", live_stub)
+
+
+# ---------------------------------------------------------------------------
 # driver
 # ---------------------------------------------------------------------------
 
@@ -3622,6 +3899,7 @@ def run(opts=None):
         _run_run(suite, fx)
         _run_crash(suite, fx)
         _run_schema(suite, fx)
+        _run_documents(suite, fx)
     finally:
         _close_live()
         fx.cleanup()

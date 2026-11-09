@@ -51,7 +51,7 @@ import time
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple, Union
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 log = logging.getLogger("mcp-skill")
 
@@ -1897,6 +1897,78 @@ def _run_status(obj: dict) -> Optional[str]:
     return ", ".join(facts) or None
 
 
+# Produced documents (ADR 0032 amendment): an out file whose EXTENSION is
+# listed here is also emitted as an MCP EmbeddedResource content block after
+# the text block. extension -> (mimeType, "blob" | "text"). Encoded by
+# extension, never by UTF-8 validity; no new bytes beyond the runner's own
+# out-file limits (the blob is the file's bytes re-encoded, nothing more).
+_DOC_TYPES = {".pdf": ("application/pdf", "blob"),
+              ".typ": ("text/x-typst", "text")}
+_DOC_URI_SCHEME = "skill-out://"
+
+
+def _doc_ext(path: str) -> str:
+    """The lower-cased extension of the last path segment when it is an
+    allowlisted document type, else ''."""
+    leaf = path.rsplit("/", 1)[-1]
+    ext = ("." + leaf.rsplit(".", 1)[1].lower()) if "." in leaf else ""
+    return ext if ext in _DOC_TYPES else ""
+
+
+def _doc_uri(skill: str, path: str) -> Optional[str]:
+    """skill-out://<skill>/<path under out/> with every segment
+    percent-encoded, or None when the path is not a plain relative path under
+    out/ (empty, `.` or `..` segment, a backslash or a control character)."""
+    if not path.startswith("out/"):
+        return None
+    segments = path[4:].split("/")
+    for seg in segments:
+        if (not seg or seg in (".", "..") or "\\" in seg
+                or any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in seg)):
+            return None
+    try:
+        return (_DOC_URI_SCHEME + quote(skill, safe="") + "/"
+                + "/".join(quote(seg, safe="") for seg in segments))
+    except UnicodeEncodeError:
+        return None
+
+
+def _doc_block(skill: str, item: dict) -> Tuple[Optional[dict], Optional[str]]:
+    """(resource content block, None) for one allowlisted out file, or
+    (None, reason) when it must not be emitted; the caller names the reason
+    in the text part."""
+    path, encoding, content = (item.get("path"), item.get("encoding"),
+                               item.get("content"))
+    mime, kind = _DOC_TYPES[_doc_ext(path)]
+    uri = _doc_uri(skill, path)
+    if uri is None:
+        return None, "unsafe path"
+    if not isinstance(content, str):
+        return None, "no content"
+    try:
+        if encoding == "base64":
+            data = base64.b64decode(content, validate=True)
+        elif encoding == "utf8":
+            data = content.encode("utf-8")
+        else:
+            return None, "unknown encoding"
+    except (ValueError, UnicodeEncodeError):
+        return None, "content cannot be decoded"
+    if kind == "blob":
+        resource = {"uri": uri, "mimeType": mime,
+                    "blob": base64.b64encode(data).decode("ascii")}
+    else:
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            return None, "not valid UTF-8"
+        if any(unicodedata.category(ch) == "Cc" and ch not in "\n\r\t"
+               for ch in text):
+            return None, "contains control characters"
+        resource = {"uri": uri, "mimeType": mime, "text": text}
+    return {"type": "resource", "resource": resource}, None
+
+
 def _sanitize_run_result(res: dict, meta: Optional[dict] = None) -> dict:
     """The runner's raw result -> what the model reads (decision 7,
     Contract item 6), unframed (KD-10 reversed by user decision): a status
@@ -1906,7 +1978,10 @@ def _sanitize_run_result(res: dict, meta: Optional[dict] = None) -> dict:
     answer within _RUN_ANSWER_MAX_CHARS (M2), `(no output)` when nothing is
     left. A runner refusal passes its code (grammar-checked) under a fixed
     text; its message, when there is one, sanitized on the lines after it
-    (O2). Base64 out files are listed as metadata only, never shown.
+    (O2). Base64 out files are listed as metadata only, never shown in the
+    text; an out file with an allowlisted extension (.pdf, .typ) is also
+    returned under `__resources__` as an EmbeddedResource block that
+    McpServer._handle_tool_call appends after the text block.
     `meta` (skill, tier, file) is accepted for the callers; no line names it.
     """
     obj, is_error = _run_object(res)
@@ -1943,11 +2018,20 @@ def _sanitize_run_result(res: dict, meta: Optional[dict] = None) -> dict:
     if stderr:
         items.append(("[stderr]", stderr, "stderr"))
     shown = out_files[:_RUN_OUT_FILES_SHOWN]
+    skill = str((meta or {}).get("skill", ""))
+    docs: List[Tuple[str, dict]] = []     # (raw path, resource block)
+    notes: List[str] = []
     for item in shown:
         item = item if isinstance(item, dict) else {}
-        path = item.get("path")
-        path = (_web_clean(path, "").replace("\n", " ")
-                if isinstance(path, str) else "?")
+        raw_path = item.get("path")
+        path = (_web_clean(raw_path, "").replace("\n", " ")
+                if isinstance(raw_path, str) else "?")
+        if isinstance(raw_path, str) and _doc_ext(raw_path):
+            block, reason = _doc_block(skill, item)
+            if block is not None:
+                docs.append((raw_path, block))
+            else:
+                notes.append(f"[{path} not emitted as a document: {reason}]")
         name = path[4:] if path.startswith("out/") else path
         encoding = item.get("encoding")
         content = item.get("content")
@@ -1962,7 +2046,17 @@ def _sanitize_run_result(res: dict, meta: Optional[dict] = None) -> dict:
     omitted = len(out_files) - len(shown)
     tail = ([f"[{omitted} more out file(s) not shown]"] if omitted > 0
             else [])
-    return {"__raw_text__": _render_sections(_run_status(obj), items, tail)}
+    docs.sort(key=lambda pair: pair[0])
+    if docs:
+        names = ", ".join(_web_clean(p, "").replace("\n", " ")
+                          for p, _b in docs)
+        tail.append(f"[documents emitted as resources: {names}]")
+    tail.extend(notes)
+    result: Dict[str, Any] = {
+        "__raw_text__": _render_sections(_run_status(obj), items, tail)}
+    if docs:
+        result["__resources__"] = [block for _p, block in docs]
+    return result
 
 
 def fn_run(params: dict) -> dict:
@@ -2415,8 +2509,13 @@ class McpServer:
             result = _tool_refusal("internal", type(exc).__name__)
         is_error = "error" in result
         if "__raw_text__" in result:
+            # Produced documents (ADR 0032 amendment): resource blocks after
+            # the text block, never inside it.
+            content = [{"type": "text", "text": result["__raw_text__"]}]
+            if not is_error:
+                content.extend(result.get("__resources__") or [])
             return self._result(msg_id, {
-                "content": [{"type": "text", "text": result["__raw_text__"]}],
+                "content": content,
                 "isError": is_error,
             })
         return self._result(msg_id, {
