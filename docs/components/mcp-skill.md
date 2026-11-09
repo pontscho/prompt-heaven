@@ -147,8 +147,8 @@ runner is configured — counts only, never a path, a token or skill text
 did-you-mean pointer that never resolves the call
 `Scripts/mcp-skill.py:FUNCTIONS` ([[0030-point-at-the-near-miss-never-resolve-it]]).
 Parameters split in two by the advertised schema. The tool's `params` object is
-one flat schema offering `name`, `file`, `script`, `args`, `stdin` and
-`timeoutMs` to every function, and the set is read from that schema itself
+one flat schema offering `name`, `file`, `script`, `args`, `stdin`, `timeoutMs`
+and `inputs` to every function, and the set is read from that schema itself
 `Scripts/mcp-skill.py:SCHEMA_PARAMS`. A model fills every field it is shown —
 `list` arrived with `name`/`file`/`script` set to `dummy`, `args` `[]`, `stdin`
 `""` and `timeoutMs` `0`, was refused `Unknown params for 'list': ... Accepted:
@@ -244,7 +244,7 @@ source and re-copied, never in this copy alone.
 
 ## run: the runner client
 
-**Who runs what.** `run(name, script, args?, stdin?, timeoutMs?)` runs one
+**Who runs what.** `run(name, script, args?, stdin?, timeoutMs?, inputs?)` runs one
 indexed script of one skill. A private skill's script is refused unless the
 server was started with `--allow-private-scripts`; a script that is not one of
 the entry's indexed `scripts[].path` values is refused; the interpreter comes
@@ -265,6 +265,34 @@ a huge directory is never listed whole and only the bounded list is sorted
 whichever *serializes* smaller, because control-heavy text escapes to several
 times its size in JSON while base64 is a fixed four-thirds
 `Scripts/mcp-skill.py:_encode_file`.
+
+**Inputs.** `run` takes an optional `inputs`, an array of up to
+`Scripts/mcp-skill.py:_INPUTS_MAX_ITEMS` (8) `{name, content, encoding?}` items
+staged in the run's working directory beside the bundle, as top-level entries of
+the same `files` member of the runner's `run_script` (`path` is the `name`) —
+the runner has an input-files mechanism already, so nothing in
+[[mcp-sandbox]] changed `Scripts/mcp-skill.py:_validate_inputs`. `encoding` is
+`utf8` (the default when absent, as at the runner) or `base64`, decoded strictly
+(`validate=True`: no whitespace, no foreign alphabet). The name is a flat file
+name — 1 to 128 characters, no `/` or `\`, no `..`, no leading `.` or `-`, no
+control, format, surrogate, private-use or line-separator character — unique
+after NFD and case folding, and not `out`, `tmp`, `scripts` or `refs`, the names
+the runner and the bundle own `Scripts/mcp-skill.py:_input_name_refusal`. A
+member outside `name`, `content`, `encoding` and `ref` is refused with the
+did-you-mean pointer. An item holding a `ref` and no `content` is an unresolved
+ref — the broker upstream should have resolved it — and the whole call is
+refused `invalid_params` naming `inputs[i]`, before the bundle is read and
+before any connection; a `ref` beside `content` is tolerated and never
+forwarded. The bounds are server constants because the runner does not tell the
+server its limits: the decoded bytes of the inputs, **plus the bundle**, at
+most `Scripts/mcp-skill.py:_INPUTS_MAX_BYTES` (4 MiB, the runner's documented
+`max_files_bytes` default), and bundle plus inputs at most
+`Scripts/mcp-skill.py:_BUNDLE_MAX_FILES` (64, the `max_files` default) files;
+size is counted on decoded bytes, and an over-long string is refused before it
+is decoded. A runner configured with lower limits answers its own refusal. An
+empty `[]` counts as omitted like every empty schema value, and `load`, `list`
+and `validate` drop the key. Content and names are never logged and never in a
+refusal.
 
 **One serialization, sized before sending.** The request body is serialized once
 `Scripts/mcp-skill.py:_runner_body`, measured against `--runner-max-body` (the
@@ -486,6 +514,13 @@ Group M `tests/test_mcp_skill.py:_run_documents` pins the produced documents
 extensions unchanged, a bad `.typ` not emitted and said so, encoding by
 extension, the uri and its order, a refusal without blocks, and the path through
 a real proxy and the stub runner's `docs` mode), run red first (5 of 8 failed).
+Group N `tests/test_mcp_skill.py:_run_inputs` pins `inputs` (`N1`-`N12`: the
+schema, the top-level files with decoded bytes, `[]` as omitted, the unresolved
+ref refused by index and never sent, unknown members and wrong types, the name
+rules, uniqueness and reserved names, the count and byte bounds shared with the
+bundle, the encoding rules and strict base64, content never logged, the path
+through a real proxy where the stub runner records the sha256 and size of every
+decoded file, and the runner body cap), run red first (12 of 12 failed).
 Its
 case count is declared once, in `tests/run.py:SUITES`, and checked against the
 run; the forge target is `mcp_skill`.
@@ -523,6 +558,14 @@ a smoke row with near-miss and documented-call probes
   file's content is inspected beyond the `.typ` UTF-8 and control-character
   rule. A `.typ` is not sanitized, so bidi and zero-width characters survive
   inside the resource.
+- **Inputs are a caller's files, not a skill's.** They are not sanitized or
+  inspected: whoever can call `run` can put any bytes (within the bounds) in the
+  working directory of an approved script, and the script decides what to do
+  with them. The same-uid trust and the runner's own confinement are the
+  boundary. A `ref` is resolved upstream by the broker, never here; the server
+  only refuses one left unresolved. The 8, 4 MiB and 64 are the runner's
+  documented defaults, not values read from the runner (ADR 0032, inputs
+  addendum).
 - **The ai-soul-side bounds above are trusted, not re-checked**, and the
   Unicode-version skew between the two classifiers is a known residual.
 - **No change notification.** A new or edited skill reaches a client only when

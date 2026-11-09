@@ -189,6 +189,24 @@ part says so; the text part never carries the base64. Written RED first.
      extension, M6 uri percent-safety/no traversal/order, M7 a refusal has no
      resources, M8 end to end through the proxy and the stub's `docs` mode.
 
+Group N pins the optional run parameter `inputs` (ADR 0032, 2026-11-09
+inputs addendum): up to 8 {name, content, encoding} items staged into the
+sandbox working directory as top-level files through the runner's existing
+`files` member, beside the skill's bundle. A flat safe name, unique after case
+folding; strict base64; an item holding a `ref` and no content (an unresolved
+ref) is refused naming its index and never forwarded; bounds on count and on
+decoded bytes shared with the bundle; the whole request still measured against
+--runner-max-body before sending; content never logged. Written RED first.
+  N  inputs -- N1 the tool schema offers it, N2 forwarded as top-level files
+     beside the bundle with the decoded bytes, N3 an empty `[]` counts as
+     omitted and load/list drop the key, N4 an unresolved ref is refused by
+     index and nothing sent (a ref beside content is dropped), N5 unknown
+     members and wrong types refused, N6 the name rules, N7 uniqueness after
+     case folding and the reserved names, N8 count and byte bounds (shared
+     with the bundle), N9 encoding rules and strict base64, N10 content never
+     logged, N11 end to end through the proxy and the stub (decoded digests),
+     N12 over --runner-max-body refused before sending.
+
 Usage:
   python3 tests/test_mcp_skill.py [--brief] [--keep]
 Exit code 0 iff every case passes.
@@ -197,6 +215,7 @@ Exit code 0 iff every case passes.
 import ast
 import asyncio
 import base64
+import hashlib
 import http.server
 import json
 import logging
@@ -236,6 +255,7 @@ GRP_J = "J. run"
 GRP_K = "K. handler crash"
 GRP_L = "L. params schema"
 GRP_M = "M. documents"
+GRP_N = "N. inputs"
 LOGGER = "mcp-skill"
 
 GENERATOR = H.repo_path("Scripts", "amalgamate.py")
@@ -3878,6 +3898,471 @@ def _run_documents(suite, fx):
 
 
 # ---------------------------------------------------------------------------
+# N: the optional run parameter `inputs`
+# ---------------------------------------------------------------------------
+
+INPUTS_MAX_ITEMS = 8             # the server's own count bound
+INPUTS_MAX_BYTES = 4194304       # the runner's documented max_files_bytes default
+BUNDLE_MAX_FILES = 64            # the runner's documented max_files default
+
+
+def _inp(name, content="x", encoding="utf8", **more):
+    item = {"name": name, "content": content, "encoding": encoding}
+    item.update(more)
+    return item
+
+
+def _inp_b64(name, data):
+    return _inp(name, _b64(data), "base64")
+
+
+class _InputsRun:
+    """In-process `run` against a recording runner-client stand-in: what
+    fn_run builds reaches `sent`, the call itself answers busy/recorded, so a
+    row tells accepted (reached the client) from refused (did not)."""
+
+    def __init__(self, fx, label, refs=None, scripts=None):
+        self.mod = _mod()
+        self.root = _run_root(fx, label, lambda r: _run_skill(
+            r, "runner", refs=refs, **({"scripts": scripts} if scripts
+                                       else {})))
+        self.sent = []
+
+    def __call__(self, inputs, **extra):
+        mod, sent = self.mod, self.sent
+
+        class Recorder:
+            def prepare(self, payload):
+                sent.append(payload["params"])
+                return types.SimpleNamespace(body=mod._runner_body(payload))
+
+            def call(self, request):
+                raise mod.RunnerError("busy", "recorded")
+
+        saved = mod._RUNNER
+        mod._RUNNER = Recorder()
+        try:
+            with _Roots(mod, household=self.root):
+                mod._CONFIG = mod._CONFIG._replace(
+                    runner_url="http://127.0.0.1:9/mcp")
+                params = {"name": "runner", "script": "scripts/run.py"}
+                if inputs is not None:
+                    params["inputs"] = inputs
+                params.update(extra)
+                return _call(mod, "run", params)
+        finally:
+            mod._RUNNER = saved
+
+    def accepted(self, res):
+        return _err(res) == ("busy", "recorded")
+
+    def last_files(self):
+        return {f["path"]: f for f in self.sent[-1]["files"]} if self.sent else {}
+
+
+def _decode_sent(entry):
+    if entry.get("encoding") == "base64":
+        return base64.b64decode(entry["content"], validate=True)
+    return entry["content"].encode("utf-8")
+
+
+def _run_inputs(suite, fx):
+    def schema():
+        """N1: the flat params schema offers `inputs` (array of objects with
+        name/content/encoding), and it is a schema key the dispatcher knows."""
+        mod = _mod()
+        props = mod._tool_definition("", ())["inputSchema"]["properties"][
+            "params"]["properties"]
+        problems = []
+        prop = props.get("inputs")
+        if not isinstance(prop, dict):
+            return ["no 'inputs' property in the params schema (%s)"
+                    % sorted(props)], []
+        if prop.get("type") != "array":
+            problems.append("inputs type %r, want array" % (prop.get("type"),))
+        items = prop.get("items") or {}
+        item_props = items.get("properties") or {}
+        if items.get("type") != "object" or not {"name", "content",
+                                                 "encoding"} <= set(item_props):
+            problems.append("inputs items %r, want an object with name, "
+                            "content, encoding" % (items,))
+        if "inputs" not in mod.ACCEPTED.get("run", ()):
+            problems.append("run does not accept inputs")
+        if "inputs" not in mod.SCHEMA_PARAMS:
+            problems.append("inputs is not a SCHEMA_PARAMS key")
+        if not str(prop.get("description", "")).strip():
+            problems.append("inputs has no description for the model")
+        return problems, ["description : %r" % (prop.get("description"),)]
+    _guard(suite, GRP_N, "N1 schema-offers-inputs", schema)
+
+    def forwarded():
+        """N2: each input becomes a top-level file named `name` beside the
+        bundle, carrying the decoded bytes, whatever encoding it arrived in;
+        nothing else (no ref/name member) is added to the file entries."""
+        run = _InputsRun(fx, "n2", refs={"notes.md": b"NOTES\n"})
+        blob = bytes(range(256)) + b"\xff\xfe"
+        text = "caf" + chr(0xE9) + ",1\n"
+        problems = []
+        res = run([_inp("data.csv", text), _inp_b64("blob.bin", blob),
+                   {"name": "noenc.txt", "content": "plain"}])
+        if not run.accepted(res):
+            return ["run with inputs refused: %r" % (_err(res),)], []
+        files = run.last_files()
+        want = {"scripts/run.py", "refs/notes.md", "data.csv", "blob.bin",
+                "noenc.txt"}
+        if set(files) != want:
+            problems.append("files sent %s, want %s"
+                            % (sorted(files), sorted(want)))
+            return problems, []
+        for path, data in (("data.csv", text.encode("utf-8")),
+                           ("blob.bin", blob), ("noenc.txt", b"plain")):
+            try:
+                got = _decode_sent(files[path])
+            except (ValueError, KeyError) as exc:
+                problems.append("%s not decodable: %s" % (path,
+                                                          type(exc).__name__))
+                continue
+            if got != data:
+                problems.append("%s carries %r, want %r" % (path, got[:20],
+                                                            data[:20]))
+            extra = set(files[path]) - {"path", "content", "encoding"}
+            if extra:
+                problems.append("%s carries extra members %s" % (path,
+                                                                 sorted(extra)))
+        return problems, ["files       : %r" % (sorted(files),)]
+    _guard(suite, GRP_N, "N2 inputs-forwarded-as-top-level-files", forwarded)
+
+    def omitted():
+        """N3: `inputs: []` counts as omitted (the flat-schema fill); a
+        load/list with a filled `inputs` drops the key like the others."""
+        run = _InputsRun(fx, "n3")
+        problems = []
+        plain = run(None)
+        filled = run([])
+        for what, res in (("plain run", plain), ("run with inputs []", filled)):
+            if not run.accepted(res):
+                problems.append("%s: %r" % (what, _err(res)))
+        if len(run.sent) == 2 and run.sent[0] != run.sent[1]:
+            problems.append("run with inputs [] sent different params from "
+                            "the plain run")
+        mod = _mod()
+        root, _sdir = _hygiene_fixture(fx, "n3b")
+        with _Roots(mod, household=root):
+            load = _call(mod, "load", {"name": "h", "inputs": [_inp("a")]})
+            lst = _call(mod, "list", {"inputs": [_inp("a")]})
+        _loaded(load, "BODY-h", "load with inputs filled", problems)
+        if _err(lst) is not None:
+            problems.append("list with inputs filled refused: %r" % (_err(lst),))
+        return problems, []
+    _guard(suite, GRP_N, "N3 empty-inputs-omitted-other-functions-drop-it",
+           omitted)
+
+    def refs():
+        """N4: an item with a `ref` and no content is refused naming its
+        index, never forwarded; a `ref` beside content is accepted and the
+        ref is not forwarded."""
+        run = _InputsRun(fx, "n4")
+        problems = []
+        res = run([_inp("ok.txt"), {"name": "late.pdf", "ref": "att_1234"}])
+        _refused(res, "an unresolved ref", problems, code="invalid_params",
+                 token="inputs[1]")
+        if _err(res) and "ref" not in _err(res)[1]:
+            problems.append("refusal does not say ref: %r" % (_err(res)[1],))
+        res0 = run([{"ref": "att_9", "name": "x.txt", "encoding": "utf8"}])
+        _refused(res0, "a ref at index 0", problems, code="invalid_params",
+                 token="inputs[0]")
+        resn = run([{"name": "x.txt", "ref": "att_9", "content": None}])
+        _refused(resn, "a ref with null content", problems,
+                 code="invalid_params", token="inputs[0]")
+        if run.sent:
+            problems.append("an unresolved ref reached the runner client "
+                            "(%d request(s))" % len(run.sent))
+        both = run([{"name": "x.txt", "ref": "att_9", "content": "hi"}])
+        if not run.accepted(both):
+            problems.append("a ref beside content was refused: %r"
+                            % (_err(both),))
+        else:
+            entry = run.last_files().get("x.txt") or {}
+            if "ref" in entry or "att_9" in json.dumps(run.sent[-1]):
+                problems.append("the ref was forwarded: %r" % (entry,))
+        return problems, []
+    _guard(suite, GRP_N, "N4 unresolved-ref-refused-by-index-never-sent", refs)
+
+    def shapes():
+        """N5: an unknown member, a non-object item, a non-list `inputs` and
+        a missing name/content are refused naming the item."""
+        run = _InputsRun(fx, "n5")
+        problems = []
+        cases = (
+            ("unknown member", [_inp("a.txt", path="b")], "inputs[0]", "path"),
+            ("unknown member (did-you-mean)", [_inp("a.txt", contnet="b")],
+             "inputs[0]", "contnet"),
+            ("non-object item", [_inp("a.txt"), "x"], "inputs[1]", None),
+            ("missing name", [{"content": "x", "encoding": "utf8"}],
+             "inputs[0]", "name"),
+            ("missing content", [{"name": "a.txt", "encoding": "utf8"}],
+             "inputs[0]", None),
+            ("name not a string", [_inp(7)], "inputs[0]", None),
+            ("content not a string", [_inp("a.txt", 5)], "inputs[0]", None),
+        )
+        for what, inputs, where, word in cases:
+            res = run(inputs)
+            _refused(res, what, problems, code="invalid_params", token=where)
+            if word and _err(res) and word not in _err(res)[1]:
+                problems.append("%s refusal %r does not name %r"
+                                % (what, _err(res)[1][:160], word))
+        res = run("not-a-list")
+        _refused(res, "inputs a string", problems, code="invalid_params",
+                 token="inputs")
+        res = run({"name": "a.txt"})
+        _refused(res, "inputs an object", problems, code="invalid_params",
+                 token="inputs")
+        if run.sent:
+            problems.append("a malformed inputs reached the runner client "
+                            "(%d request(s))" % len(run.sent))
+        return problems, []
+    _guard(suite, GRP_N, "N5 unknown-members-and-types-refused", shapes)
+
+    def names():
+        """N6: the name rules -- flat, no separators, no '..', no leading
+        dot or '-', no control/format characters, bounded length; sane names
+        (spaces, accents, dots inside) are accepted."""
+        run = _InputsRun(fx, "n6")
+        problems = []
+        bad = ["a/b", "/abs", "a\\b", "..", ".", "a..b", ".hidden", "",
+               "-flag", "tab\tname", "nul\x00", "del\x7f", "c1\x85x",
+               "bidi" + chr(0x202E) + "txt", "zw" + chr(0x200B) + "x",
+               "x" * 129, "lone" + chr(0xD800)]
+        for name in bad:
+            res = run([_inp(name)])
+            _refused(res, "name %r" % name, problems, code="invalid_params",
+                     token="inputs[0]")
+        good = ["data.csv", "my file (1).txt", "caf" + chr(0xE9) + ".txt",
+                "UPPER.TXT", "a", "x" * 128, "a.b.c", "x-y_z"]
+        for name in good:
+            res = run([_inp(name)])
+            if not run.accepted(res):
+                problems.append("name %r refused: %r" % (name, _err(res)))
+        return problems, ["bad names   : %d, good names: %d" % (len(bad),
+                                                                 len(good))]
+    _guard(suite, GRP_N, "N6 name-rules", names)
+
+    def unique():
+        """N7: names unique after case folding and Unicode normalisation;
+        the runner-owned and bundle directory names are reserved."""
+        run = _InputsRun(fx, "n7")
+        problems = []
+        for what, inputs in (
+                ("same name twice", [_inp("a.txt"), _inp("a.txt")]),
+                ("case-insensitive", [_inp("Report.CSV"), _inp("report.csv")]),
+                ("normalisation", [_inp("caf" + chr(0xE9)),
+                                   _inp("cafe" + chr(0x301))])):
+            res = run(inputs)
+            _refused(res, what, problems, code="invalid_params",
+                     token="inputs[1]")
+        for name in ("out", "OUT", "tmp", "Tmp", "scripts", "SCRIPTS", "refs",
+                     "Refs"):
+            res = run([_inp(name)])
+            _refused(res, "reserved name %r" % name, problems,
+                     code="invalid_params", token="inputs[0]")
+        if run.sent:
+            problems.append("a refused set reached the runner client")
+        return problems, []
+    _guard(suite, GRP_N, "N7 unique-after-folding-and-reserved-names", unique)
+
+    def bounds():
+        """N8: at most 8 items; total decoded bytes (shared with the
+        bundle) at most the runner's 4 MiB default; the file count shared
+        with the bundle at most 64. Size is checked on decoded bytes."""
+        problems = []
+        run = _InputsRun(fx, "n8")
+        eight = [_inp("f%d.txt" % i) for i in range(INPUTS_MAX_ITEMS)]
+        if not run.accepted(run(eight)):
+            problems.append("8 inputs refused")
+        res = run(eight + [_inp("f8.txt")])
+        _refused(res, "9 inputs", problems, code="invalid_params",
+                 token=str(INPUTS_MAX_ITEMS))
+        under = 1024 * 1024
+        if not run.accepted(run([_inp_b64("big.bin", b"\0" * under)])):
+            problems.append("a 1 MiB input refused")
+        over = INPUTS_MAX_BYTES + 1
+        res = run([_inp_b64("big.bin", b"\0" * over)])
+        _refused(res, "inputs over the byte bound (base64)", problems,
+                 code="invalid_params", token="bytes")
+        res = run([_inp_b64("a.bin", b"\0" * INPUTS_MAX_BYTES),
+                   _inp("b.txt", "x")])
+        _refused(res, "inputs summing over the byte bound", problems,
+                 code="invalid_params", token="bytes")
+        # Size is DECODED bytes: a base64 text of ~1.33x the bound that
+        # decodes to exactly the bound minus the bundle would pass; here a
+        # utf8 text over the bound (multi-byte chars) is refused too.
+        res = run([_inp("u.txt", chr(0xE9) * (INPUTS_MAX_BYTES // 2 + 1))])
+        _refused(res, "utf8 input over the bound in bytes", problems,
+                 code="invalid_params", token="bytes")
+        # Shared with the bundle: 3 MiB of refs + 1.5 MiB of inputs.
+        run2 = _InputsRun(fx, "n8b", refs={"big.bin": b"\0" * (3 * 1024 * 1024)})
+        res = run2([_inp_b64("c.bin", b"\0" * (3 * 512 * 1024))])
+        _refused(res, "bundle plus inputs over the byte bound", problems,
+                 code="invalid_params", token="bytes")
+        if not run2.accepted(run2([_inp_b64("c.bin", b"\0" * 1024)])):
+            problems.append("bundle plus a small input refused")
+        # Shared file count: 60 refs + the script = 61; 4 inputs = 65.
+        refs60 = {"r%02d.txt" % i: b"x" for i in range(60)}
+        run3 = _InputsRun(fx, "n8c", refs=refs60)
+        if not run3.accepted(run3([_inp("a"), _inp("b"), _inp("c")])):
+            problems.append("64 files in total refused")
+        res = run3([_inp("a"), _inp("b"), _inp("c"), _inp("d")])
+        _refused(res, "65 files in total", problems, code="invalid_params",
+                 token="files")
+        return problems, []
+    _guard(suite, GRP_N, "N8 count-and-byte-bounds-shared-with-bundle", bounds)
+
+    def encodings():
+        """N9: encoding is utf8 (also the default when absent) or base64;
+        base64 is strict (no whitespace, no bad characters, padded);
+        anything else is refused."""
+        run = _InputsRun(fx, "n9")
+        problems = []
+        for what, item in (
+                ("encoding latin1", _inp("a", "x", "latin1")),
+                ("encoding upper-case", _inp("a", "x", "UTF8")),
+                ("encoding a number", _inp("a", "x", 7)),
+                ("base64 with a space", _inp("a", "AAAA AAAA", "base64")),
+                ("base64 with a newline", _inp("a", "AAAA\nAAAA", "base64")),
+                ("base64 bad character", _inp("a", "AA*A", "base64")),
+                ("base64 unpadded", _inp("a", "QQ", "base64")),
+                ("base64 url-safe alphabet", _inp("a", "_-8=", "base64")),
+                ("utf8 lone surrogate", _inp("a", "x" + chr(0xD800)))):
+            res = run([item])
+            _refused(res, what, problems, code="invalid_params",
+                     token="inputs[0]")
+        for what, item in (("empty content", _inp("e", "")),
+                           ("empty base64", _inp("e", "", "base64")),
+                           ("padded base64", _inp("e", "QQ==", "base64"))):
+            if not run.accepted(run([item])):
+                problems.append("%s refused" % what)
+        res = run([_inp("b", "QQ==", "base64")])
+        if run.accepted(res) and _decode_sent(run.last_files()["b"]) != b"A":
+            problems.append("base64 QQ== did not decode to b'A'")
+        return problems, []
+    _guard(suite, GRP_N, "N9 encodings-and-strict-base64", encodings)
+
+    def not_logged():
+        """N10: neither the content nor the name of an input reaches a log
+        record, on a run that is forwarded or refused."""
+        run = _InputsRun(fx, "n10")
+        secret = "SECRET-INPUT-CONTENT-7731"
+        secret_name = "secretname-7731.txt"
+        records = []
+
+        class _Catch(logging.Handler):
+            def emit(self, record):
+                records.append(record)
+
+        catch = _Catch(level=logging.DEBUG)
+        logger = logging.getLogger(LOGGER)
+        saved_level = logger.level
+        logger.setLevel(logging.DEBUG)
+        logger.addHandler(catch)
+        try:
+            ok = run([_inp(secret_name, secret),
+                      _inp_b64("b.bin", secret.encode("ascii"))])
+            bad = run([_inp(secret_name, secret, "latin1")])
+            ref = run([{"name": secret_name, "ref": secret}])
+        finally:
+            logger.removeHandler(catch)
+            logger.setLevel(saved_level)
+        problems = []
+        if not run.accepted(ok):
+            problems.append("control run refused: %r" % (_err(ok),))
+        for what, res in (("refused (encoding)", bad), ("refused (ref)", ref)):
+            if _err(res) is None:
+                problems.append("%s run was accepted" % what)
+            elif secret in _err(res)[1]:
+                problems.append("%s refusal echoes the content" % what)
+        text = " ".join("%s %s" % (r.getMessage(), r.args) for r in records)
+        for needle in (secret, _b64(secret.encode("ascii")), secret_name):
+            if needle in text:
+                problems.append("log carries %r" % needle)
+        return problems, ["log records : %d" % len(records)]
+    _guard(suite, GRP_N, "N10 input-content-never-logged", not_logged)
+
+    def live():
+        """N11: through a real mcp-proxy --http and the stub runner, the
+        inputs arrive as top-level files next to the bundle with the decoded
+        bytes (sha256 and size), and the file entries carry only path,
+        content and encoding."""
+        proxy = _stub_proxy(fx)
+        root = _run_root(fx, "n11", lambda r: _run_skill(
+            r, "runner", refs={"notes.md": b"NOTES\n"}))
+        tok = _token_file(fx, "n11", proxy.token)
+        blob = bytes(range(256)) * 3
+        text = "line1\n" + chr(0xE9) + chr(0x4E2D) + "\n"
+        problems = []
+        with _runner_client(proxy.url, tok, "--household-root", root) as cl:
+            mark = proxy.mark()
+            res = _run_call(cl, "runner", "scripts/run.py", inputs=[
+                _inp("data.txt", text), _inp_b64("blob.bin", blob)])
+            if not _ran(res, STUB_OK, "run with inputs", problems):
+                return problems, []
+            calls = [e for e in proxy.calls_since(mark)
+                     if e.get("function") == "run_script"]
+            if not calls:
+                return ["the stub recorded no run_script"], []
+            files = {f["path"]: f for f in calls[-1].get("files") or []}
+            want = {"scripts/run.py", "refs/notes.md", "data.txt", "blob.bin"}
+            if set(files) != want:
+                problems.append("files sent %s, want %s" % (sorted(files),
+                                                            sorted(want)))
+            else:
+                for path, data in (("data.txt", text.encode("utf-8")),
+                                   ("blob.bin", blob)):
+                    meta = files[path]
+                    if (meta.get("bytes") != len(data) or meta.get("sha256")
+                            != hashlib.sha256(data).hexdigest()):
+                        problems.append("%s: stub saw %r bytes, sha256 %r"
+                                        % (path, meta.get("bytes"),
+                                           meta.get("sha256")))
+                    if meta.get("members") != ["content", "encoding", "path"]:
+                        problems.append("%s members %r" % (path,
+                                                           meta.get("members")))
+            # An unresolved ref through the real path: refused, no call.
+            mark = proxy.mark()
+            res = _run_call(cl, "runner", "scripts/run.py",
+                            inputs=[{"name": "late.pdf", "ref": "att_1"}])
+            _run_refused(res, "an unresolved ref", problems,
+                         code="invalid_params", token="inputs[0]",
+                         secret=proxy.token, base=fx.base)
+            _no_call(proxy, mark, "an unresolved ref", problems)
+        return problems, ["files       : %r" % (sorted(files),)]
+    _guard(suite, GRP_N, "N11 stub-runner-receives-decoded-inputs", live)
+
+    def max_body():
+        """N12: --runner-max-body still measures the WHOLE serialized
+        request, inputs included; over it is refused before any call."""
+        proxy = _stub_proxy(fx)
+        root = _run_root(fx, "n12", lambda r: _run_skill(r, "runner"))
+        tok = _token_file(fx, "n12", proxy.token)
+        problems = []
+        with _runner_client(proxy.url, tok, "--household-root", root,
+                            "--runner-max-body", str(J9_MAX_BODY)) as cl:
+            mark = proxy.mark()
+            res = _run_call(cl, "runner", "scripts/run.py", inputs=[
+                _inp_b64("big.bin", bytes(range(256)) * 200)])
+            _run_refused(res, "inputs over --runner-max-body", problems,
+                         code="invalid_params", token="cap", secret=proxy.token,
+                         base=fx.base)
+            _no_call(proxy, mark, "inputs over --runner-max-body", problems)
+            mark = proxy.mark()
+            res = _run_call(cl, "runner", "scripts/run.py", inputs=[
+                _inp_b64("small.bin", bytes(range(256)))])
+            _ran(res, STUB_OK, "a small input under the cap", problems)
+        return problems, []
+    _guard(suite, GRP_N, "N12 over-runner-max-body-refused-before-sending",
+           max_body)
+
+
+# ---------------------------------------------------------------------------
 # driver
 # ---------------------------------------------------------------------------
 
@@ -3900,6 +4385,7 @@ def run(opts=None):
         _run_crash(suite, fx)
         _run_schema(suite, fx)
         _run_documents(suite, fx)
+        _run_inputs(suite, fx)
     finally:
         _close_live()
         fx.cleanup()

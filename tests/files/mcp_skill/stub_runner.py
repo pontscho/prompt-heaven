@@ -33,8 +33,9 @@ CLI flags
                     ``DIR/stub_runner.events.jsonl`` (O_APPEND, 0600):
                     {"pid", "t", "method", "id", "function", "params_keys",
                     "files", "line_bytes", "cancel_id", "mode"}; ``files`` is
-                    the list of {"path", "encoding", "chars"} of a run_script
-                    call -- metadata only, never content.  A finished ``sleep``
+                    the list of {"path", "encoding", "chars", "bytes", "sha256",
+                    "members"} of a run_script call -- bytes and sha256 of the
+                    decoded content, never the content (``mcp_skill:N11``).  A finished ``sleep``
                     adds {"method": "sleep/done", "id"}.  At start-up the stub
                     appends its pid to ``DIR/stub_runner.pids``.  A row asserts
                     "NO request arrived" (``mcp_skill:J9``) by finding no
@@ -71,6 +72,7 @@ refusal naming the functions.
 
 import argparse
 import base64
+import hashlib
 import json
 import os
 import sys
@@ -171,19 +173,36 @@ def tf_record(state, record):
 
 
 def tf_file_meta(files):
-    """[{"path", "encoding", "chars"}] of a run_script ``files`` member; never content."""
+    """[{"path", "encoding", "chars", "bytes", "sha256"}] of a run_script ``files`` member.
+
+    ``bytes`` and ``sha256`` describe the DECODED content (the runner's view of
+    the file, utf8 or base64 per ``encoding``); the content itself is never
+    recorded.  Both are None when the content cannot be decoded."""
     out = []
     if not isinstance(files, list):
         return out
     for item in files:
         if not isinstance(item, dict):
-            out.append({"path": None, "encoding": None, "chars": None})
+            out.append({"path": None, "encoding": None, "chars": None,
+                        "bytes": None, "sha256": None, "members": None})
             continue
         content = item.get("content")
+        decoded = None
+        if isinstance(content, str):
+            try:
+                if item.get("encoding") == "base64":
+                    decoded = base64.b64decode(content, validate=True)
+                else:
+                    decoded = content.encode("utf-8")
+            except (ValueError, UnicodeEncodeError):
+                decoded = None
         out.append({
             "path": item.get("path") if isinstance(item.get("path"), str) else None,
             "encoding": item.get("encoding") if isinstance(item.get("encoding"), str) else None,
             "chars": len(content) if isinstance(content, str) else None,
+            "bytes": len(decoded) if decoded is not None else None,
+            "sha256": hashlib.sha256(decoded).hexdigest() if decoded is not None else None,
+            "members": sorted(item.keys()),
         })
     return out
 

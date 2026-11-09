@@ -689,3 +689,24 @@ A model that made a PDF with Typst could say it had, and could not hand the file
 - **The name is the runner's.** The `uri` is derived from the path the sandboxed script chose; two runs can reuse a `uri`, and the server keeps no store.
 
 Rows `mcp_skill:M1`-`M8` (new group M, run red first: 5 of 8 failed against the old server; the suite went from 95 to 103 cases) pin the pair as blocks, the text part, other extensions unchanged, a bad `.typ` not emitted and said so, encoding by extension, the uri and its order, a refusal without blocks and the whole path through a real `mcp-proxy --http` and the stub runner's `docs` mode.
+
+## Addendum (2026-11-09): run takes optional `inputs`, files staged beside the script
+
+Decided by Zoltán on 2026-11-09, agreed with the ai-soul side as a frozen interface. It adds one optional parameter to `run` and changes nothing else: the runner, the proxy, the bundle, the sanitizer, the answer and the document blocks are as before.
+
+### What changed
+
+`run` accepts `inputs`, an array of at most 8 `{name, content, encoding}` items `Scripts/mcp-skill.py:_validate_inputs`. Each becomes a top-level entry of the runner's existing `files` member (`path` = `name`), appended after the skill's `scripts/` and `refs/` leaves, so the script finds it in its working directory; mcp-sandbox's `run_script` already staged any file list, and it is unchanged. `encoding` is `utf8` (the default, as at the runner) or `base64`, decoded strictly. The name is a flat safe file name, unique after NFD and case folding, and not `out`, `tmp`, `scripts` or `refs`. An item that holds a `ref` and no `content` is an unresolved ref and refuses the whole call `invalid_params` naming `inputs[i]` before the bundle is read and before any connection; a `ref` beside `content` is dropped, never forwarded. The decoded bytes of bundle plus inputs are bounded at 4 MiB and their file count at 64, and the existing `--runner-max-body` check still measures the whole serialized request and refuses before sending. An empty `[]` is dropped like every empty schema value; `load`, `list` and `validate` drop the key. Names and content are never logged or echoed in a refusal. The shape is on [[mcp-skill]].
+
+### Why
+
+A skill script that works on a file the person supplied (a CSV to chart, a document to convert) had only `stdin`, which is text, bounded at the runner's `max_stdin_bytes`, and not a file. The broker (ai-soul) holds attachments by reference and resolves them to bytes before the call; this server is the last place that can refuse a reference that was not resolved, instead of letting a script run against a missing file.
+
+### Declared limits
+
+- **Same-uid trust is unchanged.** Whoever can call `run` can put bytes of their choosing in an approved script's working directory; the script and the runner's confinement decide what happens, and the runner token remains the boundary. Inputs are not sanitized or inspected.
+- **Refs are resolved upstream.** The broker turns a ref into `content`; this server only refuses one left unresolved and never fetches anything.
+- **The bounds are the runner's documented defaults, not read from the runner.** The server is not told the runner's configured `max_files` and `max_files_bytes` (defaults 64 and 4 MiB, ceilings 256 and 16 MiB); a runner configured lower answers its own `invalid_params`, and one configured higher is not used past the server's constants. The bundle shares both budgets, so a skill near its own cap leaves little room.
+- **Eight items, 128 characters.** Both are server constants (the 8 from the interface agreement, the 128 an implementation choice well under the runner's 255-byte component limit), not measured limits.
+
+Rows `mcp_skill:N1`-`N12` (new group N, run red first: 12 of 12 failed against the old server; the suite went from 103 to 115 cases) pin the schema, the staged files and their decoded bytes, the unresolved ref, the name, encoding and bound rules, the log silence, the path through a real `mcp-proxy --http` and the stub runner (which now records the size and sha256 of every decoded file, never the content) and the runner body cap.

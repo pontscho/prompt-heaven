@@ -927,7 +927,9 @@ SUITES = [
     # I 12, J 13, K 2, L 3 = 92), the rows of plan Steps 16, 17 and 18 (J1 is live:
     # INFO off macOS and under a nested Seatbelt, counted either way), so a
     # count that moves is the alarm, not noise.  The produced-documents group M
-    # (M1-M8, ADR 0032 amendment) took the count 95 -> 103, run RED first.  K (validation round 1) is
+    # (M1-M8, ADR 0032 amendment) took the count 95 -> 103, run RED first.
+    # The inputs group N (N1-N12, ADR 0032 inputs addendum) took it 103 -> 115,
+    # run RED first (12 of 12 failed).  K (validation round 1) is
     # layer D in-process (K1) and through McpServer.run() (K2) -- the smoke
     # probe answers -32602 now and no longer reaches the catch-all.  The
     # security round 1 -> 2 added B9, B10 (K3), I12 (M2), J11 (K4), J12 (M2)
@@ -965,8 +967,12 @@ SUITES = [
      "function does not read or holding its type's empty value dropped, "
      "a key outside it refused) and the produced documents (a .pdf blob and "
      "a .typ text resource block per out file, a bad .typ not emitted, "
-     "uri percent-safety, sorted)",
-     103),
+     "uri percent-safety, sorted) and the optional run parameter inputs "
+     "(staged as top-level files beside the bundle, an unresolved ref "
+     "refused by index, flat safe unique names, strict base64, count and "
+     "byte bounds shared with the bundle, never logged, the runner body cap "
+     "still applying)",
+     115),
     # TYPED: a fixed case table (A 13, B 8, C 9, D 9, E 5, F 10, G 2, H 16,
     # I 11, J 2, K 18, L 10, M 9, N 15, O 19, P 18, Q 15, R 7, S 26, T 9 = 231): the skeleton
     # groups of plan step 3, the step 4 groups F, H, I, J, the step 5-6 groups

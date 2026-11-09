@@ -932,6 +932,22 @@ def _tool_definition(description: str, names) -> dict:
                                  "description": "run: script arguments."},
                         "stdin": {"type": "string",
                                   "description": "run: standard input."},
+                        "inputs": {"type": "array",
+                                   "description": "run: files staged beside "
+                                   "the script (at most 8; flat names, "
+                                   "unique ignoring case; encoding utf8 or "
+                                   "base64, default utf8).",
+                                   "items": {
+                                       "type": "object",
+                                       "properties": {
+                                           "name": {"type": "string",
+                                                    "description": "File "
+                                                    "name, no path."},
+                                           "content": {"type": "string"},
+                                           "encoding": {"type": "string",
+                                                        "enum": ["utf8",
+                                                                 "base64"]},
+                                       }}},
                         "timeoutMs": {"type": "integer",
                                       "description": "run: timeout in ms."},
                     },
@@ -1012,7 +1028,8 @@ def _current_view() -> IndexView:
 # schema key holding its type's empty value is dropped too (see below).
 ACCEPTED: Dict[str, frozenset] = {
     "load": frozenset({"name", "file"}),
-    "run": frozenset({"name", "script", "args", "stdin", "timeoutMs"}),
+    "run": frozenset({"name", "script", "args", "stdin", "timeoutMs",
+                      "inputs"}),
     "list": frozenset(),
     "validate": frozenset(),
 }
@@ -1074,6 +1091,8 @@ def _check_members(function: str, params: dict) -> Optional[str]:
         args = params["args"]
         if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
             return "args must be a list of strings"
+    if "inputs" in params and not isinstance(params["inputs"], list):
+        return "inputs must be a list of objects"
     if "timeoutMs" in params:
         value = params["timeoutMs"]
         if not isinstance(value, int) or isinstance(value, bool):
@@ -1806,6 +1825,132 @@ def _collect_bundle(skill_fd: int) -> List[dict]:
     return files
 
 
+# run's `inputs`: files the caller stages beside the script. They travel as
+# plain top-level entries of the runner's `files` member (path == name), so the
+# runner's own validation and limits apply to them as to the bundle. The
+# runner's max_files / max_files_bytes defaults (64 files, 4 MiB decoded) are
+# the budget SHARED with the bundle; the server is not told the configured
+# values, so it checks the documented defaults (both equal the bundle caps).
+_INPUTS_MAX_ITEMS = 8
+_INPUTS_MAX_BYTES = _SCRIPT_MAX_BYTES        # 4 MiB decoded, bundle included
+_INPUT_NAME_MAX_CHARS = 128
+_INPUT_MEMBERS = frozenset({"name", "content", "encoding", "ref"})
+_INPUT_ENCODINGS = ("utf8", "base64")
+# First path components the runner or the bundle own in the workdir.
+_INPUT_RESERVED = frozenset({"out", "tmp", "scripts", "refs"})
+_INPUT_BAD_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Co", "Zl", "Zp"})
+
+
+def _input_key(name: str) -> str:
+    """The collision key of an input name: NFD then casefold, NFD again (the
+    runner folds paths the same way, so the macOS work root cannot split two
+    names the runner would take for one)."""
+    return unicodedata.normalize(
+        "NFD", unicodedata.normalize("NFD", name).casefold())
+
+
+def _input_name_refusal(name: Any) -> Optional[str]:
+    """The rule a staged file name breaks, or None. Flat and plain: one
+    component, no separator, no '..', no leading dot or '-', no control or
+    format character, bounded; never the name itself in the message."""
+    if not isinstance(name, str):
+        return "name must be a string"
+    if not 1 <= len(name) <= _INPUT_NAME_MAX_CHARS:
+        return f"name must be 1..{_INPUT_NAME_MAX_CHARS} characters"
+    if "/" in name or "\\" in name:
+        return "name must be a flat file name (no slash or backslash)"
+    if ".." in name:
+        return "name must not contain '..'"
+    if name[0] in ".-":
+        return "name must not start with '.' or '-'"
+    if any(unicodedata.category(ch) in _INPUT_BAD_CATEGORIES for ch in name):
+        return "name must not contain a control or format character"
+    if _input_key(name) in _INPUT_RESERVED:
+        return "name is reserved (out, tmp, scripts, refs)"
+    return None
+
+
+def _decode_input(where: str, item: dict) -> Union[str, bytes]:
+    """The decoded bytes of one input's content, or the refusal text."""
+    content = item["content"]
+    if not isinstance(content, str):
+        return f"{where}.content must be a string"
+    encoding = item.get("encoding", "utf8")
+    if encoding not in _INPUT_ENCODINGS or not isinstance(encoding, str):
+        return f"{where}.encoding must be one of {', '.join(_INPUT_ENCODINGS)}"
+    # Every decoded byte costs at least 3/4 of an encoded character, so a
+    # longer string is over the bound without being decoded at all.
+    if len(content) > _INPUTS_MAX_BYTES * 4 // 3 + 8:
+        return (f"{where}: the decoded content exceeds {_INPUTS_MAX_BYTES} "
+                "bytes")
+    if encoding == "utf8":
+        try:
+            return content.encode("utf-8")
+        except UnicodeEncodeError:
+            return f"{where}.content is not valid UTF-8 (a lone surrogate)"
+    try:
+        return base64.b64decode(content, validate=True)
+    except ValueError:      # binascii.Error is a ValueError
+        return f"{where}.content is not valid base64"
+
+
+def _validate_inputs(value: List[Any]) -> Union[str, List[Tuple[str, bytes]]]:
+    """run's `inputs` -> [(name, decoded bytes)], or the refusal text.
+
+    Each item is {name, content, encoding?}; `ref` is tolerated beside
+    `content` (the broker resolved it) and never forwarded, but an item that
+    holds a ref and no content is an unresolved ref and is refused, naming its
+    index. Count, per-name rules, case-folded uniqueness and the decoded byte
+    total are checked here; nothing is logged, and no message carries content.
+    """
+    if len(value) > _INPUTS_MAX_ITEMS:
+        return f"inputs: at most {_INPUTS_MAX_ITEMS} items"
+    out: List[Tuple[str, bytes]] = []
+    seen: Dict[str, int] = {}
+    total = 0
+    for i, item in enumerate(value):
+        where = f"inputs[{i}]"
+        if not isinstance(item, dict):
+            return f"{where} must be an object"
+        unknown = sorted(str(k) for k in item if k not in _INPUT_MEMBERS)
+        if unknown:
+            return (f"{where}: unknown member(s): {', '.join(unknown)}. "
+                    f"Accepted: {', '.join(sorted(_INPUT_MEMBERS))}."
+                    + _did_you_mean(unknown, _INPUT_MEMBERS))
+        if item.get("content") is None and "ref" in item:
+            return (f"{where}: unresolved ref (the item has a ref and no "
+                    "content); it was not sent")
+        if "name" not in item:
+            return f"{where}: name is required"
+        if item.get("content") is None:
+            return f"{where}: content is required"
+        refusal = _input_name_refusal(item["name"])
+        if refusal is not None:
+            return f"{where}: {refusal}"
+        key = _input_key(item["name"])
+        if key in seen:
+            return (f"{where}: name repeats inputs[{seen[key]}] (names are "
+                    "compared ignoring case)")
+        data = _decode_input(where, item)
+        if isinstance(data, str):
+            return data
+        total += len(data)
+        if total > _INPUTS_MAX_BYTES:
+            return (f"{where}: the decoded inputs exceed {_INPUTS_MAX_BYTES} "
+                    "bytes in total")
+        seen[key] = i
+        out.append((item["name"], data))
+    return out
+
+
+def _decoded_size(entry: dict) -> int:
+    """The decoded size of one bundle file entry (as _encode_file made it)."""
+    content = entry.get("content", "")
+    if entry.get("encoding") == "base64":
+        return len(base64.b64decode(content))
+    return len(content.encode("utf-8"))
+
+
 def _run_object(res: Any) -> Tuple[Optional[dict], bool]:
     """(object, isError) of a sandbox_call result: structuredContent, else
     the text block parsed with _strict_loads; (None, ...) when neither is an
@@ -2060,9 +2205,10 @@ def _sanitize_run_result(res: dict, meta: Optional[dict] = None) -> dict:
 
 
 def fn_run(params: dict) -> dict:
-    """run(name, script, args?, stdin?, timeoutMs?): send an indexed script
-    and its skill's scripts/ and refs/ to the runner's sandbox_call
-    run_script, and render the result sanitized, unframed (plan Step 18).
+    """run(name, script, args?, stdin?, timeoutMs?, inputs?): send an indexed
+    script and its skill's scripts/ and refs/ -- plus the caller's `inputs`
+    as top-level files -- to the runner's sandbox_call run_script, and render
+    the result sanitized, unframed (plan Step 18).
 
     The request body is serialized ONCE (RunnerClient.prepare, _runner_body)
     and its size checked against --runner-max-body BEFORE any connection;
@@ -2087,6 +2233,9 @@ def fn_run(params: dict) -> dict:
     runner = _RUNNER
     if runner is None:
         return _tool_refusal("sandbox_unavailable", "runner not configured")
+    staged = _validate_inputs(params.get("inputs") or [])
+    if isinstance(staged, str):
+        return _tool_refusal("invalid_params", f"run refused: {staged}")
     root = (_CONFIG.household_root if skill.tier == "household"
             else _CONFIG.private_root)
     if root is None:
@@ -2116,6 +2265,19 @@ def fn_run(params: dict) -> dict:
     if script not in {f["path"] for f in files}:
         return _tool_refusal("invalid_params", "run refused: the script is "
                              "not in the skill's scripts/")
+    if staged:
+        # The bundle and the inputs share the runner's file and byte budgets.
+        if len(files) + len(staged) > _BUNDLE_MAX_FILES:
+            return _tool_refusal("invalid_params", (
+                f"run refused: the bundle and the inputs hold more than "
+                f"{_BUNDLE_MAX_FILES} files"))
+        if (sum(_decoded_size(f) for f in files)
+                + sum(len(data) for _n, data in staged)) > _INPUTS_MAX_BYTES:
+            return _tool_refusal("invalid_params", (
+                f"run refused: the bundle and the inputs exceed "
+                f"{_INPUTS_MAX_BYTES} bytes in total"))
+        files = files + [dict({"path": n}, **_encode_file(data))
+                         for n, data in staged]
     run_params: Dict[str, Any] = {"files": files, "entry": script,
                                   "interpreter": interpreter}
     for key in ("args", "stdin", "timeoutMs"):
