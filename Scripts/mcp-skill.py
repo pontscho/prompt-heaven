@@ -2130,7 +2130,8 @@ def _sanitize_run_result(res: dict, meta: Optional[dict] = None) -> dict:
     text; an out file with an allowlisted extension (.pdf, .typ, .md) is also
     returned under `__resources__` as an EmbeddedResource block that
     McpServer._handle_tool_call appends after the text block.
-    `meta` (skill, tier, file) is accepted for the callers; no line names it.
+    `meta` (skill, tier, file) is accepted for the callers; no line of the
+    text block names the tier (fn_run reports it in the result's `_meta`).
     """
     obj, is_error = _run_object(res)
     if obj is None:
@@ -2217,12 +2218,26 @@ def fn_run(params: dict) -> dict:
     and its size checked against --runner-max-body BEFORE any connection;
     call() sends exactly those bytes. Logs metadata only.
     """
-    name, script = params["name"], params["script"]
+    name = params["name"]
     merged = _merged_skills()
     skill = merged.get(name)
     if skill is None:
         return _tool_refusal("invalid_params", "Unknown skill name."
                              + _did_you_mean(name, sorted(merged)))
+    try:
+        result = _run_resolved(params, skill)
+    except Exception as exc:  # noqa: BLE001 -- layer D, keeps the meta
+        log.exception("skill_call handler failed")
+        result = _tool_refusal("internal", type(exc).__name__)
+    # Which skill and tier actually ran (internal constants, never user
+    # text): McpServer._handle_tool_call turns this into the result's _meta.
+    result["__meta__"] = {"skill": skill.entry.name, "tier": skill.tier}
+    return result
+
+
+def _run_resolved(params: dict, skill: Skill) -> dict:
+    """The body of fn_run once the skill name is resolved to `skill`."""
+    name, script = params["name"], params["script"]
     if skill.tier == "private" and not _CONFIG.allow_private_scripts:
         return _tool_refusal("invalid_params", (
             "private scripts are disabled (start mcp-skill with "
@@ -2673,21 +2688,24 @@ class McpServer:
             log.exception("Unhandled exception in handle_skill_call")
             result = _tool_refusal("internal", type(exc).__name__)
         is_error = "error" in result
+        meta = result.pop("__meta__", None)
         if "__raw_text__" in result:
             # Produced documents (ADR 0032 amendment): resource blocks after
             # the text block, never inside it.
             content = [{"type": "text", "text": result["__raw_text__"]}]
             if not is_error:
                 content.extend(result.get("__resources__") or [])
-            return self._result(msg_id, {
-                "content": content,
+            out = {"content": content, "isError": is_error}
+        else:
+            out = {
+                "content": [{"type": "text", "text": _strict_dumps(result)}],
+                "structuredContent": result,
                 "isError": is_error,
-            })
-        return self._result(msg_id, {
-            "content": [{"type": "text", "text": _strict_dumps(result)}],
-            "structuredContent": result,
-            "isError": is_error,
-        })
+            }
+        if meta is not None:
+            # Which skill and tier actually ran (function=run only).
+            out["_meta"] = meta
+        return self._result(msg_id, out)
 
     # Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
     # BEGIN GENERATED: _mcp_json.py :: _result, _error

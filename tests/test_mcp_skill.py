@@ -259,6 +259,7 @@ GRP_K = "K. handler crash"
 GRP_L = "L. params schema"
 GRP_M = "M. documents"
 GRP_N = "N. inputs"
+GRP_O = "O. run meta"
 LOGGER = "mcp-skill"
 
 GENERATOR = H.repo_path("Scripts", "amalgamate.py")
@@ -2383,7 +2384,8 @@ def _run_call(cl, name, script, **extra):
     text = "".join(c.get("text", "") for c in result.get("content") or []
                    if isinstance(c, dict) and isinstance(c.get("text"), str))
     out = {"is_error": result.get("isError") is True, "text": text,
-           "code": None, "message": ""}
+           "code": None, "message": "", "result": result,
+           "meta": result.get("_meta")}
     if out["is_error"]:
         obj = result.get("structuredContent")
         if not isinstance(obj, dict):
@@ -4421,6 +4423,139 @@ def _run_inputs(suite, fx):
 
 
 # ---------------------------------------------------------------------------
+# O: the result-level _meta of function=run (which skill and tier ran)
+# ---------------------------------------------------------------------------
+
+def _meta_want(res, skill, tier, what, problems):
+    if res["meta"] != {"skill": skill, "tier": tier}:
+        problems.append("%s: _meta %r, want %r"
+                        % (what, res["meta"], {"skill": skill, "tier": tier}))
+
+
+def _run_meta(suite, fx):
+    def household():
+        """O1: a household run carries _meta {skill, tier: household}."""
+        proxy = _stub_proxy(fx)
+        root = _run_root(fx, "o1", lambda r: _run_skill(r, "runner"))
+        tok = _token_file(fx, "o1", proxy.token)
+        problems = []
+        with _runner_client(proxy.url, tok, "--household-root", root) as cl:
+            res = _run_call(cl, "runner", "scripts/run.py")
+            if _ran(res, STUB_OK, "a household run", problems):
+                _meta_want(res, "runner", "household", "household run",
+                           problems)
+        return problems, []
+    _guard(suite, GRP_O, "O1 household-run-reports-meta", household)
+
+    def private():
+        """O2: an allowed private run carries tier private."""
+        proxy = _stub_proxy(fx)
+        hroot = _run_root(fx, "o2h", lambda r: _run_skill(r, "pub"))
+        proot = _run_root(fx, "o2p", lambda r: _run_skill(r, "priv"))
+        tok = _token_file(fx, "o2", proxy.token)
+        problems = []
+        with _runner_client(proxy.url, tok, "--household-root", hroot,
+                            "--private-root", proot,
+                            "--allow-private-scripts") as cl:
+            res = _run_call(cl, "priv", "scripts/run.py")
+            if _ran(res, STUB_OK, "a private run", problems):
+                _meta_want(res, "priv", "private", "private run", problems)
+        return problems, []
+    _guard(suite, GRP_O, "O2 private-run-reports-meta", private)
+
+    def shadow():
+        """O3: the same name in both tiers runs the private one and says so."""
+        proxy = _stub_proxy(fx)
+        hroot = _run_root(fx, "o3h", lambda r: _run_skill(r, "dup"))
+        proot = _run_root(fx, "o3p", lambda r: _run_skill(r, "dup"))
+        tok = _token_file(fx, "o3", proxy.token)
+        problems = []
+        with _runner_client(proxy.url, tok, "--household-root", hroot,
+                            "--private-root", proot,
+                            "--allow-private-scripts") as cl:
+            res = _run_call(cl, "dup", "scripts/run.py")
+            if _ran(res, STUB_OK, "a shadowed run", problems):
+                _meta_want(res, "dup", "private", "shadowed run", problems)
+        return problems, []
+    _guard(suite, GRP_O, "O3 private-shadow-reports-private", shadow)
+
+    def refused_by_runner():
+        """O4: a runner refusal (isError) still carries _meta."""
+        proxy = _stub_proxy(fx)
+        root = _run_root(fx, "o4", lambda r: _run_skill(r, "runner"))
+        tok = _token_file(fx, "o4", proxy.token)
+        problems = []
+        with _runner_client(proxy.url, tok, "--household-root", root) as cl:
+            proxy.set_mode("busy")
+            try:
+                res = _run_call(cl, "runner", "scripts/run.py")
+            finally:
+                proxy.set_mode("normal")
+            _run_refused(res, "a busy runner", problems, code="busy")
+            _meta_want(res, "runner", "household", "busy runner", problems)
+        return problems, []
+    _guard(suite, GRP_O, "O4 runner-refusal-reports-meta", refused_by_runner)
+
+    def refused_after_resolution():
+        """O5: invalid inputs, refused after the name resolved, carry _meta."""
+        proxy = _stub_proxy(fx)
+        root = _run_root(fx, "o5", lambda r: _run_skill(r, "runner"))
+        tok = _token_file(fx, "o5", proxy.token)
+        problems = []
+        with _runner_client(proxy.url, tok, "--household-root", root) as cl:
+            res = _run_call(cl, "runner", "scripts/run.py",
+                            inputs=[{"name": "late.pdf", "ref": "att_1"}])
+            _run_refused(res, "an unresolved ref", problems,
+                         code="invalid_params", token="inputs[0]")
+            _meta_want(res, "runner", "household", "invalid inputs", problems)
+        return problems, []
+    _guard(suite, GRP_O, "O5 post-resolution-refusal-reports-meta",
+           refused_after_resolution)
+
+    def unknown():
+        """O6: an unknown skill name carries no _meta, nor does load."""
+        proxy = _stub_proxy(fx)
+        root = _run_root(fx, "o6", lambda r: _run_skill(r, "runner"))
+        tok = _token_file(fx, "o6", proxy.token)
+        problems = []
+        with _runner_client(proxy.url, tok, "--household-root", root) as cl:
+            res = _run_call(cl, "nosuch", "scripts/run.py")
+            _run_refused(res, "an unknown skill", problems,
+                         code="invalid_params")
+            if "_meta" in res["result"]:
+                problems.append("unknown skill carries _meta %r"
+                                % (res["result"]["_meta"],))
+            resp = cl.rpc("tools/call", {"name": TOOL, "arguments": {
+                "function": "load", "params": {"name": "runner"}}})
+            if "_meta" in (resp.get("result") or {}):
+                problems.append("load carries _meta")
+        return problems, []
+    _guard(suite, GRP_O, "O6 unknown-skill-and-load-carry-no-meta", unknown)
+
+    def no_leak():
+        """O7: the internal key never reaches the text or structuredContent,
+        on a refusal (structured branch) or a success (raw-text branch)."""
+        proxy = _stub_proxy(fx)
+        root = _run_root(fx, "o7", lambda r: _run_skill(r, "runner"))
+        tok = _token_file(fx, "o7", proxy.token)
+        problems = []
+        with _runner_client(proxy.url, tok, "--household-root", root) as cl:
+            for what, extra in (
+                    ("success", {}),
+                    ("refusal", {"inputs": [{"name": "x", "ref": "att_1"}]})):
+                res = _run_call(cl, "runner", "scripts/run.py", **extra)
+                if "__meta__" in res["text"]:
+                    problems.append("%s text names __meta__" % what)
+                if "__meta__" in (res["result"].get("structuredContent")
+                                  or {}):
+                    problems.append("%s structuredContent has __meta__" % what)
+                if "__meta__" in res["result"]:
+                    problems.append("%s result has __meta__" % what)
+        return problems, []
+    _guard(suite, GRP_O, "O7 internal-meta-key-never-leaks", no_leak)
+
+
+# ---------------------------------------------------------------------------
 # driver
 # ---------------------------------------------------------------------------
 
@@ -4444,6 +4579,7 @@ def run(opts=None):
         _run_schema(suite, fx)
         _run_documents(suite, fx)
         _run_inputs(suite, fx)
+        _run_meta(suite, fx)
     finally:
         _close_live()
         fx.cleanup()

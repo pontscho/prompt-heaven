@@ -401,8 +401,22 @@ line, and it lists the emitted ones on one `[documents emitted as resources:
 out-file limits. Other extensions, and a refusal, are unchanged (ADR 0032,
 2026-11-09 addendum).
 
+**The result says which skill ran.** Every `run` result once the skill name
+resolved -- success, a script failure, a runner refusal, and a refusal raised
+after resolution (invalid inputs, runner or tier root not configured, a
+runner error) -- carries a result-level MCP `_meta` object
+`{"skill": "<name>", "tier": "household" | "private"}`, the tier of the merged
+lookup, so a private shadow of a household skill is visible to the caller.
+`fn_run` sets an internal `__meta__` key on its dict and
+`Scripts/mcp-skill.py:McpServer._handle_tool_call` moves it to `_meta` in both
+the raw-text and the structured branch; it never reaches the text block or
+`structuredContent`. An unknown skill name and every other function (`load`,
+`validate`, `list`) carry no `_meta`. The values are the server's own
+constants, never user text.
+
 So a clean run answers its stdout and nothing else. `durationMs` is no longer
-reported to the model, and no line names the skill, tier or script. Every peer
+reported to the model, and no line of the text block names the skill, tier or
+script (the tier travels in `_meta`, above). Every peer
 string still goes through `_web_clean`. Until `0668eb3` the answer opened with
 a summary line (exit, signal, timed out, duration, sizes, truncation flags) and
 put stdout, stderr and each out file in its own nonce frame.
