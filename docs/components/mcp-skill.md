@@ -390,9 +390,12 @@ result as an MCP `EmbeddedResource` content block after the text block —
 Markdown file (`text/markdown`) — chosen
 by extension and never by UTF-8 validity `Scripts/mcp-skill.py:_doc_block`
 `Scripts/mcp-skill.py:McpServer._handle_tool_call`. The `uri` is
-`skill-out://<skill>/<path under out/>`, every segment percent-encoded, and a
-path that is not a plain relative path under `out/` is not emitted
-`Scripts/mcp-skill.py:_doc_uri`. Blocks are sorted by path, so a `report.pdf`
+`skill-out://<skill>/<path>`, every segment percent-encoded, and a
+path that is not a plain relative path is not emitted
+`Scripts/mcp-skill.py:_doc_uri`. The runner's `outFiles[].path` is relative
+to `out/` and carries no `out/` prefix (found by a live probe 2026-11-10), so
+the server neither requires nor strips one; the text label is always
+`out/<path>` (a real `out/out/x.md` reads `out/out/x.md`, uri `.../out/x.md`). Blocks are sorted by path, so a `report.pdf`
 and its `report.typ` come as a pair in a stable order. A `.typ` or `.md` that is not
 strict UTF-8 or holds a control character besides LF, CR and TAB is not emitted;
 the text part names it on a `[out/<name> not emitted as a document: <reason>]`

@@ -182,7 +182,7 @@ never shown): an out file whose EXTENSION is .pdf (blob resource,
 application/pdf), .typ (text resource, text/x-typst) or .md (text resource,
 text/markdown) is added as a
 {type: resource} content block after the text block, uri
-skill-out://<skill>/<path under out/>, sorted by path; a .typ that is not
+skill-out://<skill>/<path relative to out/>, sorted by path; a .typ that is not
 UTF-8 or holds a control char besides LF/CR/TAB is not emitted and the text
 part says so; the text part never carries the base64. Written RED first.
   M  documents -- M1 the pair as resource blocks, M2 the text part, M3 other
@@ -190,7 +190,8 @@ part says so; the text part never carries the base64. Written RED first.
      extension, M6 uri percent-safety/no traversal/order, M7 a refusal has no
      resources, M8 end to end through the proxy and the stub's `docs` mode,
      M9 a .md (any case) is a text/markdown text resource, M10 a bad .md not
-     emitted and said so.
+     emitted and said so, M11 the runner's outFiles paths are relative to
+     out/ with no `out/` prefix (a live probe 2026-11-10).
 
 Group N pins the optional run parameter `inputs` (ADR 0032, 2026-11-09
 inputs addendum): up to 8 {name, content, encoding} items staged into the
@@ -3247,7 +3248,7 @@ def _run_run(suite, fx):
         def render(*args, **over):
             return mod._sanitize_run_result(result(*args, **over), meta).get(
                 "__raw_text__")
-        outs = [{"path": "out/f%03d.txt" % i, "encoding": "utf8",
+        outs = [{"path": "f%03d.txt" % i, "encoding": "utf8",
                  "content": "c" * 50000} for i in range(200)]
         text = render("a" * 300000, "b" * 300000, outs) or ""
         problems = []
@@ -3276,7 +3277,7 @@ def _run_run(suite, fx):
                               timedOut=True, stdoutTruncated=True),
              "signal SIGKILL, timed out, stdout truncated"),
             ("nothing", render("", "", []), "(no output)"),
-            ("out file", render("", "", [{"path": "out/r.txt",
+            ("out file", render("", "", [{"path": "r.txt",
                                           "encoding": "utf8",
                                           "content": "R\n"}]),
              "[out/r.txt]\nR\n"),
@@ -3694,9 +3695,9 @@ def _run_documents(suite, fx):
         text block, the pdf a blob, the typ text; uri, mimeType, order."""
         problems = []
         result = _doc_wire([
-            {"path": "out/report.typ", "encoding": "utf8",
+            {"path": "report.typ", "encoding": "utf8",
              "content": TYP_TEXT},
-            {"path": "out/report.pdf", "encoding": "base64",
+            {"path": "report.pdf", "encoding": "base64",
              "content": _b64(PDF_BYTES)}])
         content = result.get("content") or []
         kinds = [c.get("type") for c in content]
@@ -3722,9 +3723,9 @@ def _run_documents(suite, fx):
         the base64 (nor the pdf bytes)."""
         problems = []
         result = _doc_wire([
-            {"path": "out/report.pdf", "encoding": "base64",
+            {"path": "report.pdf", "encoding": "base64",
              "content": _b64(PDF_BYTES)},
-            {"path": "out/report.typ", "encoding": "utf8",
+            {"path": "report.typ", "encoding": "utf8",
              "content": TYP_TEXT}])
         text = _doc_text(result)
         if _b64(PDF_BYTES) in text:
@@ -3741,13 +3742,13 @@ def _run_documents(suite, fx):
         """M3: an extension off the allowlist (and a .pdf-looking name that
         is not one) adds no resource block; the text part is today's."""
         problems = []
-        outs = [{"path": "out/blob.bin", "encoding": "base64",
+        outs = [{"path": "blob.bin", "encoding": "base64",
                  "content": "AAECAwQF/w=="},
-                {"path": "out/result.txt", "encoding": "utf8",
+                {"path": "result.txt", "encoding": "utf8",
                  "content": "result ok\n"},
-                {"path": "out/pdf", "encoding": "base64",
+                {"path": "pdf", "encoding": "base64",
                  "content": _b64(PDF_BYTES)},
-                {"path": "out/x.pdf.txt", "encoding": "utf8",
+                {"path": "x.pdf.txt", "encoding": "utf8",
                  "content": "no\n"}]
         result = _doc_wire(outs)
         if _resources(result):
@@ -3768,19 +3769,19 @@ def _run_documents(suite, fx):
         LF CR TAB, is not emitted as a resource (today's behaviour kept) and
         the text part says so; the pdf beside it is still emitted."""
         problems = []
-        cases = (("invalid utf-8", {"path": "out/bad.typ",
+        cases = (("invalid utf-8", {"path": "bad.typ",
                                     "encoding": "base64",
                                     "content": _b64(b"#set \xff\xfe oops")}),
-                 ("control char (utf8)", {"path": "out/bad.typ",
+                 ("control char (utf8)", {"path": "bad.typ",
                                           "encoding": "utf8",
                                           "content": "a\x01b\n"}),
-                 ("control char (base64)", {"path": "out/bad.typ",
+                 ("control char (base64)", {"path": "bad.typ",
                                             "encoding": "base64",
                                             "content": _b64(b"a\x1bb")}),
-                 ("NUL", {"path": "out/bad.typ", "encoding": "base64",
+                 ("NUL", {"path": "bad.typ", "encoding": "base64",
                           "content": _b64(b"a\x00b")}))
         for label, bad in cases:
-            result = _doc_wire([bad, {"path": "out/ok.pdf",
+            result = _doc_wire([bad, {"path": "ok.pdf",
                                       "encoding": "base64",
                                       "content": _b64(PDF_BYTES)}])
             uris = [(c.get("resource") or {}).get("uri")
@@ -3802,9 +3803,9 @@ def _run_documents(suite, fx):
         problems = []
         ascii_pdf = b"%PDF-1.4\nplain ascii\n%%EOF\n"
         result = _doc_wire([
-            {"path": "out/a.pdf", "encoding": "utf8",
+            {"path": "a.pdf", "encoding": "utf8",
              "content": ascii_pdf.decode("ascii")},
-            {"path": "out/a.typ", "encoding": "base64",
+            {"path": "a.typ", "encoding": "base64",
              "content": _b64(TYP_TEXT.encode("utf-8"))}])
         res = [c.get("resource") or {} for c in _resources(result)]
         if len(res) != 2:
@@ -3824,17 +3825,18 @@ def _run_documents(suite, fx):
         problems = []
         pdf = _b64(PDF_BYTES)
         result = _doc_wire([
-            {"path": "out/z.pdf", "encoding": "base64", "content": pdf},
-            {"path": "out/sub/my report#1.pdf", "encoding": "base64",
+            {"path": "z.pdf", "encoding": "base64", "content": pdf},
+            {"path": "sub/my report#1.pdf", "encoding": "base64",
              "content": pdf},
-            {"path": "out/../up.pdf", "encoding": "base64", "content": pdf},
-            {"path": "out/a/../b.pdf", "encoding": "base64", "content": pdf},
+            {"path": "../up.pdf", "encoding": "base64", "content": pdf},
+            {"path": "a/../b.pdf", "encoding": "base64", "content": pdf},
             {"path": "/abs/c.pdf", "encoding": "base64", "content": pdf},
-            {"path": "out//d.pdf", "encoding": "base64", "content": pdf},
-            {"path": "out/e\\f.pdf", "encoding": "base64", "content": pdf},
-            {"path": "out/g\nh.pdf", "encoding": "base64", "content": pdf},
-            {"path": "out/a.pdf", "encoding": "base64", "content": pdf},
-            {"path": "out/%2e%2e.pdf", "encoding": "base64",
+            {"path": "/d.pdf", "encoding": "base64", "content": pdf},
+            {"path": "x//d.pdf", "encoding": "base64", "content": pdf},
+            {"path": "e\\f.pdf", "encoding": "base64", "content": pdf},
+            {"path": "g\nh.pdf", "encoding": "base64", "content": pdf},
+            {"path": "a.pdf", "encoding": "base64", "content": pdf},
+            {"path": "%2e%2e.pdf", "encoding": "base64",
              "content": pdf}], skill="my-skill")
         uris = [(c.get("resource") or {}).get("uri")
                 for c in _resources(result)]
@@ -3907,10 +3909,10 @@ def _run_documents(suite, fx):
         problems = []
         md_text = "# Title " + chr(0xE9) + "\n\n- item\n\ttabbed\r\n"
         result = _doc_wire([
-            {"path": "out/z.typ", "encoding": "utf8", "content": TYP_TEXT},
-            {"path": "out/b.MD", "encoding": "base64",
+            {"path": "z.typ", "encoding": "utf8", "content": TYP_TEXT},
+            {"path": "b.MD", "encoding": "base64",
              "content": _b64(md_text.encode("utf-8"))},
-            {"path": "out/a.md", "encoding": "utf8", "content": md_text}])
+            {"path": "a.md", "encoding": "utf8", "content": md_text}])
         res = [c.get("resource") or {} for c in _resources(result)]
         want = [{"uri": "skill-out://doc/a.md", "mimeType": "text/markdown",
                  "text": md_text},
@@ -3928,13 +3930,13 @@ def _run_documents(suite, fx):
         """M10: a .md that is not UTF-8 or holds a control char besides LF CR
         TAB is not emitted, keeps today's section and the text part says so."""
         problems = []
-        cases = (("invalid utf-8", {"path": "out/bad.md",
+        cases = (("invalid utf-8", {"path": "bad.md",
                                     "encoding": "base64",
                                     "content": _b64(b"# \xff\xfe oops")}),
-                 ("control char", {"path": "out/bad.md", "encoding": "utf8",
+                 ("control char", {"path": "bad.md", "encoding": "utf8",
                                    "content": "a\x01b\n"}))
         for label, bad in cases:
-            result = _doc_wire([bad, {"path": "out/ok.md",
+            result = _doc_wire([bad, {"path": "ok.md",
                                       "encoding": "utf8",
                                       "content": "# ok\n"}])
             uris = [(c.get("resource") or {}).get("uri")
@@ -3948,6 +3950,64 @@ def _run_documents(suite, fx):
                 problems.append("%s: text part %r" % (label, text[:200]))
         return problems, []
     _guard(suite, GRP_M, "M10 bad-md-not-emitted-and-said-so", md_refused)
+
+    def out_relative_paths():
+        """M11: the REAL runner's outFiles[].path is relative to out/ with
+        NO `out/` prefix (found by a live probe 2026-11-10). (a) a bare
+        a_probe.md is exactly one text/markdown resource, no `not emitted`
+        note; (b) a nested path keeps its segments in the uri; (c) a path
+        that is literally out/x.md (a real out/out/x.md) is labelled
+        [out/out/x.md] and its uri ends /out/x.md; (d) `..` and an empty
+        segment are still an unsafe path; (e) .pdf and .typ emit too."""
+        problems = []
+        md = "# probe\n"
+        result = _doc_wire([{"path": "a_probe.md", "encoding": "utf8",
+                             "content": md}], skill="pdf-read")
+        res = [c.get("resource") or {} for c in _resources(result)]
+        want = [{"uri": "skill-out://pdf-read/a_probe.md",
+                 "mimeType": "text/markdown", "text": md}]
+        text = _doc_text(result)
+        if res != want:
+            problems.append("(a) resources %r, want %r" % (res, want))
+        if "not emitted" in text or "[out/a_probe.md]" not in text:
+            problems.append("(a) text part %r" % (text[:200],))
+        result = _doc_wire([{"path": "sub/dir/x.md", "encoding": "utf8",
+                             "content": md}])
+        uris = [(c.get("resource") or {}).get("uri")
+                for c in _resources(result)]
+        if uris != ["skill-out://doc/sub/dir/x.md"]:
+            problems.append("(b) uris %r" % (uris,))
+        result = _doc_wire([{"path": "out/x.md", "encoding": "utf8",
+                             "content": md}])
+        uris = [(c.get("resource") or {}).get("uri")
+                for c in _resources(result)]
+        text = _doc_text(result)
+        if uris != ["skill-out://doc/out/x.md"]:
+            problems.append("(c) uris %r" % (uris,))
+        if "[out/out/x.md]" not in text or "not emitted" in text:
+            problems.append("(c) text part %r" % (text[:200],))
+        for bad in ("../x.md", "a//x.md", "a/../x.md", "/x.md", "./x.md"):
+            result = _doc_wire([{"path": bad, "encoding": "utf8",
+                                 "content": md}])
+            text = _doc_text(result)
+            if _resources(result) or "unsafe path" not in text:
+                problems.append("(d) %r: resources %r, text %r"
+                                % (bad, _resources(result), text[:200]))
+        result = _doc_wire([
+            {"path": "report.typ", "encoding": "utf8", "content": TYP_TEXT},
+            {"path": "report.pdf", "encoding": "base64",
+             "content": _b64(PDF_BYTES)}])
+        uris = [(c.get("resource") or {}).get("uri")
+                for c in _resources(result)]
+        if uris != ["skill-out://doc/report.pdf",
+                    "skill-out://doc/report.typ"]:
+            problems.append("(e) uris %r" % (uris,))
+        if ("[documents emitted as resources: out/report.pdf, "
+                "out/report.typ]") not in _doc_text(result):
+            problems.append("(e) emitted note %r" % (_doc_text(result)[:300],))
+        return problems, []
+    _guard(suite, GRP_M, "M11 runner-paths-are-out-relative",
+           out_relative_paths)
 
 
 # ---------------------------------------------------------------------------

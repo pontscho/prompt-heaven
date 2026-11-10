@@ -2064,12 +2064,12 @@ def _doc_ext(path: str) -> str:
 
 
 def _doc_uri(skill: str, path: str) -> Optional[str]:
-    """skill-out://<skill>/<path under out/> with every segment
-    percent-encoded, or None when the path is not a plain relative path under
-    out/ (empty, `.` or `..` segment, a backslash or a control character)."""
-    if not path.startswith("out/"):
-        return None
-    segments = path[4:].split("/")
+    """skill-out://<skill>/<path> with every segment percent-encoded. `path`
+    is the runner's outFiles[].path, RELATIVE TO out/ with no `out/` prefix
+    (a file out/out/x.md arrives as "out/x.md"); None when it is not a plain
+    relative path (empty, `.` or `..` segment, a backslash or a control
+    character)."""
+    segments = path.split("/")
     for seg in segments:
         if (not seg or seg in (".", "..") or "\\" in seg
                 or any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in seg)):
@@ -2180,8 +2180,8 @@ def _sanitize_run_result(res: dict, meta: Optional[dict] = None) -> dict:
             if block is not None:
                 docs.append((raw_path, block))
             else:
-                notes.append(f"[{path} not emitted as a document: {reason}]")
-        name = path[4:] if path.startswith("out/") else path
+                notes.append(
+                    f"[out/{path} not emitted as a document: {reason}]")
         encoding = item.get("encoding")
         content = item.get("content")
         if encoding == "utf8" and isinstance(content, str):
@@ -2191,13 +2191,13 @@ def _sanitize_run_result(res: dict, meta: Optional[dict] = None) -> dict:
             kind = "base64" if encoding == "base64" else "unknown"
             body = (f"encoding: {kind}, {size} encoded chars "
                     "(content not shown)")
-        items.append((f"[out/{name}]", body, f"out/{name}"))
+        items.append((f"[out/{path}]", body, f"out/{path}"))
     omitted = len(out_files) - len(shown)
     tail = ([f"[{omitted} more out file(s) not shown]"] if omitted > 0
             else [])
     docs.sort(key=lambda pair: pair[0])
     if docs:
-        names = ", ".join(_web_clean(p, "").replace("\n", " ")
+        names = ", ".join("out/" + _web_clean(p, "").replace("\n", " ")
                           for p, _b in docs)
         tail.append(f"[documents emitted as resources: {names}]")
     tail.extend(notes)

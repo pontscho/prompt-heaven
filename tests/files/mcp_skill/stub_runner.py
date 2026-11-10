@@ -60,8 +60,10 @@ unavailable  isError refusal {"code": "sandbox_unavailable"}.
 sleep        the ``normal`` answer after --sleep-s seconds (``mcp_skill:I9``).
 timeout      a timed-out result: exitCode null, timedOut true, signal SIGKILL.
 big          exit 0, stdout of --big-bytes ``x`` characters, truncated flag set.
-docs         exit 0, stdout "made\\n", out/report.pdf (base64) and out/report.typ
-             (utf8): the produced-documents pair (``mcp_skill:M8``).
+docs         exit 0, stdout "made\\n", report.pdf (base64) and report.typ
+             (utf8) under out/: the produced-documents pair
+             (``mcp_skill:M8``). Like the real runner, every outFiles path
+             is RELATIVE TO out/ (no ``out/`` prefix).
 rpc_error    a JSON-RPC error {-32603} instead of a tool result (a protocol
              fault the client must survive).
 
@@ -271,8 +273,8 @@ def tf_run_result(**over):
         "stdoutTruncated": False,
         "stderrTruncated": False,
         "outFiles": [
-            {"path": "out/result.txt", "encoding": "utf8", "content": "result ok\n"},
-            {"path": "out/blob.bin", "encoding": "base64", "content": "AAECAwQF/w=="},
+            {"path": "result.txt", "encoding": "utf8", "content": "result ok\n"},
+            {"path": "blob.bin", "encoding": "base64", "content": "AAECAwQF/w=="},
         ],
         "outFilesTruncated": False,
     }
@@ -286,10 +288,10 @@ def tf_hostile_result():
         stdout=TF_HOSTILE,
         stderr="stderr:" + TF_HOSTILE,
         outFiles=[
-            {"path": "out/" + TF_RLO + "txt.exe" + TF_PDF + TF_ZWSP + "\x1b.txt",
+            {"path": TF_RLO + "txt.exe" + TF_PDF + TF_ZWSP + "\x1b.txt",
              "encoding": "utf8",
              "content": TF_HOSTILE},
-            {"path": "out/\U000e0041\x85bin", "encoding": "base64", "content": "AAECAwQF/w=="},
+            {"path": "\U000e0041\x85bin", "encoding": "base64", "content": "AAECAwQF/w=="},
         ],
     )
 
@@ -351,8 +353,8 @@ def tf_run_script(state, req_id, fp):
                                             outFiles=[]))
     elif mode == "docs":
         tf_structured(req_id, tf_run_result(stdout="made\n", outFiles=[
-            {"path": "out/report.typ", "encoding": "utf8", "content": TF_DOC_TYP},
-            {"path": "out/report.pdf", "encoding": "base64",
+            {"path": "report.typ", "encoding": "utf8", "content": TF_DOC_TYP},
+            {"path": "report.pdf", "encoding": "base64",
              "content": base64.b64encode(TF_DOC_PDF).decode("ascii")},
         ]))
     elif mode == "rpc_error":
