@@ -2048,7 +2048,8 @@ def _run_status(obj: dict) -> Optional[str]:
 # extension, never by UTF-8 validity; no new bytes beyond the runner's own
 # out-file limits (the blob is the file's bytes re-encoded, nothing more).
 _DOC_TYPES = {".pdf": ("application/pdf", "blob"),
-              ".typ": ("text/x-typst", "text")}
+              ".typ": ("text/x-typst", "text"),
+              ".md": ("text/markdown", "text")}
 _DOC_URI_SCHEME = "skill-out://"
 
 
@@ -2124,7 +2125,7 @@ def _sanitize_run_result(res: dict, meta: Optional[dict] = None) -> dict:
     left. A runner refusal passes its code (grammar-checked) under a fixed
     text; its message, when there is one, sanitized on the lines after it
     (O2). Base64 out files are listed as metadata only, never shown in the
-    text; an out file with an allowlisted extension (.pdf, .typ) is also
+    text; an out file with an allowlisted extension (.pdf, .typ, .md) is also
     returned under `__resources__` as an EmbeddedResource block that
     McpServer._handle_tool_call appends after the text block.
     `meta` (skill, tier, file) is accepted for the callers; no line names it.

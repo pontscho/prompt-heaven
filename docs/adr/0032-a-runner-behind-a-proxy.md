@@ -690,6 +690,8 @@ A model that made a PDF with Typst could say it had, and could not hand the file
 
 Rows `mcp_skill:M1`-`M8` (new group M, run red first: 5 of 8 failed against the old server; the suite went from 95 to 103 cases) pin the pair as blocks, the text part, other extensions unchanged, a bad `.typ` not emitted and said so, encoding by extension, the uri and its order, a refusal without blocks and the whole path through a real `mcp-proxy --http` and the stub runner's `docs` mode.
 
+Addendum (2026-11-10): `.md` joins `.pdf` and `.typ` in `_DOC_TYPES` as a text resource (`text/markdown`) under exactly the `.typ` rules (case-insensitive extension, strict UTF-8, no control character besides LF, CR and TAB), added at ai-soul's request for PDF-to-Markdown reading output; rows `mcp_skill:M9`-`M10` (run red first: 2 of 2 failed) took the suite from 115 to 117 cases.
+
 ## Addendum (2026-11-09): run takes optional `inputs`, files staged beside the script
 
 Decided by Zoltán on 2026-11-09, agreed with the ai-soul side as a frozen interface. It adds one optional parameter to `run` and changes nothing else: the runner, the proxy, the bundle, the sanitizer, the answer and the document blocks are as before.

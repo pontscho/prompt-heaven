@@ -929,7 +929,8 @@ SUITES = [
     # count that moves is the alarm, not noise.  The produced-documents group M
     # (M1-M8, ADR 0032 amendment) took the count 95 -> 103, run RED first.
     # The inputs group N (N1-N12, ADR 0032 inputs addendum) took it 103 -> 115,
-    # run RED first (12 of 12 failed).  K (validation round 1) is
+    # run RED first (12 of 12 failed).  M9-M10 (.md as a text resource) took
+    # it 115 -> 117, run RED first.  K (validation round 1) is
     # layer D in-process (K1) and through McpServer.run() (K2) -- the smoke
     # probe answers -32602 now and no longer reaches the catch-all.  The
     # security round 1 -> 2 added B9, B10 (K3), I12 (M2), J11 (K4), J12 (M2)
@@ -972,7 +973,7 @@ SUITES = [
      "refused by index, flat safe unique names, strict base64, count and "
      "byte bounds shared with the bundle, never logged, the runner body cap "
      "still applying)",
-     115),
+     117),
     # TYPED: a fixed case table (A 13, B 8, C 9, D 9, E 5, F 10, G 2, H 16,
     # I 11, J 2, K 18, L 10, M 9, N 15, O 19, P 18, Q 15, R 7, S 26, T 9 = 231): the skeleton
     # groups of plan step 3, the step 4 groups F, H, I, J, the step 5-6 groups

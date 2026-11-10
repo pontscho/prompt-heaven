@@ -179,7 +179,8 @@ and run RED first against the server that refused every schema key.
 
 Group M pins the produced documents (ADR 0032 amendment, base64 is no longer
 never shown): an out file whose EXTENSION is .pdf (blob resource,
-application/pdf) or .typ (text resource, text/x-typst) is added as a
+application/pdf), .typ (text resource, text/x-typst) or .md (text resource,
+text/markdown) is added as a
 {type: resource} content block after the text block, uri
 skill-out://<skill>/<path under out/>, sorted by path; a .typ that is not
 UTF-8 or holds a control char besides LF/CR/TAB is not emitted and the text
@@ -187,7 +188,9 @@ part says so; the text part never carries the base64. Written RED first.
   M  documents -- M1 the pair as resource blocks, M2 the text part, M3 other
      extensions unchanged, M4 a bad .typ not emitted, M5 encoded by
      extension, M6 uri percent-safety/no traversal/order, M7 a refusal has no
-     resources, M8 end to end through the proxy and the stub's `docs` mode.
+     resources, M8 end to end through the proxy and the stub's `docs` mode,
+     M9 a .md (any case) is a text/markdown text resource, M10 a bad .md not
+     emitted and said so.
 
 Group N pins the optional run parameter `inputs` (ADR 0032, 2026-11-09
 inputs addendum): up to 8 {name, content, encoding} items staged into the
@@ -3895,6 +3898,54 @@ def _run_documents(suite, fx):
             problems.append("the base64 is in the text part")
         return problems, ["uris        : %r" % (uris,)]
     _guard(suite, GRP_M, "M8 stub-runner-docs-end-to-end", live_stub)
+
+    def md_resource():
+        """M9: a .md (and .MD, case-insensitive) out file is a text resource
+        text/markdown, sorted with the other documents, utf8 or base64."""
+        problems = []
+        md_text = "# Title " + chr(0xE9) + "\n\n- item\n\ttabbed\r\n"
+        result = _doc_wire([
+            {"path": "out/z.typ", "encoding": "utf8", "content": TYP_TEXT},
+            {"path": "out/b.MD", "encoding": "base64",
+             "content": _b64(md_text.encode("utf-8"))},
+            {"path": "out/a.md", "encoding": "utf8", "content": md_text}])
+        res = [c.get("resource") or {} for c in _resources(result)]
+        want = [{"uri": "skill-out://doc/a.md", "mimeType": "text/markdown",
+                 "text": md_text},
+                {"uri": "skill-out://doc/b.MD", "mimeType": "text/markdown",
+                 "text": md_text},
+                {"uri": "skill-out://doc/z.typ", "mimeType": "text/x-typst",
+                 "text": TYP_TEXT}]
+        if res != want:
+            problems.append("resources %r, want %r" % (res, want))
+        return problems, []
+    _guard(suite, GRP_M, "M9 md-is-a-text-resource-case-insensitive",
+           md_resource)
+
+    def md_refused():
+        """M10: a .md that is not UTF-8 or holds a control char besides LF CR
+        TAB is not emitted, keeps today's section and the text part says so."""
+        problems = []
+        cases = (("invalid utf-8", {"path": "out/bad.md",
+                                    "encoding": "base64",
+                                    "content": _b64(b"# \xff\xfe oops")}),
+                 ("control char", {"path": "out/bad.md", "encoding": "utf8",
+                                   "content": "a\x01b\n"}))
+        for label, bad in cases:
+            result = _doc_wire([bad, {"path": "out/ok.md",
+                                      "encoding": "utf8",
+                                      "content": "# ok\n"}])
+            uris = [(c.get("resource") or {}).get("uri")
+                    for c in _resources(result)]
+            if uris != ["skill-out://doc/ok.md"]:
+                problems.append("%s: resources %r, want only ok.md"
+                                % (label, uris))
+            text = _doc_text(result)
+            if ("[out/bad.md not emitted as a document" not in text
+                    or "[out/bad.md]" not in text):
+                problems.append("%s: text part %r" % (label, text[:200]))
+        return problems, []
+    _guard(suite, GRP_M, "M10 bad-md-not-emitted-and-said-so", md_refused)
 
 
 # ---------------------------------------------------------------------------
