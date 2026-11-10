@@ -1518,3 +1518,13 @@ When the translator closes the stream with its own fail(), the relay now sets th
 - The cut-call rule was proven against synthetic streams in both event orders. Whether the real codex upstream sends output_item.done for a call the cap cut, and with which status, is not measured.
 - A call cut so that its arguments are exactly empty still parses as {} and goes out as a tool_use with empty input.
 - A Mistral refusal at EOF without [DONE] keeps stream_ended_early, so it is not named.
+
+## Addendum (2026-11-10): Three opt-in Responses route options and two structure-only debug lines
+
+The codex and openai kinds gained three route options, each opt-in per route and off by default, so an unset route sends exactly the body it sent before (`Scripts/llm-router.py:ResponsesAdapter`, the kinds' ROUTE_OPTIONS; refused on every other kind).
+
+- max_output_tokens (9d5e350): an integer 1-1048576, sent as is on every Responses profile, winning over the client's max_tokens and max_tokens_cap. It exists because the codex backend was seen cutting a long tool call at about 4.5K output tokens when none is sent; whether a larger explicit value changes that is not measured.
+- parallel_tool_calls (424035e): omit, true or false; an explicit value wins over the client's tool_choice.disable_parallel_tool_use, omit sends no key (`Scripts/llm-router.py:_rt_rs_translate`).
+- capture_dir (a40e192): an absolute path; the exact bytes of the latest upstream request are kept per route as <route>.last.json, 0600, through a temp file and an atomic rename, only in an existing directory with no group or other bit. A bad directory or a failed write is one fixed-text WARNING and never fails the request; neither the path nor the body is logged (ADR 0011) (`Scripts/llm-router.py:_rt_rs_capture`).
+
+Two DEBUG lines were added with no behaviour change (3301437, 676fee5, 5089d0f, 1f7a530): `responses request` with the shape of the outgoing body (`Scripts/llm-router.py:_rt_rs_log_shape`) and `responses terminal` on each terminal event with the status, the incomplete reason, the usage counts and the stream's event, delta and done function_call counts (`Scripts/llm-router.py:ResponsesStreamTranslator._log_terminal`). Integers and closed vocabularies only, so ADR 0011's structure-only rule holds. Separately (47dd15e), server_is_overloaded and server_error map to 529 overloaded_error (`Scripts/llm-router.py:_rt_rs_error_codes`). Tests M27-M33; 495 typed cases in the llm_router suite.

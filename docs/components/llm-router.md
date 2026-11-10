@@ -3,7 +3,7 @@ name: llm-router
 type: component
 status: active
 title: llm-router — an Anthropic Messages router for Claude Code
-description: The stdlib-only HTTP server between Claude Code and several kinds of LLM backend -- an Anthropic Messages front that routes each request by its exact model string to a passthrough, llama.cpp, Mistral, codex, openai, sdcpp (a local stable-diffusion.cpp sd-server, image routes only) or rawllm (an inferNO-style server, typically behind a gpu-router, relayed raw on the OpenAI chat, embeddings and rerank endpoints and on /v1/messages) adapter, codex and openai speaking the OpenAI Responses API through one profile table; its command line and login subcommand, its 0600 JSON config and the OAuth write-back into it, the per-kind header allow-list and llama.cpp quirk rows, reasoning across kinds, images per kind and the route's vision key, the OpenAI-shaped image generation and edit endpoints behind the route's modality key, the raw LLM relay with its body caps and in-flight cap, a tool call cut off by the output cap dropped with the answer ending max_tokens, the inbound and outbound security rules and the upstream-failure line that names a translator's own refusal, how it is tested and what it declares rather than gates.
+description: The stdlib-only HTTP server between Claude Code and several kinds of LLM backend -- an Anthropic Messages front that routes each request by its exact model string to a passthrough, llama.cpp, Mistral, codex, openai, sdcpp (a local stable-diffusion.cpp sd-server, image routes only) or rawllm (an inferNO-style server, typically behind a gpu-router, relayed raw on the OpenAI chat, embeddings and rerank endpoints and on /v1/messages) adapter, codex and openai speaking the OpenAI Responses API through one profile table; its command line and login subcommand, its 0600 JSON config and the OAuth write-back into it, the per-kind header allow-list and llama.cpp quirk rows, reasoning across kinds, images per kind and the route's vision key, the OpenAI-shaped image generation and edit endpoints behind the route's modality key, the raw LLM relay with its body caps and in-flight cap, a tool call cut off by the output cap dropped with the answer ending max_tokens, the opt-in Responses route options max_output_tokens, parallel_tool_calls and capture_dir, the structure-only request-shape and terminal-event debug lines, the inbound and outbound security rules and the upstream-failure line that names a translator's own refusal, how it is tested and what it declares rather than gates.
 sources:
   - Scripts/llm-router.py
   - Scripts/_mcp_oauth.py
@@ -11,8 +11,8 @@ sources:
   - tests/test_llm_router.py
   - tests/files/llm_router/README.md
 verified:
-  commit: f43a052
-  date: 2026-10-30
+  commit: b398368
+  date: 2026-11-10
 links:
   - 0028-route-by-model-translate-at-the-edge
   - mcp-proxy
@@ -574,6 +574,7 @@ limits, `vision`, `modality` and, on an image route, `sizes` and
 | codex, `openai` | `verbosity` | `low`, `medium` or `high`; sent as `text.verbosity` |
 | codex, `openai` | `max_output_tokens` | integer 1-1048576; sent as `max_output_tokens` as is, on every profile, and wins over the client's `max_tokens` (and `max_tokens_cap`); unset, the body is unchanged (the codex and OAuth profiles send none); never learned or retried on a 400 |
 | codex, `openai` | `parallel_tool_calls` | `omit`, `true` or `false`; an explicit value wins over the client's `tool_choice.disable_parallel_tool_use`, `omit` sends no `parallel_tool_calls` key; unset, the key is `true` unless that flag is `true`; the `responses request` debug line shows the effective state as `parallel=1`, `0` or `omit` |
+| codex, `openai` | `capture_dir` | an absolute path with no control character, checked at load `Scripts/llm-router.py:_rt_opt_abs_dir`; existence, symlink and mode are checked per request. Each upstream request's exact serialized body is written to `<capture_dir>/<route>.last.json` (the route name with every character outside `A-Za-z0-9._-` made `_`, cut to 64), mode 0600, through an `O_EXCL`/`O_NOFOLLOW` temp file renamed over the final name, so only the latest body per route is kept and a partial file is never visible `Scripts/llm-router.py:_rt_rs_capture`. A directory that is missing, a symlink or open to group or world skips the capture with one fixed-text WARNING, and a write failure is a fixed-text WARNING too: a capture never fails the request, and neither the path, the OS error nor the body is logged. Unset, nothing is written |
 | `openai` with an `api_key` | `temperature`, `top_p`, `max_tokens_cap` | as for mistral; refused at load on the two OAuth profiles, which take no sampling |
 | `sdcpp` | `max_n` | integer 1-8, default 4; the most images one request may ask for (`n`) `Scripts/llm-router.py:SdcppAdapter` |
 | `sdcpp` | `max_pixels` | integer 65536-16777216 (4096 x 4096), default 4194304 (2048 x 2048); the most `width x height` a `size` may ask for. An edit must carry an explicit `WxH` `size` (absent or `auto` is a 400 `size: an explicit WxH is required on this route`): sd-server sizes an edit from the uploaded image when `size` is absent or `auto`, which would sidestep this limit, while a generation without `size` gets the server's own operator-set default. A `allow_prompt_args` option is reserved and refused as unknown |
@@ -803,6 +804,13 @@ with "malformed tool arguments", and the log line said only
 Responses streams get their own bounds: a line up to
 `Scripts/llm-router.py:_RT_RS_SSE_LINE_LIMIT` (8 MiB), an event up to
 `Scripts/llm-router.py:_RT_RS_SSE_EVENT_LIMIT` (16 MiB).
+An upstream error code the router types itself maps to a fixed status and
+Anthropic error type: the usage-limit, rate-limit and subscription-sharing
+limit codes to 429 `rate_limit_error`,
+`subscription_sharing_route_not_supported` to 403 `permission_error`, and
+OpenAI's `server_is_overloaded` and `server_error` to 529 `overloaded_error`,
+so a client retries instead of reading a fault of its own
+`Scripts/llm-router.py:_rt_rs_error_codes`.
 
 *Reasoning.* `reasoning.effort` is the shared effort (*The effort, shared by
 mistral, codex and openai* above), except that `max`, which the Responses API
@@ -1524,6 +1532,35 @@ reaches a log line, an exception message or a client envelope except an
 allow-listed OAuth error code `Scripts/_mcp_oauth.py:OAUTH_ERROR_CODES`, and no
 token, code, verifier or URL query is ever logged.
 
+**Two DEBUG lines explain a cut Responses answer** (codex and openai), both
+integers and closed-vocabulary tokens only, never a text. Before each upstream
+request, `responses request` gives the *shape* of the body being sent: the
+`instructions` length, the tool count and their serialized bytes, the input
+item count and the count per item type (`message`, `function_call`,
+`function_call_output`, `reasoning`, else `other`), the replayed reasoning
+items and their encrypted bytes, the largest item, the body bytes, the effort
+(`none`, a closed level or `other`), `parallel=` `1`, `0` or `omit`, and the
+effective `max_output_tokens` (an integer or `none`)
+`Scripts/llm-router.py:_rt_rs_log_shape`. On each terminal event
+(`response.completed`, `response.incomplete`, `response.failed`),
+`responses terminal` gives the response id only when it is a plain token, the
+status and the incomplete reason from closed vocabularies (else `other`), the
+usage integers present (input, output, cached and reasoning tokens), then the
+counts gathered while the stream was consumed: `items_added` per type
+(`reasoning`, `message`, `function_call`, `other`), the `function_call`
+argument delta count and bytes, the text deltas, the reasoning summary events,
+the item still open at the end, the total event count, the done items, the done
+`function_call` items and their status counts (`completed`, `incomplete`,
+`other`, `absent`), whether the last call's arguments parse as a JSON object
+and whether they equal the concatenated deltas, and, on the streaming path,
+where the relay hands the sans-IO translator a clock, `ttf_item_ms`, the ms
+from the request's start to the first output item
+`Scripts/llm-router.py:ResponsesStreamTranslator._log_terminal`.
+Neither line changes behaviour; they tell a call the upstream marked
+incomplete apart from one whose arguments were cut, without any text in the
+log. A `capture_dir` route adds one `responses body captured bytes=` DEBUG line
+per written body (options table above).
+
 ## How it is tested
 
 The `llm_router` suite `tests/test_llm_router.py` drives the router live as a
@@ -1555,7 +1592,12 @@ directory-relative rename `tests/test_llm_router.py:group_l`, the Responses
 stream and the non-stream collector, a cut `function_call`, its
 `output_item.done` marked `incomplete`, marked `completed` or absent, dropped
 under `max_output_tokens` and refused under `response.completed`, a
-`content_filter` end or EOF (M26)
+`content_filter` end or EOF (M26), the two DEBUG lines — the terminal
+event's line with hostile id, status and reason text kept out (M27), the
+request shape line (M28), the terminal line's stream counts (M30) and its done
+`function_call` facts (M31) — and the Responses route options `capture_dir`
+(M29), `max_output_tokens` (M32) and `parallel_tool_calls` (M33), each
+refused on every other kind
 `tests/test_llm_router.py:group_m`, the
 token store — single-flight refresh, the forced refresh on 401, the shared
 failure, the bounded wait, a login landing mid-refresh, and the learned Mistral
@@ -1571,7 +1613,8 @@ line, with a mistral translator's refusal of a non-JSON chunk named in
 `tests/test_llm_router.py:group_u`. K-U run before I and
 J, because I sweeps every log the run collected and J compares start-of-run
 snapshots `tests/test_llm_router.py:GROUP_ORDER`. Its case count is declared
-once, per group, in `tests/run.py:SUITES`, and checked against the run; the
+once, per group, in `tests/run.py:SUITES` (495 typed cases when this page was
+last verified, group M 33 of them), and checked against the run; the
 per-group detail is the suite's row in [[tests]], and the red-first record per
 group is ADR 0028's, its addendum included. The config twins of the flags are
 A51 (all eleven keys applied, absent keys giving the defaults), A52 (a flag
@@ -2002,3 +2045,12 @@ read before relying on one of them. In brief:
 - **The SIWC login is unverified live.** The namespace tool shape and the
   `openai` OAuth flow rest on the provider's documentation and on fakes; the
   live checkpoint for it has not run.
+- **`capture_dir` puts the conversation on disk.** The captured body is the
+  whole translated request, system text, tool results and replayed reasoning
+  included; only the directory's mode (no group or other bit), the 0600 file
+  and the symlink refusal protect it, and the latest body per route stays until
+  the next request overwrites it `Scripts/llm-router.py:_rt_rs_capture`.
+- **Whether `max_output_tokens` lifts codex's tool-call cut is unmeasured.**
+  The codex backend was seen cutting a long tool call at about 4.5K output
+  tokens when none is sent; the option exists to test whether a larger
+  explicit value changes that (commit `9d5e350`), and no result is recorded.

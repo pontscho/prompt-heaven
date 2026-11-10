@@ -9,8 +9,8 @@ sources:
   - tests/test_mcp_skill.py
   - tests/files/mcp_skill/stub_runner.py
 verified:
-  commit: 0668eb3
-  date: 2026-10-12
+  commit: b398368
+  date: 2026-11-10
 links:
   - mcp-proxy
   - mcp-sandbox
@@ -275,7 +275,8 @@ the runner has an input-files mechanism already, so nothing in
 `utf8` (the default when absent, as at the runner) or `base64`, decoded strictly
 (`validate=True`: no whitespace, no foreign alphabet). The name is a flat file
 name — 1 to 128 characters, no `/` or `\`, no `..`, no leading `.` or `-`, no
-control, format, surrogate, private-use or line-separator character — unique
+control, format, surrogate, private-use, line- or paragraph-separator character
+(`Scripts/mcp-skill.py:_INPUT_BAD_CATEGORIES`) — unique
 after NFD and case folding, and not `out`, `tmp`, `scripts` or `refs`, the names
 the runner and the bundle own `Scripts/mcp-skill.py:_input_name_refusal`. A
 member outside `name`, `content`, `encoding` and `ref` is refused with the
@@ -494,7 +495,8 @@ starts as an empty tier, a root through a regular file still refuses start, a
 root created after start is seen) and `E4`-`E5` (a missing root, and a root
 without `skills.json`, are an empty tier with no error), red first too. Group
 L `tests/test_mcp_skill.py:_run_schema` pins the flat params schema: `L1`
-(`list` with all six schema keys filled answers the plain list), `L2` (`load`
+(`list` with the six schema keys that predate `inputs` filled answers the plain
+list `tests/test_mcp_skill.py:_SCHEMA_FILLED`), `L2` (`load`
 with `run`'s keys filled serves the plain load) and `L3` (a key outside the
 schema, `nmae`, is refused naming the key and pointing at `name`, while the
 schema key beside it is not), red first. `L4`-`L6` pin the empty-value rule
