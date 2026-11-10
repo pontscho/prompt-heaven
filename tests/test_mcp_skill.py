@@ -3953,7 +3953,8 @@ def _run_documents(suite, fx):
 # ---------------------------------------------------------------------------
 
 INPUTS_MAX_ITEMS = 8             # the server's own count bound
-INPUTS_MAX_BYTES = 4194304       # the runner's documented max_files_bytes default
+INPUTS_MAX_BYTES = 12582912      # 12 MiB decoded, bundle included; decoupled
+                                 # from the 4 MiB bundle cap (FR-22)
 BUNDLE_MAX_FILES = 64            # the runner's documented max_files default
 
 
@@ -4223,7 +4224,7 @@ def _run_inputs(suite, fx):
 
     def bounds():
         """N8: at most 8 items; total decoded bytes (shared with the
-        bundle) at most the runner's 4 MiB default; the file count shared
+        bundle) at most 12 MiB; the file count shared
         with the bundle at most 64. Size is checked on decoded bytes."""
         problems = []
         run = _InputsRun(fx, "n8")
@@ -4250,9 +4251,15 @@ def _run_inputs(suite, fx):
         res = run([_inp("u.txt", chr(0xE9) * (INPUTS_MAX_BYTES // 2 + 1))])
         _refused(res, "utf8 input over the bound in bytes", problems,
                  code="invalid_params", token="bytes")
-        # Shared with the bundle: 3 MiB of refs + 1.5 MiB of inputs.
+        # The inputs cap is 12 MiB, apart from the 4 MiB bundle cap: ~5 MiB
+        # of inputs (base64 ~6.7 MiB, under the default 8 MiB body) pass.
+        five = 5 * 1024 * 1024
+        if not run.accepted(run([_inp_b64("five.bin", b"\0" * five)])):
+            problems.append("a 5 MiB input refused")
+        # Shared with the bundle: 3 MiB of refs + 9.5 MiB of inputs > 12 MiB.
         run2 = _InputsRun(fx, "n8b", refs={"big.bin": b"\0" * (3 * 1024 * 1024)})
-        res = run2([_inp_b64("c.bin", b"\0" * (3 * 512 * 1024))])
+        res = run2([_inp_b64("c.bin", b"\0" * (5 * 1024 * 1024)),
+                    _inp_b64("d.bin", b"\0" * (4608 * 1024))])
         _refused(res, "bundle plus inputs over the byte bound", problems,
                  code="invalid_params", token="bytes")
         if not run2.accepted(run2([_inp_b64("c.bin", b"\0" * 1024)])):

@@ -286,8 +286,10 @@ refused `invalid_params` naming `inputs[i]`, before the bundle is read and
 before any connection; a `ref` beside `content` is tolerated and never
 forwarded. The bounds are server constants because the runner does not tell the
 server its limits: the decoded bytes of the inputs, **plus the bundle**, at
-most `Scripts/mcp-skill.py:_INPUTS_MAX_BYTES` (4 MiB, the runner's documented
-`max_files_bytes` default), and bundle plus inputs at most
+most `Scripts/mcp-skill.py:_INPUTS_MAX_BYTES` (12 MiB, its own literal and not the 4 MiB
+bundle cap `_SCRIPT_MAX_BYTES`; the runner is deployed with `max_files_bytes`
+12582912, and a 10 MiB input is ~13.4 MiB base64, so `--runner-max-body` must
+be raised above its 8 MiB default to carry it), and bundle plus inputs at most
 `Scripts/mcp-skill.py:_BUNDLE_MAX_FILES` (64, the `max_files` default) files;
 size is counted on decoded bytes, and an over-long string is refused before it
 is decoded. A runner configured with lower limits answers its own refusal. An
@@ -567,8 +569,8 @@ a smoke row with near-miss and documented-call probes
   working directory of an approved script, and the script decides what to do
   with them. The same-uid trust and the runner's own confinement are the
   boundary. A `ref` is resolved upstream by the broker, never here; the server
-  only refuses one left unresolved. The 8, 4 MiB and 64 are the runner's
-  documented defaults, not values read from the runner (ADR 0032, inputs
+  only refuses one left unresolved. The 8, 12 MiB and 64 are the runner's
+  documented figures, not values read from the runner (ADR 0032, inputs
   addendum).
 - **The ai-soul-side bounds above are trusted, not re-checked**, and the
   Unicode-version skew between the two classifiers is a known residual.

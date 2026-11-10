@@ -1828,11 +1828,13 @@ def _collect_bundle(skill_fd: int) -> List[dict]:
 # run's `inputs`: files the caller stages beside the script. They travel as
 # plain top-level entries of the runner's `files` member (path == name), so the
 # runner's own validation and limits apply to them as to the bundle. The
-# runner's max_files / max_files_bytes defaults (64 files, 4 MiB decoded) are
-# the budget SHARED with the bundle; the server is not told the configured
-# values, so it checks the documented defaults (both equal the bundle caps).
+# runner's max_files / max_files_bytes (64 files, 12 MiB decoded as deployed)
+# are the budget SHARED with the bundle; the server is not told the configured
+# values, so it checks these documented figures (the file count equals the
+# bundle cap; the byte budget is the inputs' own 12 MiB, not the bundle's).
 _INPUTS_MAX_ITEMS = 8
-_INPUTS_MAX_BYTES = _SCRIPT_MAX_BYTES        # 4 MiB decoded, bundle included
+_INPUTS_MAX_BYTES = 12582912    # 12 MiB decoded, bundle included; its own
+                                # literal, NOT the 4 MiB _SCRIPT_MAX_BYTES
 _INPUT_NAME_MAX_CHARS = 128
 _INPUT_MEMBERS = frozenset({"name", "content", "encoding", "ref"})
 _INPUT_ENCODINGS = ("utf8", "base64")
