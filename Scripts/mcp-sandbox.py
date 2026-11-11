@@ -715,6 +715,12 @@ _RESPONSE_BOUND = 16 * _MIB
 # Chars one capped byte can cost the reply: 6 in structuredContent + 7 in
 # the text copy (validation round 1; see _cfg_limits).
 _REPLY_BYTE_WORST = 13
+# Chars one SOURCE byte of an out/ file can cost the reply. collect_out ships
+# each file in the cheaper of utf8 and base64 (_encode_out_file), so a file
+# costs min(utf8, base64) <= base64 = 2 copies x 4 * ceil(n / 3) chars
+# (base64 needs no JSON escaping) <= 8n/3 + 8. 3 per byte is that 2.67
+# rounded up; the + 8 padding is inside the 256 per-file allowance.
+_OUT_BYTE_WORST = 3
 
 # KD-17: every fixed term of the run bound; max_timeout_ms is the one variable.
 _RUN_FIXED_TERMS_S = (_DEGRADED_RETRY_S + _REFRESH_DEADLINE_S + _HARD_DEADLINE_SLACK_S
@@ -890,15 +896,20 @@ def _cfg_limits(value: Any) -> Limits:
         raise ConfigError("limits.max_timeout_ms: the run bound would exceed the run deadline")
     # A9: the worst-case reply -- every capped stream and every out/ file at
     # its cap, base64 and JSON escaping included -- must fit in 16 MiB.
-    # Validation round 1: a capped byte travels TWICE, at most 6 chars in
-    # structuredContent ("\u0001"; an undecodable byte becomes U+FFFD)
-    # and at most 7 in the text copy, which is that JSON dumped again inside
-    # a JSON string ("\\u0001") -- 13 per byte, not 2 x 6. An out/ file's
-    # path is at most _OUT_PATH_MAX_BYTES (collect_out skips a longer one),
-    # carried at the same 13 x, plus its keys in both copies; the envelope
-    # (the other members, the JSON-RPC frame) is 8 KiB per copy.
-    worst = (_REPLY_BYTE_WORST * (ints["stdout_bytes"] + ints["stderr_bytes"]
-                                  + ints["max_out_bytes"])
+    # Validation round 1: a captured stream byte travels TWICE, at most 6
+    # chars in structuredContent ("\u0001"; an undecodable byte becomes
+    # U+FFFD) and at most 7 in the text copy, which is that JSON dumped again
+    # inside a JSON string ("\\u0001") -- 13 per byte, not 2 x 6. An out/
+    # file's own bytes are NOT priced at 13: _encode_out_file picks utf8 or
+    # base64 per file by the real cost of both copies, so a file costs
+    # min(utf8, base64) <= base64 <= _OUT_BYTE_WORST (3) chars per source
+    # byte whatever it holds (a control-char or quote-heavy file goes
+    # base64). max_out_bytes counts source bytes. An out/ file's path is at
+    # most _OUT_PATH_MAX_BYTES (collect_out skips a longer one), carried at
+    # 13 x, plus its keys in both copies; the envelope (the other members,
+    # the JSON-RPC frame) is 8 KiB per copy.
+    worst = (_REPLY_BYTE_WORST * (ints["stdout_bytes"] + ints["stderr_bytes"])
+             + _OUT_BYTE_WORST * ints["max_out_bytes"]
              + ints["max_out_files"] * (_REPLY_BYTE_WORST * _OUT_PATH_MAX_BYTES + 256)
              + 2 * 8192)
     if worst > _RESPONSE_BOUND:
@@ -3033,6 +3044,28 @@ def _out_names(dir_fd: int, budget: int) -> Tuple[List[str], bool]:
     return names, cut
 
 
+def _encode_out_file(data: bytes) -> Tuple[str, str]:
+    """(content, encoding) of one out/ file: "utf8" only when the bytes are
+    valid UTF-8 AND that form is not dearer in the reply than base64, else
+    "base64". The cost counts both reply copies exactly as the tool result is
+    built: the JSON string in structuredContent (json.dumps, ensure_ascii
+    default) plus that JSON dumped again inside the text copy. The base64
+    form needs no escaping: 2 x 4 * ceil(n / 3). This is what keeps A9's
+    _OUT_BYTE_WORST true: the cost never exceeds the base64 form's."""
+    b64 = base64.b64encode(data).decode("ascii")
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return b64, "base64"
+    once = json.dumps(text)
+    # base64: len + 2 (quotes) in structuredContent, len + 6 in the text copy
+    # (the quotes are escaped inside it). An empty file ties and stays utf8,
+    # and so does a short plain one.
+    if len(once) + len(json.dumps(once)) <= 2 * len(b64) + 8:
+        return text, "utf8"
+    return b64, "base64"
+
+
 def collect_out(wd_fd: int, limits: Limits) -> Tuple[List[dict], bool]:
     """The regular, single-link files the script left under out/ (KD-9).
 
@@ -3121,10 +3154,7 @@ def collect_out(wd_fd: int, limits: Limits) -> Tuple[List[dict], bool]:
                 truncated = True
                 continue
             total += len(data)
-            try:
-                content, encoding = data.decode("utf-8"), "utf8"
-            except UnicodeDecodeError:
-                content, encoding = base64.b64encode(data).decode("ascii"), "base64"
+            content, encoding = _encode_out_file(data)
             files.append({"path": "/".join(parts), "content": content, "encoding": encoding})
     finally:
         _close_quietly(out_fd, *(frame[0] for frame in stack))

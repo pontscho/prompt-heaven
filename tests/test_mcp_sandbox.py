@@ -572,18 +572,23 @@ def _run_a(suite, fx):
         # Validation round 1: every capped byte is carried twice, at most 6
         # chars in structuredContent ("\u0001") and 7 in the text copy (the
         # same JSON dumped again: "\\u0001"); an out/ file's path is at most
-        # OUT_PATH_MAX bytes, at the same 13 x, plus its keys.
+        # OUT_PATH_MAX bytes, at the same 13 x, plus its keys. Since the
+        # per-file encoding choice (ADR 0032 addendum 2026-11-11) an out/
+        # file's own bytes cost at most 3 chars each (the cheaper of utf8
+        # and base64, both copies), not 13: only the streams stay at 13.
         def worst(s, e, o, f):
-            return 13 * (s + e + o) + f * (13 * OUT_PATH_MAX + 256) + 16384
+            return (13 * (s + e) + 3 * o + f * (13 * OUT_PATH_MAX + 256)
+                    + 16384)
 
-        # Every value inside its own range; the sum lands exactly on 16 MiB.
-        edge = dict(stdout_bytes=119296, stderr_bytes=119296,
-                    max_out_bytes=MIB, max_out_files=4)
-        if worst(119296, 119296, MIB, 4) != RESPONSE_BOUND:
+        # Every value inside its own range; the sum lands exactly on 16 MiB
+        # (re-derived for the 3 x out/ term: s + e = 319254, o = 4194294).
+        edge = dict(stdout_bytes=159627, stderr_bytes=159627,
+                    max_out_bytes=4194294, max_out_files=4)
+        if worst(159627, 159627, 4194294, 4) != RESPONSE_BOUND:
             problems.append("fixture: the edge config is not exactly 16 MiB")
         _accepts(mod, fx.render("a9-edge", mutate=_set_limits(**edge)),
                  "worst case exactly 16 MiB", problems)
-        over = dict(edge, stderr_bytes=119297)
+        over = dict(edge, stderr_bytes=159628)
         _refuses(mod, fx.render("a9-over", mutate=_set_limits(**over)),
                  "worst case 16 MiB + 13 bytes", problems)
         big = dict(stdout_bytes=4 * MIB, stderr_bytes=4 * MIB)
@@ -591,7 +596,7 @@ def _run_a(suite, fx):
                  "4 MiB stdout + 4 MiB stderr (each in range)", problems)
         return problems, ["edge        : %d bytes" % RESPONSE_BOUND,
                           "over        : %d bytes"
-                          % worst(119296, 119297, MIB, 4)]
+                          % worst(159627, 159628, 4194294, 4)]
     _guard(suite, GRP_A, "A9 worst-case-response-bound", response_bound)
 
     def reply_within_bound():
@@ -629,9 +634,13 @@ def _run_a(suite, fx):
             "exitCode": 0, "signal": None, "timedOut": False,
             "durationMs": 120000, "stdout": "\x01" * s, "stderr": "\x01" * s,
             "stdoutTruncated": True, "stderrTruncated": True,
+            # Control bytes are what collect_out now ships as base64 (the
+            # cheaper form); a utf8 "\x01" run would cost 13 per byte and is
+            # no longer reachable (A21, H27).
             "outFiles": [{"path": path,
-                          "content": "\x01" * (out_bytes // files),
-                          "encoding": "utf8"} for _ in range(files)],
+                          "content": base64.b64encode(
+                              b"\x01" * (out_bytes // files)).decode("ascii"),
+                          "encoding": "base64"} for _ in range(files)],
             "outFilesTruncated": True,
         }
         saved = []
@@ -985,6 +994,52 @@ def _run_a(suite, fx):
         return problems, []
     _guard(suite, GRP_A, "A20 network-internal-ipv4-port-literals",
            network_internal)
+
+    def response_bound_out_class():
+        """A21: an out/ file travels as the cheaper of utf8 and base64, so
+        its bytes cost at most OUT_BYTE_WORST (3) chars each in the reply,
+        not 13: the declared max_out_bytes range (4 MiB) is reachable at
+        stdout/stderr 64 KiB and 16 files, and the bound is still enforced
+        with the same ConfigError text."""
+        mod = _mod()
+        problems = []
+        deployed = dict(stdout_bytes=65536, stderr_bytes=65536,
+                        max_out_files=16, max_out_bytes=4 * MIB)
+        _accepts(mod, fx.render("a21-deployed", mutate=_set_limits(**deployed)),
+                 "64 KiB streams, 16 files, 4 MiB out/", problems)
+
+        def worst(s, e, o, f):
+            return (13 * (s + e) + 3 * o + f * (13 * OUT_PATH_MAX + 256)
+                    + 16384)
+        edge = dict(stdout_bytes=156435, stderr_bytes=156435,
+                    max_out_files=16, max_out_bytes=4 * MIB)
+        over = dict(edge, stdout_bytes=156436, stderr_bytes=156436)
+        if worst(156435, 156435, 4 * MIB, 16) > RESPONSE_BOUND \
+                or worst(156436, 156436, 4 * MIB, 16) <= RESPONSE_BOUND:
+            problems.append("fixture: the edge is not the last accepted pair")
+        _accepts(mod, fx.render("a21-edge", mutate=_set_limits(**edge)),
+                 "the largest accepted stdout/stderr pair", problems)
+        path = fx.render("a21-over", mutate=_set_limits(**over))
+        try:
+            mod.load_config(path)
+            problems.append("one pair over the formula: accepted")
+        except mod.ConfigError as exc:
+            want = ("limits: stdout_bytes, stderr_bytes, max_out_bytes and "
+                    "max_out_files allow a worst-case response above %d bytes"
+                    % RESPONSE_BOUND)
+            if want not in str(exc):
+                problems.append("refusal text %r, want it to contain %r"
+                                % (str(exc), want))
+        # The streams stay at 13 per byte: 4 MiB each is still refused.
+        _refuses(mod, fx.render("a21-streams", mutate=_set_limits(
+            stdout_bytes=4 * MIB, stderr_bytes=4 * MIB, max_out_bytes=0)),
+            "4 MiB stdout + 4 MiB stderr, no out/", problems)
+        top = (RESPONSE_BOUND - 13 * 2 * 65536 - 16 * (13 * OUT_PATH_MAX + 256)
+               - 16384) // 3
+        return problems, ["largest max_out_bytes at 64 KiB streams / 16 "
+                          "files: %d" % top]
+    _guard(suite, GRP_A, "A21 out-bytes-priced-at-three-per-byte",
+           response_bound_out_class)
 
 
 # ---------------------------------------------------------------------------
@@ -6536,6 +6591,115 @@ def _run_h(suite, fx):
     _guard(suite, GRP_H, "H26 planted-egress-entry-refused",
            egress_planted_refused)
 
+    def _collect(label, plant, problems):
+        """({path: (content, encoding)}, truncated, raw result) of
+        collect_out over an out/ that `plant(out_dir)` filled."""
+        mod = _h_mod()
+        cfg = _h_cfg(mod, fx, label)
+        root = _Root(mod, cfg.work_root)
+        try:
+            name, wd_fd = mod.create_workdir(root.root_fd)
+            try:
+                plant(os.path.join(root.path, name, "out"))
+                res = mod.collect_out(wd_fd, cfg.limits)
+                got, truncated = _out_map(res, "collect_out", problems)
+            finally:
+                os.close(wd_fd)
+            _remove_ok(mod, root, name, "workdir", problems)
+            problems.extend(root.residue())
+        finally:
+            root.close()
+            root.scrub()
+        return got, truncated, res
+
+    def _reply_chars(mod, item):
+        """The two copies' cost of one outFiles item, measured the way the
+        server builds the reply (structuredContent + the text copy, both in
+        one JSON-RPC frame): the frame's growth over the same file with an
+        empty content."""
+        def frame(entry):
+            result = {"exitCode": 0, "outFiles": [entry]}
+            return len(mod._strict_dumps({
+                "content": [{"type": "text",
+                             "text": mod._strict_dumps(result)}],
+                "structuredContent": result}))
+        return frame(item) - frame(dict(item, content=""))
+
+    def outfiles_encoding_by_cost():
+        """H27: each out/ file ships as the cheaper of utf8 and base64
+        (both reply copies); plain text stays utf8, control-char, quote and
+        backslash heavy and non-UTF-8 files go base64, and every file's
+        real reply cost stays within 3 chars per source byte + 256."""
+        mod = _h_mod()
+        problems = []
+        plain = ("# Title\n\nplain text, one accented " + chr(0xE9)
+                 + " letter.\n") * 400
+        files = {
+            "ctl.txt": b"\x01" * 200000,
+            "quotes.txt": b'"\\' * 60000,
+            "plain.md": plain.encode("utf-8"),
+            "z.bin": bytes(range(256)) * 40,
+            "mixed.txt": (b"\x01\x02ab" * 30000),
+        }
+
+        def plant(out):
+            for fname, data in files.items():
+                _write(os.path.join(out, fname), data)
+        got, truncated, res = _collect("h27", plant, problems)
+        want_enc = {"ctl.txt": "base64", "quotes.txt": "base64",
+                    "plain.md": "utf8", "z.bin": "base64",
+                    "mixed.txt": "base64"}
+        if truncated:
+            problems.append("collect_out truncated")
+        for fname, enc in want_enc.items():
+            if fname not in got:
+                problems.append("%s: not collected" % fname)
+                continue
+            content, encoding = got[fname]
+            if encoding != enc:
+                problems.append("%s: encoding %r, want %r"
+                                % (fname, encoding, enc))
+            raw = (content.encode("utf-8") if encoding == "utf8"
+                   else base64.b64decode(content))
+            if raw != files[fname]:
+                problems.append("%s: content does not round-trip" % fname)
+        lines = []
+        for item in res[0]:
+            n = len(files[item["path"]])
+            cost = _reply_chars(mod, item)
+            lines.append("%-10s: %d bytes, %s, %d reply chars"
+                         % (item["path"], n, item["encoding"], cost))
+            if cost > 3 * n + 256:
+                problems.append("%s: %d reply chars for %d source bytes, "
+                                "over 3 x + 256" % (item["path"], cost, n))
+        return problems, lines
+    _guard(suite, GRP_H, "H27 outfile-encoding-by-reply-cost",
+           outfiles_encoding_by_cost)
+
+    def outfiles_cap_counts_source_bytes():
+        """H28: max_out_bytes counts SOURCE bytes whichever encoding wins:
+        a base64 file of 600000 bytes plus a utf8 one of 400000 fit a 1 MiB
+        cap (1000000), a third file of 100000 does not and is skipped with
+        outFilesTruncated."""
+        problems = []
+
+        def plant(out):
+            _write(os.path.join(out, "a.bin"), b"\x01" * 600000)
+            _write(os.path.join(out, "b.txt"), b"text line\n" * 40000)
+            _write(os.path.join(out, "c.txt"), b"x" * 100000)
+        got, truncated, _res = _collect("h28", plant, problems)
+        if sorted(got) != ["a.bin", "b.txt"]:
+            problems.append("collected %r, want a.bin and b.txt"
+                            % (sorted(got),))
+        elif (got["a.bin"][1], got["b.txt"][1]) != ("base64", "utf8"):
+            problems.append("encodings %r" % ((got["a.bin"][1],
+                                               got["b.txt"][1]),))
+        if truncated is not True:
+            problems.append("truncated %r, want True" % (truncated,))
+        return problems, ["collected   : %s" % sorted(got)]
+    _guard(suite, GRP_H, "H28 outfile-cap-counts-source-bytes",
+           outfiles_cap_counts_source_bytes)
+
 
 # H23's session: the leader forks one member that leaves the leader's group
 # (setpgid) and the work tree (chdir /), prints its pid and exits; the member
@@ -7349,7 +7513,7 @@ def _run_i_rows(suite, fx, live):
                   'os.makedirs(os.path.join(out, "sub"))\n'
                   'with open(os.path.join(out, "a.txt"), "w", '
                   'encoding="utf-8") as fh:\n'
-                  '    fh.write("i8 alpha \\u00e9")\n'
+                  '    fh.write("i8 alpha, a plain line of text \\u00e9")\n'
                   'with open(os.path.join(out, "sub", "b.bin"), "wb") as fh:\n'
                   '    fh.write(b"\\xff\\x00\\xfe")\n'
                   'print("i8")\n')
@@ -7360,7 +7524,11 @@ def _run_i_rows(suite, fx, live):
               outFilesTruncated=False)
         got, _t = _out_map((body.get("outFiles"), False), "outFiles",
                            problems)
-        want = {"a.txt": ("i8 alpha " + chr(0xE9), "utf8"),
+        # The text is long enough that one accented letter does not make
+        # base64 the cheaper form (the per-file encoding choice, H27); a
+        # 10-byte "i8 alpha e-acute" now comes back base64.
+        want = {"a.txt": ("i8 alpha, a plain line of text " + chr(0xE9),
+                          "utf8"),
                 "sub/b.bin": (_b64(b"\xff\x00\xfe"), "base64")}
         if got != want:
             problems.append("outFiles %r, want %r" % (got, want))

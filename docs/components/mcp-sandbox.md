@@ -171,23 +171,34 @@ top level is `version` (1), `sbx`, `work_root`, `seccomp`, `log_content`,
 
 Two derived bounds are refused at load `Scripts/mcp-sandbox.py:_cfg_limits`.
 The worst-case reply must fit in `Scripts/mcp-sandbox.py:_RESPONSE_BOUND`
-(16 MiB). A capped byte travels twice, as at most 6 characters in
+(16 MiB). A captured stream byte travels twice, as at most 6 characters in
 `structuredContent` (`\u0001`) and at most 7 in the text copy, which is that
 JSON dumped again inside a JSON string, so it is priced at
-`Scripts/mcp-sandbox.py:_REPLY_BYTE_WORST` (13) characters; an `out/` file's
+`Scripts/mcp-sandbox.py:_REPLY_BYTE_WORST` (13) characters. An `out/` file's
+own bytes are priced at `Scripts/mcp-sandbox.py:_OUT_BYTE_WORST` (3), because
+`Scripts/mcp-sandbox.py:_encode_out_file` picks `utf8` or `base64` per file by
+the real cost of both reply copies, so a file costs at most its base64 form,
+2 x 4 x ceil(n / 3) characters, 2.67 per byte rounded up (the padding is inside
+the per-file 256). `max_out_bytes` counts source bytes. An `out/` file's
 path is priced at its cap `Scripts/mcp-sandbox.py:_OUT_PATH_MAX_BYTES` (512
-bytes, and `collect_out` skips a longer one) at the same rate, plus its keys;
+bytes, and `collect_out` skips a longer one) at the 13 rate, plus its keys;
 and the envelope is 8 KiB per copy:
 
 ```
-13 x (stdout_bytes + stderr_bytes + max_out_bytes)
+13 x (stdout_bytes + stderr_bytes)
+  + 3 x max_out_bytes
   + max_out_files x (13 x 512 + 256)
   + 2 x 8192          <=  16 MiB
 ```
 
-Until security review round 1 the formula priced a byte at 2 x 6 and left the
-path out; `mcp_sandbox:A11` now serializes the worst case through the real
-tool-result path and checks it stays inside the bound. The second derived
+With 64 KiB streams and 16 files the formula admits `max_out_bytes` up to
+4982101, so the declared 4 MiB range is reachable. Until the per-file encoding
+choice (ADR 0032 addendum, 2026-11-11) the out/ bytes were priced at 13 as
+well, which made the range unreachable at the deployed streams and refused a
+PDF with an image (2.68 MB). Until security review round 1 the formula priced
+a byte at 2 x 6 and left the path out; `mcp_sandbox:A11` serializes the worst
+case through the real tool-result path and checks it stays inside the bound,
+`A21` pins the 3 x edge and `H27`/`H28` the encoding choice. The second derived
 bound: `max_timeout_ms` plus the fixed run terms
 `Scripts/mcp-sandbox.py:_RUN_FIXED_TERMS_S` must fit under the run deadline
 (unreachable with the 120000 cap; it pins the arithmetic in code).
@@ -368,8 +379,11 @@ admitted by the plan cache. Every refusal is `invalid_params` naming the member.
    a path longer than `Scripts/mcp-sandbox.py:_OUT_PATH_MAX_BYTES` is skipped,
    each directory is listed only up to the entry bound while `scandir` yields
    (only that bounded list is sorted, Q1), every skip sets
-   `outFilesTruncated`, and a file is sent as `utf8` when it is strict UTF-8,
-   else `base64` `Scripts/mcp-sandbox.py:collect_out`.
+   `outFilesTruncated`, and a file is sent as `utf8` only when it is strict UTF-8
+   and that form is not dearer in the reply than `base64` (a file full of
+   control characters, quotes or backslashes, or dense non-ASCII text, goes
+   `base64`), else `base64`
+   `Scripts/mcp-sandbox.py:_encode_out_file`, `collect_out`.
 10. **Cleanup** in a `finally`: the egress proxy, if any, is closed once sbx is
    reaped, bounded by the earlier of one second and the run deadline minus the
    cleanup term, so no tunnel outlives the run; the run's survivors are swept, then the workdir
