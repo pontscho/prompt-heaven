@@ -140,7 +140,7 @@ own valid lines, the number ai-soul's per-tier approval budget is counted in
 A refusal is a tool result with `isError` and an `error.code` — `busy`,
 `sandbox_unavailable`, `invalid_params` or `internal` — never a JSON-RPC error
 `Scripts/mcp-skill.py:_tool_refusal` ([[0010-a-handler-failure-must-reach-iserror]]).
-A call with no `function` and nothing else (no non-empty `params`, no other key) gets an unflagged status reply; with `params` or another key but no top-level `function` it is `invalid_params` naming the cause (a `function` nested inside `params` is called out as such). The status reply: the function list,
+A call with no `function` and nothing else (no non-empty `params`, no other key) gets an unflagged status reply; with `params` or another key but no top-level `function` it is `invalid_params` naming the cause (a `function` nested inside `params` is called out as such). Once the function is known, any top-level key other than `function` and `params` is `invalid_params` too: one the function accepts is pointed at `params` ("name belongs inside params, found at top level" plus the corrected call shape), any other is "unknown top-level key" with the near-miss pointer — refused, never hoisted `Scripts/mcp-skill.py:_stray_top_level`. The status reply: the function list,
 per-tier counts, the description's size against the ceiling and whether a
 runner is configured — counts only, never a path, a token or skill text
 `Scripts/mcp-skill.py:_status_text`. An unknown function is refused with a
@@ -281,10 +281,14 @@ after NFD and case folding, and not `out`, `tmp`, `scripts` or `refs`, the names
 the runner and the bundle own `Scripts/mcp-skill.py:_input_name_refusal`. A
 member outside `name`, `content`, `encoding` and `ref` is refused with the
 did-you-mean pointer. An item holding a `ref` and no `content` is an unresolved
-ref — the broker upstream should have resolved it — and the whole call is
-refused `invalid_params` naming `inputs[i]`, before the bundle is read and
-before any connection; a `ref` beside `content` is tolerated and never
-forwarded. The bounds are server constants because the runner does not tell the
+ref — the household hub resolves it before the call — and the whole call is
+refused `invalid_params` naming `inputs[i]` and saying so ("ref items are
+resolved by the household hub before the call; this server received an
+unresolved ref"), before the bundle is read and before any connection; a `ref`
+beside `content` is tolerated and never forwarded. The advertised item schema
+lists an optional `ref` string (no `oneOf`, no `required`) and the `inputs`
+description states the two shapes, `{name, content[, encoding]}` and
+`{name, ref}`. The bounds are server constants because the runner does not tell the
 server its limits: the decoded bytes of the inputs, **plus the bundle**, at
 most `Scripts/mcp-skill.py:_INPUTS_MAX_BYTES` (12 MiB, its own literal and not the 4 MiB
 bundle cap `_SCRIPT_MAX_BYTES`; the runner is deployed with `max_files_bytes`

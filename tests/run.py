@@ -1000,7 +1000,7 @@ SUITES = [
      "refused by index, flat safe unique names, strict base64, count and "
      "byte bounds shared with the bundle, never logged, the runner body cap "
      "still applying)",
-     129),
+     135),
     # TYPED: a fixed case table (A 13, B 8, C 9, D 9, E 5, F 10, G 2, H 16,
     # I 11, J 2, K 18, L 10, M 9, N 15, O 19, P 18, Q 15, R 7, S 26, T 9 = 231): the skeleton
     # groups of plan step 3, the step 4 groups F, H, I, J, the step 5-6 groups

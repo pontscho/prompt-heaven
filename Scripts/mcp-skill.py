@@ -939,7 +939,9 @@ def _tool_definition(description: str, names) -> dict:
                                    "description": "run: files staged beside "
                                    "the script (at most 8; flat names, "
                                    "unique ignoring case; encoding utf8 or "
-                                   "base64, default utf8).",
+                                   "base64, default utf8). An item is either "
+                                   "{name, content[, encoding]} or "
+                                   "{name, ref}.",
                                    "items": {
                                        "type": "object",
                                        "properties": {
@@ -947,6 +949,16 @@ def _tool_definition(description: str, names) -> dict:
                                                     "description": "File "
                                                     "name, no path."},
                                            "content": {"type": "string"},
+                                           "ref": {"type": "string",
+                                                   "description": "upload:a_"
+                                                   "... | document:a_... | "
+                                                   "image:a_..., resolved by "
+                                                   "the household hub before "
+                                                   "this server is called; a "
+                                                   "ref item is exactly "
+                                                   "{name, ref} and carries "
+                                                   "no content or "
+                                                   "encoding."},
                                            "encoding": {"type": "string",
                                                         "enum": ["utf8",
                                                                  "base64"]},
@@ -1923,8 +1935,9 @@ def _validate_inputs(value: List[Any]) -> Union[str, List[Tuple[str, bytes]]]:
                     f"Accepted: {', '.join(sorted(_INPUT_MEMBERS))}."
                     + _did_you_mean(unknown, _INPUT_MEMBERS))
         if item.get("content") is None and "ref" in item:
-            return (f"{where}: unresolved ref (the item has a ref and no "
-                    "content); it was not sent")
+            return (f"{where}: ref items are resolved by the household hub "
+                    "before the call; this server received an unresolved ref "
+                    "(it was not sent)")
         if "name" not in item:
             return f"{where}: name is required"
         if item.get("content") is None:
@@ -2481,6 +2494,31 @@ def _missing_function_refusal(arguments, params, names, envelope_keys=("function
 # END GENERATED: d58ed36930a9
 
 
+def _stray_top_level(function: str, arguments: dict,
+                     accepted: frozenset) -> Optional[str]:
+    """The refusal text for any top-level argument key other than function and
+    params, or None. A key the function accepts inside params is pointed at
+    params (never hoisted); any other is named unknown, with the near miss."""
+    stray = sorted(str(k) for k in arguments if k not in ("function", "params"))
+    if not stray:
+        return None
+    inside = [k for k in stray if k in accepted]
+    parts = []
+    for key in stray:
+        if key in inside:
+            parts.append(f"{key} belongs inside params, found at top level")
+        else:
+            parts.append(f"unknown top-level key '{key}'"
+                         + _did_you_mean(key, sorted(accepted | {"function",
+                                                                 "params"})))
+    text = "; ".join(parts)
+    if inside:
+        shape = ",".join(f'"{k}":...' for k in inside)
+        text += (f'. Call with {{"function":"{function}",'
+                 f'"params":{{{shape}}}}}')
+    return text
+
+
 def handle_skill_call(arguments: dict) -> dict:
     """Route one skill_call. Every failure is returned as a refusal dict."""
     function = arguments.get("function")
@@ -2509,6 +2547,9 @@ def handle_skill_call(arguments: dict) -> dict:
             + _did_you_mean(function, FUNCTIONS)
             + " Available: " + ", ".join(FUNCTIONS)))
     accepted = ACCEPTED[function]
+    stray = _stray_top_level(function, arguments, accepted)
+    if stray:
+        return _tool_refusal("invalid_params", stray)
     params = {key: value for key, value in params.items()
               if key not in SCHEMA_PARAMS
               or (key in accepted and not _is_schema_empty(key, value))}

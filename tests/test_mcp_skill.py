@@ -3691,6 +3691,71 @@ def _run_schema(suite, fx):
     _guard(suite, GRP_L, "L7 function-missing-or-nested-refused",
            function_missing_or_nested)
 
+    def top_level_beside_params():
+        """L8: a params key sent at the top level (beside params) is refused
+        with a pointer to params, for load and run, and never hoisted."""
+        mod = _mod()
+        root, _sdir = _hygiene_fixture(fx, "l8")
+        problems = []
+        handle = mod.handle_skill_call
+        with _Roots(mod, household=root):
+            res = handle({"function": "load", "name": "h",
+                          "params": {"file": "refs/patterns.md"}})
+            run = handle({"function": "run", "name": "h",
+                          "params": {"script": "scripts/x"}})
+            alone = handle({"function": "load", "name": "h"})
+        for what, r in (("load", res), ("run", run), ("load, no params",
+                                                      alone)):
+            _refused(r, "%s with a top-level name" % what, problems,
+                     code="invalid_params",
+                     token="name belongs inside params, found at top level")
+            err = _err(r)
+            if err is not None:
+                if 'Call with {"function":' not in err[1] \
+                        or '"params":{"name":...}' not in err[1]:
+                    problems.append("%s: no corrected call shape in %r"
+                                    % (what, err[1]))
+                if "name is required" in err[1]:
+                    problems.append("%s: the stray-key sentence lost to "
+                                    "'name is required': %r" % (what, err[1]))
+        return problems, ["refusal     : %r" % (_err(res),)]
+    _guard(suite, GRP_L, "L8 top-level-params-key-points-inside-params",
+           top_level_beside_params)
+
+    def unknown_top_level():
+        """L9: a top-level key no function accepts is named unknown, with the
+        near-miss pointer; it is refused for every function."""
+        mod = _mod()
+        problems = []
+        handle = mod.handle_skill_call
+        res = handle({"function": "list", "bogus": 1, "params": {}})
+        _refused(res, "list with 'bogus'", problems, code="invalid_params",
+                 token="unknown top-level key 'bogus'")
+        res = handle({"function": "load", "parms": {"name": "h"}})
+        _refused(res, "load with 'parms'", problems, code="invalid_params",
+                 token="unknown top-level key 'parms'")
+        err = _err(res)
+        if err is not None and "Did you mean 'params'?" not in err[1]:
+            problems.append("no did-you-mean at 'params': %r" % (err[1],))
+        return problems, []
+    _guard(suite, GRP_L, "L9 unknown-top-level-key-refused", unknown_top_level)
+
+    def envelope_only():
+        """L10: function + params and nothing else still works."""
+        mod = _mod()
+        root, _sdir = _hygiene_fixture(fx, "l10")
+        problems = []
+        with _Roots(mod, household=root):
+            res = mod.handle_skill_call({"function": "load",
+                                         "params": {"name": "h"}})
+            lst = mod.handle_skill_call({"function": "list"})
+        _loaded(res, "BODY-h", "function+params load", problems)
+        if _err(lst) is not None:
+            problems.append("function-only list refused %r" % (_err(lst),))
+        return problems, []
+    _guard(suite, GRP_L, "L10 function-and-params-only-still-works",
+           envelope_only)
+
 
 # ---------------------------------------------------------------------------
 # M: produced documents as EmbeddedResource content blocks
@@ -4328,6 +4393,74 @@ def _run_inputs(suite, fx):
                 problems.append("the ref was forwarded: %r" % (entry,))
         return problems, []
     _guard(suite, GRP_N, "N4 unresolved-ref-refused-by-index-never-sent", refs)
+
+    def ref_schema():
+        """N13: the inputs schema advertises an optional `ref` string with
+        the hub-resolution description, and states the two item shapes; no
+        oneOf/anyOf and no required list anywhere in the tool schema."""
+        mod = _mod()
+        tool = mod._tool_definition("", ())
+        prop = tool["inputSchema"]["properties"]["params"]["properties"][
+            "inputs"]
+        item_props = (prop.get("items") or {}).get("properties") or {}
+        problems = []
+        ref = item_props.get("ref")
+        if not isinstance(ref, dict) or ref.get("type") != "string":
+            problems.append("no string 'ref' item property: %r" % (ref,))
+        else:
+            want = ("upload:a_... | document:a_... | image:a_..., resolved "
+                    "by the household hub before this server is called; a "
+                    "ref item is exactly {name, ref} and carries no content "
+                    "or encoding")
+            if want not in str(ref.get("description", "")):
+                problems.append("ref description %r lacks %r"
+                                % (ref.get("description"), want))
+        desc = str(prop.get("description", ""))
+        if "{name, content[, encoding]}" not in desc \
+                or "{name, ref}" not in desc:
+            problems.append("inputs description does not state the two item "
+                            "shapes: %r" % (desc,))
+        text = json.dumps(tool["inputSchema"])
+        for banned in ("oneOf", "anyOf", "allOf", '"required"'):
+            if banned in text:
+                problems.append("schema contains %s" % banned)
+        return problems, []
+    _guard(suite, GRP_N, "N13 schema-advertises-ref-no-oneof-no-required",
+           ref_schema)
+
+    def ref_refusal():
+        """N14: an item that still carries a ref and no content is refused
+        with the hub-resolves sentence, not the generic member message."""
+        run = _InputsRun(fx, "n14")
+        problems = []
+        res = run([{"name": "a.png", "ref": "image:a_1"}])
+        _refused(res, "an unresolved ref item", problems,
+                 code="invalid_params", token="inputs[0]")
+        err = _err(res)
+        if err is not None:
+            for piece in ("ref items are resolved by the household hub "
+                          "before the call",
+                          "this server received an unresolved ref"):
+                if piece not in err[1]:
+                    problems.append("refusal %r lacks %r" % (err[1], piece))
+        if run.sent:
+            problems.append("an unresolved ref reached the runner client")
+        return problems, []
+    _guard(suite, GRP_N, "N14 unresolved-ref-says-hub-resolves-it", ref_refusal)
+
+    def plain_item_unchanged():
+        """N15: an item with only name and content is accepted as before."""
+        run = _InputsRun(fx, "n15")
+        problems = []
+        res = run([{"name": "p.txt", "content": "hi"}])
+        if not run.accepted(res):
+            problems.append("a name+content item was refused: %r" % (_err(res),))
+        elif "p.txt" not in run.last_files():
+            problems.append("the item was not staged: %r"
+                            % (sorted(run.last_files()),))
+        return problems, []
+    _guard(suite, GRP_N, "N15 name-and-content-item-unchanged",
+           plain_item_unchanged)
 
     def shapes():
         """N5: an unknown member, a non-object item, a non-list `inputs` and
