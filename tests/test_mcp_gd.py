@@ -1179,6 +1179,43 @@ def _run_d(suite, fx):
     _guard(suite, GRP_D, "D9 every-function-answers-in-process",
            function_list_consistent)
 
+    def function_missing_or_nested():
+        """D10: a call with no top-level function that carries params, a
+        stray key or only the f/p forms is a refusal naming the cause (the
+        nested function says 'inside params'); the empty call, an empty f
+        beside an empty p, and a params holding only max_answer_chars keep
+        the unflagged status banner."""
+        mod = _mod()
+        problems = []
+        handle = mod.handle_gd_call
+        for what, args, want in (
+                ("params only", {"params": {"q": "x"}}, "top level"),
+                ("p only", {"p": {"q": "x"}}, "top level"),
+                ("empty f + p", {"f": "", "p": {"q": "x"}}, "top level"),
+                ("stray key", {"other": 1}, "top level"),
+                ("nested", {"params": {"function": "drive_list"}}, "inside params"),
+                ("nested via p", {"p": {"function": "drive_list"}}, "inside params"),
+                ("ceiling plus stray", {"params": {"max_answer_chars": 5, "q": "x"}},
+                 "top level")):
+            res = handle(dict(args))
+            got = _in(res)
+            if got is None or got[0] != "invalid_params" or want not in got[1]:
+                problems.append("%s: %r" % (what, res))
+        for what, args in (("empty", {}), ("empty f + empty p", {"f": "", "p": {}}),
+                           ("ceiling only", {"params": {"max_answer_chars": 5}}),
+                           ("ceiling only via p", {"p": {"max_answer_chars": 5}})):
+            res = handle(dict(args))
+            if "__raw_text__" not in res or "error" in res:
+                problems.append("%s: want the unflagged status, got %r" % (what, res))
+        schema = mod._tool_definition()["inputSchema"]
+        fdesc = schema["properties"]["function"].get("description", "")
+        if "REQUIRED" not in fdesc:
+            problems.append("function description does not say it is required: %r"
+                            % (fdesc,))
+        return problems, []
+    _guard(suite, GRP_D, "D10 function-missing-or-nested-refused",
+           function_missing_or_nested)
+
 
 # ---------------------------------------------------------------------------
 # E: validation before the token

@@ -2346,7 +2346,7 @@ _HANDLERS = {"load": fn_load, "run": fn_run, "list": fn_list,
 
 
 # Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
-# BEGIN GENERATED: _mcp_dispatch.py :: _did_you_mean, _unknown_params_refusal
+# BEGIN GENERATED: _mcp_dispatch.py :: _did_you_mean, _unknown_params_refusal, _missing_function_refusal
 def _did_you_mean(words, candidates, aliases=None):
     """Return " Did you mean 'X'?" for the closest real name, or "".
 
@@ -2413,7 +2413,47 @@ def _unknown_params_refusal(function, params, accepted, aliases=None):
     offered = ", ".join(sorted(accepted)) or "(none)"
     head = "Unknown params for '%s': %s. Accepted: %s." % (function, ", ".join(unknown), offered)
     return head + _did_you_mean(unknown, accepted, aliases)
-# END GENERATED: 7b6f3ce0b3db
+
+
+def _missing_function_refusal(arguments, params, names, envelope_keys=("function", "params"), status_params=()):
+    """Return the refusal for a call with NO function that carries more, or "".
+
+    A call whose top-level `function` is missing, empty or null is the status
+    request -- but only when it is TRULY empty. A model that sends
+    {"params": {"function": "load", ...}} or {"params": {...}} has not asked for
+    the status, and answering the banner (isError false) lets it loop on a reply
+    that looks like success, so the host refuses instead, in its own error
+    shape. This returns the sentence and nothing else, like
+    `_unknown_params_refusal`; it reads only its arguments.
+
+    `arguments` is the raw tools/call arguments, `params` the call's params
+    AFTER the host's own alias and JSON-string handling (a `p` short form or a
+    stringified object has already become the dict), and `names` the callable
+    functions, as a list or an already joined string, in the order the host
+    wants them printed. `envelope_keys` are the argument keys that are the
+    envelope, never stray: a host with the f / p short forms passes them too.
+    `status_params` are the params keys a STATUS call may legitimately carry --
+    max_answer_chars on every host, jenkins's documented test / probe -- and a
+    call whose params hold only those is still the status request.
+
+    An empty string means the call is the status request (nothing, or only
+    envelope keys with an empty or status-only params), so a host calls this
+    when its function is empty and refuses only on a non-empty answer. The two
+    sentences are the ones mcp-skill and mcp-sandbox first wrote: one for a
+    function sitting inside params, one for params or another key beside none.
+    """
+    if not isinstance(arguments, dict):
+        arguments = {}
+    stray = sorted(str(key) for key in arguments if key not in envelope_keys)
+    nested = isinstance(params, dict) and isinstance(params.get("function"), str)
+    carried = any(key not in status_params for key in params) if isinstance(params, dict) else bool(params)
+    if not (carried or stray):
+        return ""
+    listing = names if isinstance(names, str) else ", ".join(str(name) for name in names)
+    if nested:
+        return 'function is required at the top level, beside params; you passed it inside params. Call with {"function": "<name>", "params": {...}}. Functions: ' + listing + "."
+    return "function is required at the top level (" + listing + "); got params/arguments without it."
+# END GENERATED: d58ed36930a9
 
 
 def handle_skill_call(arguments: dict) -> dict:
@@ -2432,19 +2472,9 @@ def handle_skill_call(arguments: dict) -> dict:
     # for a truly empty call. A call carrying params or any other argument
     # without a top-level function is a refusal naming the cause.
     if not function:
-        others = sorted(str(key) for key in arguments
-                        if key not in ("function", "params"))
-        if params or others:
-            names = ", ".join(FUNCTIONS)
-            if isinstance(params.get("function"), str):
-                return _tool_refusal("invalid_params", (
-                    "function is required at the top level, beside params; "
-                    "you passed it inside params. Call with "
-                    '{"function": "<name>", "params": {...}}. Functions: '
-                    + names + "."))
-            return _tool_refusal("invalid_params", (
-                "function is required at the top level (" + names
-                + "); got params/arguments without it."))
+        missing = _missing_function_refusal(arguments, params, FUNCTIONS)
+        if missing:
+            return _tool_refusal("invalid_params", missing)
         return {"__raw_text__": _status_text()}
 
     handler = _HANDLERS.get(function)

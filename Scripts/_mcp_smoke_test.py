@@ -688,6 +688,135 @@ ORIGINAL_PARAM_REFUSERS = ("mcp-purity.py", "mcp-postgres.py", "mcp-search.py",
                            "mcp-webfetch.py", "mcp-inspect.py", "mcp-wiki.py")
 
 
+# A call with NO top-level function that carries params or another argument is
+# refused (isError True) by every dispatcher; only a truly empty call keeps the
+# unflagged status banner. The block is `_missing_function_refusal` from
+# Scripts/_mcp_dispatch.py and its two sentences are the contract, as
+# COLLISION_TOKEN's is above.
+MISSING_TOKEN = "top level"
+MISSING_NESTED_TOKEN = "inside params"
+
+# mcp-proxy.py has no function layer (ADR 0027): a params-only call is relayed
+# to the child that owns the tool, so there is nothing to refuse.
+MISSING_EXEMPT = ("mcp-proxy.py",)
+
+# Hosts that also read the f / p short forms. Probe DATA, hand-written, with a
+# coverage row below that derives the set from each host's call site.
+MISSING_SHORT_FORM = ("mcp-gd.py", "mcp-gdc.py", "mcp-git.py", "mcp-postgres.py",
+                      "mcp-search.py", "mcp-webfetch.py", "mcp-inspect.py",
+                      "mcp-wiki.py", "mcp-tshark.py", "mcp-purity.py",
+                      "mcp-forge.py", "mcp-jenkins.py")
+
+# Hosts whose status call may carry params: the paging ceiling every function of
+# those hosts takes, and for jenkins also its documented status probe (a false
+# `probe` runs no probe, so no network). Such a call is STILL the status banner;
+# anything else beside it is refused.
+MISSING_NEUTRAL = {
+    "mcp-gd.py": {"max_answer_chars": 500},
+    "mcp-gdc.py": {"max_answer_chars": 500},
+    "mcp-git.py": {"max_answer_chars": 500},
+    "mcp-postgres.py": {"max_answer_chars": 500},
+    "mcp-search.py": {"max_answer_chars": 500},
+    "mcp-webfetch.py": {"max_answer_chars": 500},
+    "mcp-inspect.py": {"max_answer_chars": 500},
+    "mcp-wiki.py": {"max_answer_chars": 500},
+    "mcp-tshark.py": {"max_answer_chars": 500},
+    "mcp-purity.py": {"max_answer_chars": 500},
+    "mcp-forge.py": {"max_answer_chars": 500},
+    "mcp-jenkins.py": {"max_answer_chars": 500, "probe": False},
+    "mcp-context7.py": {"max_answer_chars": 500},
+    "mcp-lldb.py": {"max_answer_chars": 500},
+}
+
+
+def missing_function_checks(srv, cfg, checks):
+    """A function-less call that carries more than the envelope is refused.
+
+    POSITIVE -- {"params": {"x": 1}} and {"x": 1} (a stray top-level key) are
+      isError True and say the function belongs at the top level;
+      {"params": {"function": "list"}} also says it was passed inside params;
+      on the short-form hosts {"p": {"x": 1}} is refused too (p is params).
+    CONTROL -- the empty call and {"f": "", "p": {}} (short-form hosts) keep the
+      unflagged banner, and so does a params object holding only the neutral
+      status keys; the same keys with a stray one beside them are refused. On
+      mcp-forge an explicit function "status" keeps the banner whatever params
+      ride along.
+    COVERAGE -- the short-form and neutral rows match each host's call site.
+    """
+    name = cfg["file"]
+    tool = cfg["tool"]
+    with open(os.path.join(SCRIPT_DIR, name), encoding="utf-8") as fh:
+        calls = [line for line in fh.read().splitlines()
+                 if "_missing_function_refusal(" in line and "def " not in line]
+    if name in MISSING_EXEMPT:
+        checks.append(check("missing-function: relay exempt", not calls,
+                            "calls=%r" % (calls,)))
+        return
+    checks.append(check(
+        "missing-function rows cover this host",
+        len(calls) == 1
+        and ('"function", "params", "f", "p"' in calls[0]) == (name in MISSING_SHORT_FORM)
+        and ('"max_answer_chars"' in calls[0]) == (name in MISSING_NEUTRAL),
+        "calls=%r short=%r neutral=%r" % (calls, name in MISSING_SHORT_FORM,
+                                          name in MISSING_NEUTRAL)))
+
+    is_error, text, _resp = _dispatch_call(srv, 40, tool, {"params": {"x": 1}})
+    checks.append(check(
+        "params without function -> isError True + top level",
+        is_error is True and MISSING_TOKEN in text,
+        "isError=%r; text=%r" % (is_error, text[:200])))
+    is_error, text, _resp = _dispatch_call(srv, 41, tool, {"x": 1})
+    checks.append(check(
+        "stray key without function -> isError True + top level",
+        is_error is True and MISSING_TOKEN in text,
+        "isError=%r; text=%r" % (is_error, text[:200])))
+    is_error, text, _resp = _dispatch_call(srv, 42, tool, {"params": {"function": "list"}})
+    checks.append(check(
+        "function inside params -> isError True + inside params",
+        is_error is True and MISSING_TOKEN in text and MISSING_NESTED_TOKEN in text,
+        "isError=%r; text=%r" % (is_error, text[:200])))
+    is_error, _text, resp = _dispatch_call(srv, 43, tool, {"function": "", "params": {}})
+    checks.append(check(
+        "empty function + empty params -> banner (control)",
+        is_error is not None and not is_error,
+        "isError=%r; envelope=%s" % (is_error, json.dumps(resp)[:200])))
+
+    if name in MISSING_SHORT_FORM:
+        is_error, text, _resp = _dispatch_call(srv, 44, tool, {"p": {"x": 1}})
+        checks.append(check(
+            "p without function -> isError True + top level",
+            is_error is True and MISSING_TOKEN in text,
+            "isError=%r; text=%r" % (is_error, text[:200])))
+        is_error, _text, resp = _dispatch_call(srv, 45, tool, {"f": "", "p": {}})
+        checks.append(check(
+            "empty f + empty p -> banner (control)",
+            is_error is not None and not is_error,
+            "isError=%r; envelope=%s" % (is_error, json.dumps(resp)[:200])))
+
+    neutral = MISSING_NEUTRAL.get(name)
+    if neutral is not None:
+        is_error, _text, resp = _dispatch_call(srv, 46, tool, {"params": dict(neutral)})
+        checks.append(check(
+            "status-neutral params only -> banner (control)",
+            is_error is not None and not is_error,
+            "isError=%r; envelope=%s" % (is_error, json.dumps(resp)[:200])))
+        with_stray = dict(neutral)
+        with_stray["x"] = 1
+        is_error, text, _resp = _dispatch_call(srv, 47, tool, {"params": with_stray})
+        checks.append(check(
+            "status-neutral params + stray key -> isError True",
+            is_error is True and MISSING_TOKEN in text,
+            "isError=%r; text=%r" % (is_error, text[:200])))
+
+    if name == "mcp-forge.py":
+        is_error, _text, resp = _dispatch_call(srv, 48, tool, {
+            "function": "status", "params": {"x": 1}})
+        checks.append(check(
+            "forge: explicit status keeps the banner whatever params ride along",
+            is_error is not None and not is_error,
+            "isError=%r; envelope=%s" % (is_error, json.dumps(resp)[:200])))
+
+
 def near_miss_checks(srv, cfg, checks):
     """A name one typo away from a real one must be answered with that name.
 
@@ -1665,6 +1794,11 @@ def _run_server_checks(cfg):
         #     answered with the real name, every server (the shared
         #     `_did_you_mean` block from Scripts/_mcp_dispatch.py).
         near_miss_checks(srv, cfg, checks)
+
+        # 8b'. a call with no function that carries params or another argument
+        #      is refused; only the truly empty call keeps the banner (the
+        #      shared `_missing_function_refusal` block).
+        missing_function_checks(srv, cfg, checks)
 
         # 8c. gdc-only: `open_pages` is a real alias of list_pages, and the
         #     unknown-function reply offers no uncallable name.

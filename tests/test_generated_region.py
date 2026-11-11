@@ -4385,6 +4385,140 @@ def group_dispatch_blocks(suite, mod):
                  detail=["%d server(s) walked" % len(servers)])
 
     group_unknown_params_block(suite, mod)
+    group_missing_function_block(suite, mod)
+
+
+# The third dispatch block: the refusal for a call that names NO function yet
+# carries params or another argument. Spelled here, like the others, because the
+# sentences are what a model reads and what mcp-skill's L7 and mcp-sandbox's F8
+# assert word for word ('top level', 'inside params').
+MISSING_BLOCK = "_missing_function_refusal"
+MISSING_PLAIN = "function is required at the top level (%s); got params/arguments without it."
+MISSING_NESTED = ("function is required at the top level, beside params; you passed it "
+                  'inside params. Call with {"function": "<name>", "params": {...}}. '
+                  "Functions: %s.")
+# The one server with no function layer: it relays a child's tools verbatim.
+MISSING_NOT_HOSTED = ("mcp-proxy.py",)
+
+
+def group_missing_function_block(suite, mod):
+    """E. What `_missing_function_refusal` says -- an empty call keeps the status
+    banner, every other function-less call is refused, the f / p short forms are
+    envelope and never stray, status-neutral params stay neutral -- and A. that
+    every server but the proxy carries it and calls it from outside the region."""
+    try:
+        src = H.load_module_from_path("mcp_dispatch_missing_under_test", DISPATCH_SOURCE)
+        refuse = getattr(src, MISSING_BLOCK)
+        absent = []
+    except (OSError, SyntaxError, AttributeError) as exc:
+        refuse = None
+        absent = ["the source does not load or lacks %s: %s: %s"
+                  % (MISSING_BLOCK, type(exc).__name__, str(exc)[:200])]
+
+    def cases(rows):
+        problems = list(absent)
+        if refuse is None:
+            return problems
+        for args, want in rows:
+            try:
+                got = refuse(*args)
+            except Exception as exc:  # noqa: BLE001 -- a raise is the finding
+                problems.append("%r raised %s: %s" % (args, type(exc).__name__, exc))
+                continue
+            if got != want:
+                problems.append("%r gave %r, wanted %r" % (args, got, want))
+        return problems
+
+    names = ["alpha", "beta"]
+    envelope = ("function", "params", "f", "p")
+    # Only a TRULY empty call is the status request.
+    suite.record(GE, "mfr-empty-call-keeps-the-banner", cases([
+        (({}, {}, names), ""),
+        (({"function": ""}, {}, names), ""),
+        (({"function": None, "params": None}, {}, names), ""),
+        (({"params": {}}, {}, names), ""),
+        ((None, {}, names), ""),
+        (({"params": ""}, "", names), ""),
+    ]))
+    # Anything else is refused: params, a stray key, a nested function (named as
+    # such), a non-dict params that is not empty. The names print in the order given.
+    suite.record(GE, "mfr-params-or-stray-key-refused", cases([
+        (({"params": {"x": 1}}, {"x": 1}, names), MISSING_PLAIN % "alpha, beta"),
+        (({"other": 1}, {}, names), MISSING_PLAIN % "alpha, beta"),
+        (({"function": "", "params": {"x": 1}}, {"x": 1}, names), MISSING_PLAIN % "alpha, beta"),
+        (({"params": {"function": "alpha", "x": 1}}, {"function": "alpha", "x": 1}, names),
+         MISSING_NESTED % "alpha, beta"),
+        (({"params": '{"function": "alpha"}'}, {"function": "alpha"}, names),
+         MISSING_NESTED % "alpha, beta"),
+        (({"params": "text"}, "text", names), MISSING_PLAIN % "alpha, beta"),
+        (({"params": {"x": 1}}, {"x": 1}, "alpha, beta"), MISSING_PLAIN % "alpha, beta"),
+        (({"params": {"x": 1}}, {"x": 1}, ["beta", "alpha"]), MISSING_PLAIN % "beta, alpha"),
+    ]))
+    # f / p are envelope on the hosts that read them: a call with only p holds
+    # params, an empty f beside an empty p is still the status, and neither is
+    # ever a stray key. A host that passes the default envelope sees p as stray.
+    suite.record(GE, "mfr-short-forms-are-envelope", cases([
+        (({"p": {"x": 1}}, {"x": 1}, names, envelope), MISSING_PLAIN % "alpha, beta"),
+        (({"f": "", "p": {"x": 1}}, {"x": 1}, names, envelope), MISSING_PLAIN % "alpha, beta"),
+        (({"f": "", "p": {}}, {}, names, envelope), ""),
+        (({"f": ""}, {}, names, envelope), ""),
+        (({"p": {}}, {}, names, envelope), ""),
+        (({"p": {"function": "alpha"}}, {"function": "alpha"}, names, envelope),
+         MISSING_NESTED % "alpha, beta"),
+        (({"p": {}}, {}, names), MISSING_PLAIN % "alpha, beta"),
+    ]))
+    # Params keys a STATUS call may carry (the ceiling on every host, jenkins's
+    # documented test / probe) stay the banner on their own and are refused the
+    # moment anything else rides along.
+    neutral = ("max_answer_chars",)
+    probe = ("test", "probe", "max_answer_chars")
+    suite.record(GE, "mfr-status-params-stay-neutral", cases([
+        (({"params": {"max_answer_chars": 500}}, {"max_answer_chars": 500}, names, envelope, neutral), ""),
+        (({"params": {"max_answer_chars": 500}}, {"max_answer_chars": 500}, names, envelope),
+         MISSING_PLAIN % "alpha, beta"),
+        (({"params": {"max_answer_chars": 500, "x": 1}}, {"max_answer_chars": 500, "x": 1},
+          names, envelope, neutral), MISSING_PLAIN % "alpha, beta"),
+        (({"params": {"test": True}}, {"test": True}, names, envelope, probe), ""),
+        (({"p": {"probe": 1, "max_answer_chars": 9}}, {"probe": 1, "max_answer_chars": 9},
+          names, envelope, probe), ""),
+        (({"params": {"test": True}, "x": 1}, {"test": True}, names, envelope, probe),
+         MISSING_PLAIN % "alpha, beta"),
+        (({"params": {"test": True, "job_path": "j"}}, {"test": True, "job_path": "j"},
+          names, envelope, probe), MISSING_PLAIN % "alpha, beta"),
+    ]))
+
+    problems = []
+    try:
+        sources = mod.load_all_blocks()
+    except (Exception, SystemExit) as exc:  # noqa: BLE001 -- recorded, not raised
+        sources = None
+        problems.append("the generator's block maps do not load: %s" % exc)
+    hosts, missing_hosts = [], []
+    for path in sorted(Path(SCRIPTS).glob(TARGET_GLOB)) if sources is not None else []:
+        text = path.read_text(encoding="utf-8")
+        try:
+            regions = mod.audit_text(path.name, text, sources)
+        except (Exception, SystemExit) as exc:  # noqa: BLE001
+            problems.append("%s: does not audit: %s" % (path.name, exc))
+            continue
+        hosted = any(r.source == DISPATCH_CANONICAL_NAME and MISSING_BLOCK in r.names
+                     for r in regions)
+        if path.name in MISSING_NOT_HOSTED:
+            problems += problem_if(hosted, "%s has no function layer yet hosts %s"
+                                   % (path.name, MISSING_BLOCK))
+            continue
+        if not hosted:
+            missing_hosts.append(path.name)
+            continue
+        hosts.append(path.name)
+        if "%s(" % MISSING_BLOCK not in outside_regions(mod, path.name, text, sources):
+            problems.append("%s: hosts %s but never calls it" % (path.name, MISSING_BLOCK))
+    problems += ["%s: no %s region names %s" % (n, DISPATCH_CANONICAL_NAME, MISSING_BLOCK)
+                 for n in missing_hosts]
+    problems += problem_if(not hosts and sources is not None,
+                           "no server hosts %s, so this row would pass on nothing" % MISSING_BLOCK)
+    suite.record(GA, "missing-function-refusal-in-every-dispatcher", problems,
+                 detail=["%d host(s): %s" % (len(hosts), ", ".join(hosts) or "none")])
 
 
 # The refusal sentence the second dispatch block renders. Spelled here for the

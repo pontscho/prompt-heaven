@@ -6144,6 +6144,31 @@ def run(opts=None):
                                        "neither a handler name nor another alias")],
                      text=by_status)
 
+        # The liveness reply is for a TRULY empty call. A call with no function
+        # that carries params, the p form or a stray key is refused (a model
+        # that nested the function inside params would otherwise loop on a
+        # liveness answer that looks like success); a params of only the
+        # ceiling is still the liveness reply.
+        problems = []
+        for mf_what, mf_args, mf_token in (
+                ("params only", {"params": {"query": "x"}}, "top level"),
+                ("p only", {"p": {"query": "x"}}, "top level"),
+                ("stray key", {"other": 1}, "top level"),
+                ("nested", {"params": {"function": "search", "query": "x"}}, "inside params"),
+                ("ceiling + stray", {"params": {"max_answer_chars": 5, "query": "x"}}, "top level")):
+            mf_res = sdrv.mod.handle_wiki_call(mf_args, sdrv.root, WIKI_REL)
+            if "error" not in mf_res or mf_token not in str(mf_res["error"]):
+                problems.append("%s: %r" % (mf_what, mf_res))
+        for mf_what, mf_args in (("empty", {}), ("empty f + p", {"f": "", "p": {}}),
+                                 ("ceiling only", {"params": {"max_answer_chars": 5}})):
+            mf_res = sdrv.mod.handle_wiki_call(mf_args, sdrv.root, WIKI_REL)
+            if (mf_res.get("__raw_text__") or "") != live_txt:
+                problems.append("%s: not the liveness reply: %r" % (mf_what, mf_res))
+        suite.record("N", "function-missing-refused-liveness-reply-kept", problems,
+                     detail=[_d("call", "params / p / a stray key without a function"),
+                             _d("kept", "the empty call and a ceiling-only params")],
+                     text="")
+
         # `path` a SECOND time, and on a FILTER rather than on a lookup.  Both
         # search and list take a path_prefix, and the FIRST clause of the rule
         # they filter by is an exact match on the docs-relative path -- so a

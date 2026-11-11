@@ -20,6 +20,14 @@ Each host keeps its own accepted-name table: which parameters a function
 reads is the host's own fact, and `tests/test_param_contract.py` holds every
 table to the keys its handlers actually read and its documentation names.
 
+`_missing_function_refusal` is the third block: the refusal for a call that
+names NO function yet carries params or another argument. A truly empty call
+keeps the unflagged status banner; anything else is refused with a sentence
+that says the function belongs at the top level, beside params (and says so
+explicitly when it was sent inside params). It reads only its arguments, so a
+host passes its own function names, envelope keys (f / p where it has them) and
+the params keys a status call may carry.
+
 **Why a fourteenth source and not a block in an existing one.** ADR 0014's rule
 is the test: a new source is warranted when no existing one can hold the block
 without becoming a shelf. `_mcp_json.py` is the nearest, and it is the wrong
@@ -131,3 +139,43 @@ def _unknown_params_refusal(function, params, accepted, aliases=None):
     offered = ", ".join(sorted(accepted)) or "(none)"
     head = "Unknown params for '%s': %s. Accepted: %s." % (function, ", ".join(unknown), offered)
     return head + _did_you_mean(unknown, accepted, aliases)
+
+
+def _missing_function_refusal(arguments, params, names, envelope_keys=("function", "params"), status_params=()):
+    """Return the refusal for a call with NO function that carries more, or "".
+
+    A call whose top-level `function` is missing, empty or null is the status
+    request -- but only when it is TRULY empty. A model that sends
+    {"params": {"function": "load", ...}} or {"params": {...}} has not asked for
+    the status, and answering the banner (isError false) lets it loop on a reply
+    that looks like success, so the host refuses instead, in its own error
+    shape. This returns the sentence and nothing else, like
+    `_unknown_params_refusal`; it reads only its arguments.
+
+    `arguments` is the raw tools/call arguments, `params` the call's params
+    AFTER the host's own alias and JSON-string handling (a `p` short form or a
+    stringified object has already become the dict), and `names` the callable
+    functions, as a list or an already joined string, in the order the host
+    wants them printed. `envelope_keys` are the argument keys that are the
+    envelope, never stray: a host with the f / p short forms passes them too.
+    `status_params` are the params keys a STATUS call may legitimately carry --
+    max_answer_chars on every host, jenkins's documented test / probe -- and a
+    call whose params hold only those is still the status request.
+
+    An empty string means the call is the status request (nothing, or only
+    envelope keys with an empty or status-only params), so a host calls this
+    when its function is empty and refuses only on a non-empty answer. The two
+    sentences are the ones mcp-skill and mcp-sandbox first wrote: one for a
+    function sitting inside params, one for params or another key beside none.
+    """
+    if not isinstance(arguments, dict):
+        arguments = {}
+    stray = sorted(str(key) for key in arguments if key not in envelope_keys)
+    nested = isinstance(params, dict) and isinstance(params.get("function"), str)
+    carried = any(key not in status_params for key in params) if isinstance(params, dict) else bool(params)
+    if not (carried or stray):
+        return ""
+    listing = names if isinstance(names, str) else ", ".join(str(name) for name in names)
+    if nested:
+        return 'function is required at the top level, beside params; you passed it inside params. Call with {"function": "<name>", "params": {...}}. Functions: ' + listing + "."
+    return "function is required at the top level (" + listing + "); got params/arguments without it."

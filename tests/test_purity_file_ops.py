@@ -689,6 +689,30 @@ def group_a(suite, drv):
         {"substring_pattern": NEEDLE, "relative_path": ".claude/tmp"},
         must=[P_SCRATCH], must_not=[P_KEEP, P_GEN],
         detail=["descending explicitly into the exempt subtree"])
+    # A call with no function that carries params (or p, or a stray key) is
+    # refused with isError; the empty call and a ceiling-only params stay the
+    # status reply (the nested function says 'inside params').
+    problems = []
+    for what, args, want in (
+            ("params only", {"params": {"substring_pattern": NEEDLE}}, "top level"),
+            ("p only", {"p": {"substring_pattern": NEEDLE}}, "top level"),
+            ("stray key", {"other": 1}, "top level"),
+            ("nested", {"params": {"function": "search",
+                                   "substring_pattern": NEEDLE}}, "inside params"),
+            ("ceiling + stray", {"params": {"max_answer_chars": 5,
+                                            "substring_pattern": NEEDLE}}, "top level")):
+        resp = drv.cli.rpc("tools/call", {"name": "purity_call", "arguments": args})
+        res = resp.get("result") or {}
+        txt = ((res.get("content") or [{}])[0]).get("text", "")
+        if res.get("isError") is not True or want not in txt:
+            problems.append("%s: isError=%r %r" % (what, res.get("isError"), txt[:160]))
+    for what, args in (("empty", {}), ("empty f + p", {"f": "", "p": {}}),
+                       ("ceiling only", {"params": {"max_answer_chars": 5}})):
+        resp = drv.cli.rpc("tools/call", {"name": "purity_call", "arguments": args})
+        res = resp.get("result") or {}
+        if res.get("isError"):
+            problems.append("%s was flagged: %r" % (what, res))
+    suite.record("A", "function-missing-refused-empty-call-is-the-status", problems)
 
 
 # ---------------------------------------------------------------------------

@@ -8366,6 +8366,21 @@ def wf_status_row(suite, wf, root):
                 + problem_if(finds or cdlls, "find_library %r CDLL %r during the status reply" % (finds, cdlls))), ["%s" % (backend[0][:150] if backend else None)] + decoders
     run_row(suite, GO, "webfetch-status-reply-names-the-verified-default-and-loads-no-decoder", status, src + "; M1")
 
+    def function_missing():
+        problems = []
+        for what, args, want in (("params only", {"params": {"url": "https://x.invalid/"}}, "top level"),
+                                 ("p only", {"p": {"url": "https://x.invalid/"}}, "top level"),
+                                 ("stray key", {"other": 1}, "top level"),
+                                 ("nested", {"params": {"function": "fetch"}}, "inside params"),
+                                 ("ceiling + stray", {"params": {"max_answer_chars": 5, "url": "u"}}, "top level")):
+            got = wf.handle_webfetch_call(args, root, root)
+            problems += problem_if("error" not in got or want not in str(got.get("error")), "%s: %s" % (what, short(got)))
+        for what, args in (("empty", {}), ("empty f + p", {"f": "", "p": {}}), ("ceiling only", {"params": {"max_answer_chars": 5}})):
+            got = wf.handle_webfetch_call(args, root, root)
+            problems += problem_if("Available functions" not in (got.get("__raw_text__") or ""), "%s: not the status: %s" % (what, short(got)))
+        return problems, ["a function-less call carrying params / p / a stray key is refused before any fetch; the empty call and a ceiling-only params stay the status reply"]
+    run_row(suite, GO, "webfetch-function-missing-refused-empty-call-is-the-status", function_missing, src + "; ADR 0030 addendum")
+
 
 def wf_hardening_rows(suite, wf, root, vp):
     """Security review 20261001-082224 fix pass: F1 (cache vs allow_private), F4 (description), F39 (cache modes), F41 (printable URL echoes)."""

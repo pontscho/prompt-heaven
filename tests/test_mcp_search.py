@@ -245,6 +245,24 @@ def group_a(suite, mod):
     err, text = call(mod, {"function": "web", "params": json.dumps({"queries": "x"})})
     suite.record("A", "params-as-json-string", flag(err, False) + expect("Title 1" in text, "a JSON-string params was not decoded"), text=text)
 
+    # A call with no top-level function that carries params, a stray key or only the
+    # f / p forms is a refusal naming the cause; the empty call keeps the status.
+    world = install(mod, World(ddg=ddg_ok()))
+    problems = []
+    for what, args, want in (("params only", {"params": {"queries": "x"}}, "top level"),
+                             ("p only", {"p": {"queries": "x"}}, "top level"),
+                             ("empty f + p", {"f": "", "p": {"queries": "x"}}, "top level"),
+                             ("stray key", {"other": 1}, "top level"),
+                             ("nested", {"params": {"function": "web", "queries": "x"}}, "inside params"),
+                             ("ceiling + stray", {"params": {"max_answer_chars": 5, "queries": "x"}}, "top level")):
+        err, text = call(mod, args)
+        problems += flag(err, True) + expect(want in text and text.startswith("function is required"), "%s: got %r" % (what, text))
+    for what, args in (("empty", {}), ("empty f + p", {"f": "", "p": {}}), ("ceiling only", {"params": {"max_answer_chars": 5}})):
+        err, text = call(mod, args)
+        problems += flag(err, False) + expect("mcp-search" in text, "%s: not the status: %r" % (what, text))
+    problems += expect(world.calls == [], "a refused call searched: %r" % world.calls)
+    suite.record("A", "function-missing-refused-empty-is-status", problems)
+
 
 # ---------------------------------------------------------------------------
 # B -- params

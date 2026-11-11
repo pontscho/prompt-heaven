@@ -592,6 +592,27 @@ def _run_a(suite, fx):
         return ([] if code == -32602 else ["code %r" % code]), ()
     _guard(suite, GRP_A, "A11 an unknown tool name is -32602", unknown_tool)
 
+    def function_missing():
+        """A13: params or a stray key without a top-level function is a
+        flagged refusal naming the cause (a nested function says 'inside
+        params'); an empty function with empty params stays the status."""
+        c = bare()
+        problems = []
+        for what, args, want in (
+                ("params only", {"params": {"to": "x"}}, "top level"),
+                ("stray key", {"other": 1}, "top level"),
+                ("nested", {"params": {"function": "list"}}, "inside params")):
+            resp = c.rpc("tools/call", {"name": TOOL, "arguments": args})
+            res = resp.get("result") or {}
+            text = ((res.get("content") or [{}])[0]).get("text", "")
+            if res.get("isError") is not True or want not in text:
+                problems.append("%s: isError=%r %r" % (what, res.get("isError"), text[-160:]))
+        is_error, text, _s = c.call(None, {})
+        if is_error:
+            problems.append("empty params flagged: %r" % text[-120:])
+        return problems, ()
+    _guard(suite, GRP_A, "A13 params without a function are refused, the empty call is the status", function_missing)
+
     def teardown():
         c = holder.pop("c", None)
         rc = c.close() if c else 0

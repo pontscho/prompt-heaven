@@ -132,6 +132,44 @@ def group_a(suite, mod, ws):
                     "reply: %s" % text[:200]],
             text=text, showable=True)
 
+    # A call with NO function that carries params (or the p form, or a stray key)
+    # is refused; an EXPLICIT `status` keeps whatever params ride along, because
+    # the fold to "" happens after the check reads the raw spelling; a params of
+    # only the ceiling stays the status.
+    root = ws.subdir("ok")
+    problems = []
+    for what, args, want in (
+            ("params only", {"params": {"kind": "test"}}, "top level"),
+            ("p only", {"p": {"kind": "test"}}, "top level"),
+            ("empty f + p", {"f": "", "p": {"kind": "test"}}, "top level"),
+            ("stray key", {"other": 1}, "top level"),
+            ("nested", {"params": {"function": "list", "kind": "test"}}, "inside params"),
+            ("ceiling + stray", {"params": {"max_answer_chars": 5, "kind": "x"}}, "top level")):
+        reply = mod.handle_forge_call(args, root, CFG)
+        text = reply_text(reply)
+        if "error" not in reply or want not in text:
+            problems.append("%s: %s" % (what, text[:160]))
+    suite.record("A", "function-missing-is-refused", problems,
+                 detail=["params / p / stray key without a function: isError-shaped",
+                         "{'error': ...} naming 'top level' (and 'inside params' when",
+                         "the function sits in params)"])
+
+    empty = mod.handle_forge_call({}, root, CFG)
+    problems = []
+    for what, args in (
+            ("status + params", {"function": "status", "params": {"kind": "x", "zzz": 1}}),
+            ("status + p", {"function": "status", "p": {"kind": "x"}}),
+            ("f status + params", {"f": " status ", "params": {"zzz": 1}}),
+            ("ceiling only", {"params": {"max_answer_chars": 5}}),
+            ("empty f + empty p", {"f": "", "p": {}})):
+        reply = mod.handle_forge_call(args, root, CFG)
+        if reply != empty:
+            problems.append("%s differs from the empty call: %s"
+                            % (what, reply_text(reply)[:160]))
+    suite.record("A", "explicit-status-and-ceiling-keep-the-banner", problems,
+                 detail=["CONTROL: function=status folds to the empty call whatever",
+                         "params it carries; max_answer_chars alone is neutral"])
+
 
 # ---------------------------------------------------------------------------
 # Group B -- the alias is advertised wherever the function list is

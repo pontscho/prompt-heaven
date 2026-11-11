@@ -18,6 +18,7 @@ a `mkdtemp()` workspace, because the handler checks `os.path.isfile` first.
 
 Groups:
   A  list, string and refused values
+  B  a function-less call carrying params is refused, the empty call is the status
   E  hygiene
 """
 
@@ -150,6 +151,32 @@ def group_a(suite, ts, pcap):
                  detail=["the pre-fix `custom_fields.split(\",\")`"])
 
 
+def group_b(suite, ts, root):
+    """B. The dispatcher: a function-less call carrying params, the p form or
+    a stray key is refused (the nested function says 'inside params'); the
+    empty call, an empty f beside an empty p and a params of only the ceiling
+    stay the status reply.  No tshark is reached either way."""
+    problems = []
+    for what, args, want in (
+            ("params only", {"params": {"file": "x.pcap"}}, "top level"),
+            ("p only", {"p": {"file": "x.pcap"}}, "top level"),
+            ("stray key", {"other": 1}, "top level"),
+            ("nested", {"params": {"function": "analyze", "file": "x"}},
+             "inside params"),
+            ("ceiling + stray", {"params": {"max_answer_chars": 5, "file": "x"}},
+             "top level")):
+        reply = ts.handle_tshark_call(args, root)
+        if "error" not in reply or want not in str(reply["error"]):
+            problems.append("%s: %r" % (what, reply))
+    for what, args in (("empty", {}), ("empty f + p", {"f": "", "p": {}}),
+                       ("ceiling only", {"params": {"max_answer_chars": 5}})):
+        reply = ts.handle_tshark_call(args, root)
+        if "Available functions" not in (reply.get("__raw_text__") or ""):
+            problems.append("%s: not the status: %r" % (what, reply))
+    suite.record("B", "function-missing-refused-empty-call-is-the-status",
+                 problems)
+
+
 def group_e(suite, ts, originals, before, pyc_before):
     moved = [n for n in SWAPPED if getattr(ts, n) is not originals[n]]
     suite.record("E", "swapped-names-restored",
@@ -185,6 +212,7 @@ def run(opts=None):
         suite.note("      server  : %s" % SERVER)
         suite.note("      fixture : %s" % ws.path)
         group_a(suite, ts, pcap)
+        group_b(suite, ts, ws.path)
 
     group_e(suite, ts, originals, before, pyc_before)
     suite.print_summary()

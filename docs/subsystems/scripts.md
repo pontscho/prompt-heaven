@@ -152,9 +152,12 @@ injects its project-scope `job_path` (so the injected key is never what is
 judged) `Scripts/mcp-jenkins.py:handle_jenkins_call`, before lldb takes the
 session lock `Scripts/mcp-lldb.py:handle_lldb_call`, and before the legacy LSP
 servers' auto-init wait and backend lock
-`Scripts/mcp-lua-lsp.py:handle_luals_call`. A bare status call is not checked
-(jenkins checks its empty call as `status`), and neither is the direct-tool
-path on context7, lldb and gdc, which only `<name>_call` routes through. The
+`Scripts/mcp-lua-lsp.py:handle_luals_call`. A bare status call has no params to
+check, and a function-less call that carries params or another argument is refused
+fleet-wide as a missing top-level `function` (the third `_mcp_dispatch.py` block;
+only a truly empty call keeps the status banner, see
+[[0030-point-at-the-near-miss-never-resolve-it]]). The direct-tool
+path on context7, lldb and gdc is not checked: only `<name>_call` routes through the dispatcher. The
 legacy LSP servers took `relative_path` as an alias of `path`, the spelling
 their skills document `Scripts/mcp-clangd.py:PARAM_ALIASES`; lua-lsp's
 `luals_find_references`, `luals_symbol_context` and

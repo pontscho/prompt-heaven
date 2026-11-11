@@ -1000,6 +1000,31 @@ def run(opts=None):
         suite.record("O", "gate-discriminates",
                      [] if seen == ["## title"] else ["unfenced() saw %r" % seen])
 
+        # A call with no function that carries params (or p, or a stray key) is a
+        # flagged refusal naming the cause; the empty call and a params of only
+        # the ceiling keep the status reply.
+        problems = []
+        for what, args, want in (
+                ("params only", {"params": {"filter": "x"}}, "top level"),
+                ("p only", {"p": {"filter": "x"}}, "top level"),
+                ("stray key", {"other": 1}, "top level"),
+                ("nested", {"params": {"function": "processes"}}, "inside params"),
+                ("ceiling + stray", {"params": {"max_answer_chars": 5, "filter": "x"}},
+                 "top level")):
+            resp = cli.rpc("tools/call", {"name": cli.tool, "arguments": args})
+            res = resp.get("result") or {}
+            txt = ((res.get("content") or [{}])[0]).get("text", "")
+            if res.get("isError") is not True or want not in txt:
+                problems.append("%s: isError=%r %r" % (what, res.get("isError"), txt[:160]))
+        for what, args in (("empty", {}), ("empty f + p", {"f": "", "p": {}}),
+                           ("ceiling only", {"params": {"max_answer_chars": 5}})):
+            resp = cli.rpc("tools/call", {"name": cli.tool, "arguments": args})
+            res = resp.get("result") or {}
+            if res.get("isError"):
+                problems.append("%s was flagged: %r" % (what, res))
+        suite.record("O", "function-missing-refused-empty-call-is-the-status",
+                     problems)
+
         # ============ Q: the param gate, over live JSON-RPC ============
         # A misspelled key used to be dropped without a word, and every one of
         # these handlers has a no-filter default that is a plausible answer:
@@ -1247,8 +1272,14 @@ def run(opts=None):
                      [] if common and not lacking else
                      ["_COMMON_PARAMS empty"] if not common else
                      ["rows without the common set: %s" % ", ".join(lacking)])
-        # the common set is exactly what the DISPATCHER reads off params
-        disp, _ = param_reads(funcs, "handle_inspect_call", "params")
+        # the common set is exactly what the DISPATCHER reads off params.  The
+        # generated _missing_function_refusal is left out of the walk: it reads
+        # params["function"] only to NAME a function sent in the wrong place in
+        # its refusal, on a call that has no function -- it is not a parameter
+        # any handler accepts.
+        disp, _ = param_reads({n: f for n, f in funcs.items()
+                               if n != "_missing_function_refusal"},
+                              "handle_inspect_call", "params")
         suite.record("R", "common-is-dispatcher-reads",
                      [] if common and disp == common else
                      ["dispatcher reads %s, _COMMON_PARAMS is %s"

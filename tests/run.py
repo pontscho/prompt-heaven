@@ -313,7 +313,7 @@ def run_smoke(opts):
 #     Adding or retiring a server would trip a typed count for no defect.
 SUITES = [
     ("inspect_validate", run_inspect_validate,
-     "mcp-inspect VALIDATION family", 313),
+     "mcp-inspect VALIDATION family", 314),
     ("mcp_first_guard", run_mcp_first_guard,
      "mcp-first-guard PreToolUse Bash hook", 381),
     # The egress work added five rows (M EG1-EG4: --egress-port /
@@ -385,13 +385,15 @@ SUITES = [
      "whole directories during the walk, `max_depth` on find_file, list_dir "
      "and search (0 = the root's own entries, omitted unchanged, junk "
      "refused), and search's `multiline` over the whole file text (one row "
-     "per match at its start line, in-process and worker identical)",
-     317),
+     "per match at its start line, in-process and worker identical), and a "
+     "function-less call carrying params refused while the empty call stays "
+     "the status",
+     318),
     ("mcp_git_params", run_mcp_git_params,
      "mcp-git named params -> git argv, offline; a real unexposed subcommand "
      "refused with no near-miss pointer, a key no git option can be spelled "
      "from refused, a `git grep` exit 1 with no output a plain no-match "
-     "answer", 317),
+     "answer; a function-less call carrying params refused", 318),
     ("name_existence", run_name_existence,
      "corpus + server text <-> live MCP inventory name existence", None),
     ("spawn_stdin", run_spawn_stdin,
@@ -406,7 +408,8 @@ SUITES = [
      "file-relative line windows, the page type as a ranking signal, "
      "the frontmatter aliases synonym field, "
      "the frozen-record advisory carve-out, "
-     "the dead [[slug]] wikilink gate, roadmap pages as frozen records", 171),
+     "the dead [[slug]] wikilink gate, roadmap pages as frozen records, "
+     "a function-less call carrying params refused", 172),
     ("wiki_index", run_wiki_index,
      "INDEX.md rendering and the page-type constants: the server's "
      "render_index never listing a roadmap-item and counting them in one "
@@ -557,7 +560,9 @@ SUITES = [
      "front's two hosts pinned: every stdlib override in their front classes "
      "generated or declared with a reason; and the near-miss suggestion "
      "generated into, and called by, every server; and the unknown-params "
-     "refusal unit-tested and called by every host that carries it", 142),
+     "refusal unit-tested and called by every host that carries it; and the "
+     "missing-function refusal (a function-less call that carries params or "
+     "another argument) unit-tested and called by every dispatcher", 147),
     ("mcp_websocket", run_mcp_websocket,
      "the stdlib WebSocket client: exact-match handshake, every frame length "
      "form, the refusals a frame header earns, fragments, ping/pong, close, "
@@ -662,7 +667,7 @@ SUITES = [
      "fix rows (cache keyed on allow_private, 0700/0600 modes, printable URL "
      "and header echoes), one uv stdio row); "
      "every refusal and the hmac.compare_digest tag gate, the generator block "
-     "contract, and the AES-256-GCM decrypt floor", 846),
+     "contract, and the AES-256-GCM decrypt floor", 847),
     # TYPED, not None, although it is one-plus-one cases per server: here a
     # server appearing WITHOUT a declared row is the defect, so a count that
     # moves when the roster moves is the alarm working rather than noise.  That
@@ -741,7 +746,9 @@ SUITES = [
     ("forge_dispatch", run_forge_dispatch,
      "forge_call dispatch: `status` answers exactly what the empty call "
      "answers on all four of its paths, each with a control proving the "
-     "fixture took it, and is advertised wherever the function list is", 13),
+     "fixture took it, and is advertised wherever the function list is; a "
+     "function-less call carrying params is refused while an explicit "
+     "`status` keeps its params", 15),
     # TYPED: 5 rules x 9 hosts + 1 judged-keys + 5 control + 2 hygiene. A
     # host that learns to refuse an unknown parameter without a row here IS
     # the defect, so a count that moves when that roster moves is the alarm
@@ -770,7 +777,7 @@ SUITES = [
      "type-checked, and five bodies shaped from the old worst cases (four "
      "regexes and the Bing tree builder's end-tag scan) one KiB under "
      "SEARCH_MAX_BYTES parsed within a wall-time bound in a child", 22),
-    # TYPED: a fixed case table (A 4, B 9, C 11, D 19, E 7, F 15, G 14, H 2).
+    # TYPED: a fixed case table (A 5, B 9, C 11, D 19, E 7, F 15, G 14, H 2).
     ("mcp_search", run_mcp_search,
      "mcp-search in-process with stub sessions and no network: the dispatcher "
      "and its exact unknown-function line, params, aliases and the collision "
@@ -787,7 +794,7 @@ SUITES = [
      "with block and stop notices outside the cap, -32602 params, the "
      "grep.app schema check, pacing before the warm-up, the call deadline, "
      "a busy endpoint keeping results, _log_value at the log sites and the "
-     "run() catch-all answering -32603 live", 81),
+     "run() catch-all answering -32603 live", 82),
     ("webfetch_roots", run_webfetch_roots,
      "mcp-webfetch's two roots (R-0054): --cache-root names the cache "
      "directory itself, default $XDG_CACHE_HOME/web-fetch (absolute only) "
@@ -1063,7 +1070,7 @@ SUITES = [
      "token POST deadline, the stale-temp sweep and a trust store that ignores "
      "SSL_CERT_FILE, and the init subcommand: a client_secret json to the "
      "0600 config, installed type only, host table, symlink and size, no "
-     "overwrite without --force, no secret printed, no partial file)", 231),
+     "overwrite without --force, no secret printed, no partial file)", 232),
     # TYPED: a fixed case table, written RED first (every row but group S failed
     # on the missing server). Group S tests the stub hub itself.
     ("messagebox", run_messagebox,
@@ -1078,7 +1085,7 @@ SUITES = [
      "backoff and Retry-After, hostile hub payloads rejected without a spool "
      "write, spool hygiene and the second-server flock, bye on EOF and "
      "SIGTERM, the start-up sweep, the handler crash layers, and the stub "
-     "hub's own state machine", 166),
+     "hub's own state machine", 167),
     # TYPED: a fixed case table, written RED first (every row failed on the
     # missing hook). The hook is a stdlib script, not an MCP server, so no
     # fleet roster sees it.
@@ -1125,12 +1132,13 @@ SUITES = [
      "never looks complete), OpenAI-shaped refusals, bearer auth, "
      "structure-only logs, static rules, end-to-end through llm-router "
      "(sdcpp and rawllm routes) and across the two app kinds", 259),
-    # TYPED: a fixed case table (A 7, E 3), so a count that moves is the alarm.
+    # TYPED: a fixed case table (A 7, B 1, E 3), so a count that moves is the alarm.
     ("tshark_fields", run_tshark_fields,
      "mcp-tshark analyze's `fields` parameter, in-process with tshark "
      "stubbed: a JSON list and a comma-separated string build the same -e "
      "argv, a non-str / non-list value is a ValueError refusal and an error "
-     "reply, never an AttributeError", 10),
+     "reply, never an AttributeError; and a function-less call carrying "
+     "params is refused while the empty call stays the status", 11),
     # TYPED: a fixed case table (A 7, B 3, C 7, D 5, E 14, F 5, H 16, G 2), so
     # a count that moves is the alarm.
     ("fetch", run_fetch,

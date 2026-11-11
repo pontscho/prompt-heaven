@@ -326,3 +326,35 @@ max_depth is accepted by find_file, list_dir and search_for_pattern. It counts d
 multi-line matching is search_for_pattern multiline:true: the pattern runs over the whole file text with MULTILINE | DOTALL, through a third op of the regex worker child and an in-process twin, so the ReDoS guard and the total-budget blame logic cover it. A row is one non-empty match at its start line with each newline shown as the two characters backslash-n (a declared lossy flattening; backslashes are not doubled); a zero-length match is not a match.
 
 Both names are now in HANDLER_ACCEPTED_PARAMS, so the typo spellings maxdepth and multi_line are pointed at them, and tests/test_purity_file_ops.py groups U and V gate the semantics, the defaults and that pointer.
+
+## Addendum (2026-11-11): A call with params but no function is refused; only the empty call is the status
+
+Status: decided by the owner and implemented in the working tree on top of `67afa1c`, extending fleet-wide what `beb78b6` did for mcp-skill and mcp-sandbox. The live counts are in `tests/run.py:SUITES` and in the measured regions of [[generated-regions]].
+
+### The rule
+
+A tools/call with no top-level `function` used to be answered with the status banner (isError false) even when it carried `params` or another argument, so a hub model that sent `{"params": {"function": "load", ...}}` looped on a reply that looked like success. Now such a call is refused with `invalid_params`-style wording, flagged as an error in each host's own error shape; only a truly empty call keeps the unflagged banner. A second sentence names the nested mistake when `params.function` is a string ("inside params"). The smoke gate's empty-call control (isError false on every server) is unchanged.
+
+### A third block in the same source
+
+The sentence is the third block of `Scripts/_mcp_dispatch.py`, `_missing_function_refusal(arguments, params, names, envelope_keys=("function", "params"), status_params=())` `Scripts/_mcp_dispatch.py:_missing_function_refusal`. It is pure, reads only its arguments, and returns a sentence or an empty string, like `_unknown_params_refusal`; each host wraps it in its own error shape. It reads nothing of `_did_you_mean`, so each host adds it to the marker it already carries. Twenty servers host it, every dispatcher but mcp-proxy, which has no function layer ([[0027-the-proxy-relays-it-never-composes]]). The two sentences are mcp-skill's and mcp-sandbox's, word for word, so their L7 and F8 rows keep passing; both now call the block instead of carrying a hand copy.
+
+### Exemptions
+
+- **Short forms.** Twelve hosts also read `f` and `p`. They pass them in `envelope_keys`, so a call with only `p` counts as carrying params, and `f` and `p` are never reported as stray keys. A host that reads no short forms sees `p` as a stray argument and refuses it.
+- **Status-neutral params.** `status_params` lists the params keys a status call may legitimately carry. Decision: a params object holding ONLY such keys is still the banner. Every paging host passes `max_answer_chars` (the ceiling lives in params on every function, status included, `Scripts/_mcp_paging.py`); mcp-jenkins also passes its documented status probe `test` and `probe`. Anything else beside them is refused. The six hosts with no paging (skill, sandbox, messagebox, clangd, cuda, lua-lsp) pass nothing, so `max_answer_chars` alone is refused there, as it was before the rule.
+- **mcp-forge.** `status` is folded to the empty function. The check runs on the raw spelling and only when the function was really empty, so `{"function": "status", "params": {...}}` keeps answering the status as before.
+- **mcp-gdc and mcp-gd.** gdc dropped params on the banner path and gd's banner is raw text; both stay unflagged for the empty call.
+- **Tab hosts** (mcp-forge, mcp-webfetch) take the block re-indented; it is written one call per line with four-space indents for that reason.
+
+### Gates
+
+Group E of `generated_region` drives the pure function through a truth table (the empty call, params only, a stray key, the nested function, the short forms, `status_params`, the neutral keys) and group A requires every dispatcher but the proxy to carry the block and call it outside its region `tests/test_generated_region.py:group_missing_function_block`: 142 to 147. The smoke harness probes every server live, with the short-form, neutral-key and forge-status rows derived against each host's call site `Scripts/_mcp_smoke_test.py:missing_function_checks`. Ten per-server suites gained a row (gd, messagebox, search, forge dispatch, git, webfetch, wiki, inspect, tshark, purity). Each was run red against the previous servers first.
+
+### Declared limits, updated
+
+- **Supersedes** the earlier limit that a bare status call is not checked: a function-less call is now checked for carrying anything.
+- **The function type is not part of this check.** Several hosts call `.strip()` on `function` without a type test, so a non-string function may raise there. That line is not touched by this change and is left as it was.
+- **Hosts that parse params themselves** (mcp-lua-lsp passes its raw params) name the nested function only when params is already an object.
+- **The direct-tool path** on mcp-context7, mcp-lldb and mcp-gdc is still outside the dispatcher.
+- **mcp-gdc, mcp-context7 and the LSP servers have no dedicated suite row**; the smoke probe is their gate.

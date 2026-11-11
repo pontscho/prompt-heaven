@@ -920,6 +920,33 @@ def run(opts=None):
         # ============ H: offline contract + plumbing ============
         check(suite, drv, "H", "no-function-lists-allowlist", "", {}, spawns=0,
               must=["Allowed subcommands", "ls-remote", "hash-object"])
+        # A call with NO function that carries params (or p, or a stray key) is
+        # refused and spawns nothing; the empty call and a params of only the
+        # ceiling keep the allowlist listing.
+        before = len(drv.stub.calls)
+        problems = []
+        for what, args, want in (
+                ("params only", {"params": {"args": ["x"]}}, "top level"),
+                ("p only", {"p": {"args": ["x"]}}, "top level"),
+                ("stray key", {"other": 1}, "top level"),
+                ("nested", {"params": {"function": "log"}}, "inside params"),
+                ("ceiling + stray", {"params": {"max_answer_chars": 5, "args": ["x"]}},
+                 "top level")):
+            res = drv.mod.handle_git_call(args, H.REPO_ROOT)
+            if "error" not in res or want not in res["error"]:
+                problems.append("%s: %r" % (what, res))
+        for what, args in (("empty", {}), ("empty f + p", {"f": "", "p": {}}),
+                           ("ceiling only", {"params": {"max_answer_chars": 5}})):
+            res = drv.mod.handle_git_call(args, H.REPO_ROOT)
+            if "Allowed subcommands" not in (res.get("__raw_text__") or ""):
+                problems.append("%s: not the allowlist: %r" % (what, res))
+        if len(drv.stub.calls) != before:
+            problems.append("a refused or status call spawned git")
+        suite.record("H", "function-missing-refused", problems,
+                     detail=["params / p / stray key without a function: refused,",
+                             "nothing spawned; empty call and ceiling-only stay the listing"],
+                     brief="%s | function-missing-refused"
+                           % (H.FAIL if problems else H.PASS))
         check(suite, drv, "H", "unknown-function-refused", "push",
               {"remote": "origin"}, error="not on the read-only whitelist")
         check(suite, drv, "H", "branch-positional-refused", "branch",

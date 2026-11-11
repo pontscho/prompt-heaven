@@ -125,7 +125,7 @@ smoke probes `Scripts/_mcp_smoke_test.py:NEAR_MISS_PARAM`
 `Scripts/_mcp_smoke_test.py:DOCUMENTED_CALL` run against a token file that does
 not exist.
 
-A call with no function gets an unflagged status reply: the function list,
+A call with no function and nothing else (no non-empty `params` or `p` beyond `max_answer_chars`, no other key) gets an unflagged status reply; with params or another key but no top-level `function` it is `invalid_params` naming the cause, a function nested inside params called out as such (the generated `_missing_function_refusal`, [[0030-point-at-the-near-miss-never-resolve-it]]). The status reply: the function list,
 whether local downloads and uploads are enabled (yes or no, never a path) and the
 ceiling `Scripts/mcp-gd.py:_status_text`. A refusal is a tool result with
 `isError` and `{"error": {"code", "message"}}`, the message cleaned to one line

@@ -2532,7 +2532,7 @@ def _status_text(project_root: Optional[str]) -> str:
 
 
 # Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region (§8).
-# BEGIN GENERATED: _mcp_dispatch.py :: _did_you_mean
+# BEGIN GENERATED: _mcp_dispatch.py :: _did_you_mean, _missing_function_refusal
 def _did_you_mean(words, candidates, aliases=None):
     """Return " Did you mean 'X'?" for the closest real name, or "".
 
@@ -2574,7 +2574,47 @@ def _did_you_mean(words, candidates, aliases=None):
     if len(words) == 1:
         return " Did you mean '%s'?" % pairs[0][1]
     return " Did you mean " + ", ".join("'%s' for '%s'" % (name, word) for word, name in pairs) + "?"
-# END GENERATED: dbc5a3370235
+
+
+def _missing_function_refusal(arguments, params, names, envelope_keys=("function", "params"), status_params=()):
+    """Return the refusal for a call with NO function that carries more, or "".
+
+    A call whose top-level `function` is missing, empty or null is the status
+    request -- but only when it is TRULY empty. A model that sends
+    {"params": {"function": "load", ...}} or {"params": {...}} has not asked for
+    the status, and answering the banner (isError false) lets it loop on a reply
+    that looks like success, so the host refuses instead, in its own error
+    shape. This returns the sentence and nothing else, like
+    `_unknown_params_refusal`; it reads only its arguments.
+
+    `arguments` is the raw tools/call arguments, `params` the call's params
+    AFTER the host's own alias and JSON-string handling (a `p` short form or a
+    stringified object has already become the dict), and `names` the callable
+    functions, as a list or an already joined string, in the order the host
+    wants them printed. `envelope_keys` are the argument keys that are the
+    envelope, never stray: a host with the f / p short forms passes them too.
+    `status_params` are the params keys a STATUS call may legitimately carry --
+    max_answer_chars on every host, jenkins's documented test / probe -- and a
+    call whose params hold only those is still the status request.
+
+    An empty string means the call is the status request (nothing, or only
+    envelope keys with an empty or status-only params), so a host calls this
+    when its function is empty and refuses only on a non-empty answer. The two
+    sentences are the ones mcp-skill and mcp-sandbox first wrote: one for a
+    function sitting inside params, one for params or another key beside none.
+    """
+    if not isinstance(arguments, dict):
+        arguments = {}
+    stray = sorted(str(key) for key in arguments if key not in envelope_keys)
+    nested = isinstance(params, dict) and isinstance(params.get("function"), str)
+    carried = any(key not in status_params for key in params) if isinstance(params, dict) else bool(params)
+    if not (carried or stray):
+        return ""
+    listing = names if isinstance(names, str) else ", ".join(str(name) for name in names)
+    if nested:
+        return 'function is required at the top level, beside params; you passed it inside params. Call with {"function": "<name>", "params": {...}}. Functions: ' + listing + "."
+    return "function is required at the top level (" + listing + "); got params/arguments without it."
+# END GENERATED: cbccd98521e6
 
 
 def handle_inspect_call(arguments: dict, project_root: Optional[str]) -> dict:
@@ -2586,6 +2626,9 @@ def handle_inspect_call(arguments: dict, project_root: Optional[str]) -> dict:
         return {"error": str(exc)}
 
     if not function:
+        missing = _missing_function_refusal(arguments, params, sorted(HANDLERS), ("function", "params", "f", "p"), ("max_answer_chars",))
+        if missing:
+            return {"error": missing}
         return {"__raw_text__": _status_text(project_root)}
 
     canonical = ALIASES.get(function, function)
@@ -2712,7 +2755,7 @@ INSPECT_CALL_TOOL = {
     "inputSchema": {
         "type": "object",
         "properties": {
-            "function": {"type": "string", "description": "Inspection function (see description)."},
+            "function": {"type": "string", "description": "Inspection function (see description). REQUIRED at the top level, beside params, whenever anything else is sent (omit both function and params only for the status reply)."},
             "params":   {"type": "object", "description": "Function parameters."},
         },
     },
