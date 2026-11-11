@@ -2120,6 +2120,25 @@ def _doc_block(skill: str, item: dict) -> Tuple[Optional[dict], Optional[str]]:
     return {"type": "resource", "resource": resource}, None
 
 
+# The most encoded characters worth decoding for display: the base64 of
+# _RUN_ANSWER_MAX_CHARS bytes (a UTF-8 text is never shorter in bytes than in
+# characters), so a decode never yields more text than the answer can hold.
+_B64_SHOW_MAX = ((_RUN_ANSWER_MAX_CHARS + 2) // 3) * 4
+
+
+def _b64_text(content: str) -> Optional[str]:
+    """The text of a base64 out file the runner chose base64 for by cost
+    (dense JSON, quotes, control characters), or None -- invalid base64,
+    over _B64_SHOW_MAX encoded characters, or bytes that are not UTF-8 (a
+    binary) -- when only the metadata line is shown."""
+    if len(content) > _B64_SHOW_MAX:
+        return None
+    try:
+        return base64.b64decode(content, validate=True).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return None
+
+
 def _sanitize_run_result(res: dict, meta: Optional[dict] = None) -> dict:
     """The runner's raw result -> what the model reads (decision 7,
     Contract item 6), unframed (KD-10 reversed by user decision): a status
@@ -2129,8 +2148,9 @@ def _sanitize_run_result(res: dict, meta: Optional[dict] = None) -> dict:
     answer within _RUN_ANSWER_MAX_CHARS (M2), `(no output)` when nothing is
     left. A runner refusal passes its code (grammar-checked) under a fixed
     text; its message, when there is one, sanitized on the lines after it
-    (O2). Base64 out files are listed as metadata only, never shown in the
-    text; an out file with an allowlisted extension (.pdf, .typ, .md) is also
+    (O2). A base64 out file that strictly decodes to UTF-8 (text the runner
+    flipped to base64 by cost) is shown as text like a utf8 one; any other
+    base64 out file is listed as metadata only; an out file with an allowlisted extension (.pdf, .typ, .md) is also
     returned under `__resources__` as an EmbeddedResource block that
     McpServer._handle_tool_call appends after the text block.
     `meta` (skill, tier, file) is accepted for the callers; no line of the
@@ -2187,8 +2207,13 @@ def _sanitize_run_result(res: dict, meta: Optional[dict] = None) -> dict:
                     f"[out/{path} not emitted as a document: {reason}]")
         encoding = item.get("encoding")
         content = item.get("content")
+        decoded = (_b64_text(content)
+                   if encoding == "base64" and isinstance(content, str)
+                   else None)
         if encoding == "utf8" and isinstance(content, str):
             body = _web_clean(content, "\t\n")
+        elif decoded is not None:
+            body = _web_clean(decoded, "\t\n")
         else:
             size = len(content) if isinstance(content, str) else 0
             kind = "base64" if encoding == "base64" else "unknown"

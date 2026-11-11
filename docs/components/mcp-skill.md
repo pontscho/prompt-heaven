@@ -375,9 +375,13 @@ say `Scripts/mcp-skill.py:_sanitize_run_result`:
 - **`[stderr]`** on its own line and then stderr, only when stderr is not empty.
 - **`[out/<name>]`** and then the content, per output file, at most
   `Scripts/mcp-skill.py:_RUN_OUT_FILES_SHOWN` (64) of them, with a `[N more out
-  file(s) not shown]` line for the rest. A `base64` (or unknown-encoding) file is
-  one `encoding: <kind>, N encoded chars (content not shown)` line, never its
-  content in the text part (a `.pdf`, `.typ` or `.md` additionally travels as a
+  file(s) not shown]` line for the rest. A `base64` file that strictly decodes to
+  UTF-8 (the runner picks base64 for quote-heavy text by serialised cost) is
+  shown as the decoded text, cleaned like a `utf8` one, when its encoded length
+  is within the base64 of the answer ceiling (`_B64_SHOW_MAX`); any other
+  `base64` file (a binary, invalid base64, over that length) or an unknown
+  encoding is one `encoding: <kind>, N encoded chars (content not shown)` line,
+  never its base64 in the text part (a `.pdf`, `.typ` or `.md` additionally travels as a
   resource block, below).
 - **`(no output)`** when none of the above has anything to show
   `Scripts/mcp-skill.py:_render_sections`.

@@ -191,7 +191,11 @@ part says so; the text part never carries the base64. Written RED first.
      resources, M8 end to end through the proxy and the stub's `docs` mode,
      M9 a .md (any case) is a text/markdown text resource, M10 a bad .md not
      emitted and said so, M11 the runner's outFiles paths are relative to
-     out/ with no `out/` prefix (a live probe 2026-11-10).
+     out/ with no `out/` prefix (a live probe 2026-11-10), M12 a base64 out
+     file that is UTF-8 (the runner flips quote-heavy text to base64 by cost)
+     is shown as text like a utf8 one, M13 a binary or invalid base64 keeps
+     `content not shown`, M14 a base64 text over the base64 of the answer
+     ceiling is not decoded.
 
 Group N pins the optional run parameter `inputs` (ADR 0032, 2026-11-09
 inputs addendum): up to 8 {name, content, encoding} items staged into the
@@ -4056,6 +4060,81 @@ def _run_documents(suite, fx):
         return problems, []
     _guard(suite, GRP_M, "M11 runner-paths-are-out-relative",
            out_relative_paths)
+
+    def _out_body(item):
+        """The text part after the `[out/<path>]` line of one out file."""
+        text = _doc_text(_doc_wire([item]))
+        head = "[out/%s]\n" % item["path"]
+        at = text.find(head)
+        return None if at < 0 else text[at + len(head):]
+
+    def b64_text_shown():
+        """M12: the runner flips quote-heavy text (dense JSON) to base64 by
+        cost; a base64 out file that is UTF-8 is shown as text, exactly as
+        the utf8 branch shows it (a control char scrubbed the same way)."""
+        problems = []
+        dense = json.dumps({"k%d" % i: "v\"%d\\" % i for i in range(40)},
+                           separators=(",", ":")) + " " + chr(0xE9)
+        got = _out_body({"path": "d.json", "encoding": "base64",
+                         "content": _b64(dense.encode("utf-8"))})
+        if got is None or dense not in got or "not shown" in got:
+            problems.append("dense JSON not shown as text: %r"
+                            % (None if got is None else got[:120],))
+        ctrl = "a\x01b\x1bc\td\n" + chr(0xE9)
+        want = _out_body({"path": "c.txt", "encoding": "utf8",
+                          "content": ctrl})
+        got = _out_body({"path": "c.txt", "encoding": "base64",
+                         "content": _b64(ctrl.encode("utf-8"))})
+        if want is None or got != want or "\x01" in (got or ""):
+            problems.append("control char: base64 body %r, utf8 body %r"
+                            % (got, want))
+        return problems, []
+    _guard(suite, GRP_M, "M12 base64-utf8-out-file-shown-as-text",
+           b64_text_shown)
+
+    def b64_still_hidden():
+        """M13: a base64 out file that is not UTF-8 (binary) or not strict
+        base64 keeps the `content not shown` line."""
+        problems = []
+        binary = _b64(b"\x00\x01\xff\xfe\x80")
+        cases = (("binary", binary),
+                 ("invalid base64", "AA*A"),
+                 ("unpadded", "QQ"),
+                 ("with newline", "AAAA\nAAAA"))
+        for label, content in cases:
+            got = _out_body({"path": "x.bin", "encoding": "base64",
+                             "content": content})
+            want = ("encoding: base64, %d encoded chars (content not shown)"
+                    % len(content))
+            if got is None or want not in got:
+                problems.append("%s: body %r, want %r"
+                                % (label, got, want))
+        return problems, []
+    _guard(suite, GRP_M, "M13 base64-binary-or-invalid-stays-hidden",
+           b64_still_hidden)
+
+    def b64_oversize_not_decoded():
+        """M14: a base64 text over the base64 of the answer ceiling is not
+        decoded for display (the metadata line stays); one just under is."""
+        problems = []
+        cap = ((100000 + 2) // 3) * 4
+        big = _b64(b"a" * 105000)
+        got = _out_body({"path": "big.txt", "encoding": "base64",
+                         "content": big})
+        want = "encoding: base64, %d encoded chars (content not shown)" % len(big)
+        if got is None or want not in got or len(got) > 200:
+            problems.append("oversize decoded: body %r" % (got or "")[:120])
+        under = _b64(b"b" * 99999)
+        if len(under) > cap:
+            problems.append("test arithmetic: %d > %d" % (len(under), cap))
+        got = _out_body({"path": "ok.txt", "encoding": "base64",
+                         "content": under})
+        if got is None or "bbbb" not in got or "not shown" in got:
+            problems.append("under-cap text not shown: %r"
+                            % ((got or "")[:60],))
+        return problems, []
+    _guard(suite, GRP_M, "M14 base64-text-over-the-cap-not-decoded",
+           b64_oversize_not_decoded)
 
 
 # ---------------------------------------------------------------------------
