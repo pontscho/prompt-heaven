@@ -134,6 +134,10 @@ def run_jira_cli(opts):
     return run_python_suite("test_jira_cli", opts)
 
 
+def run_documents(opts):
+    return run_python_suite("test_documents", opts)
+
+
 def run_bitbucket_cli(opts):
     return run_python_suite("test_bitbucket_cli", opts)
 
@@ -513,6 +517,20 @@ SUITES = [
      "missing trigger or Git source, a half-created job reported by name, a "
      "failed config POST, a cross-origin redirect, the size cap and hostile "
      "server text", 49),
+    # TYPED: a fixed case table -- one harness case per unittest method of the
+    # three documents_cases_* modules (typst 25, compare 20, measure 15)
+    # plus one hygiene case.  The one integration test (emit -> build ->
+    # compare) that needs the private liteparser checkout ($LITEPDF_DIR) and
+    # the Liberation TTFs is recorded as INFO when they are absent, so the
+    # count is the same on every host.
+    ("documents", run_documents,
+     "documents skill (PDF replica workflow, Typst flow) offline, without liteparser: replica.py "
+     "against a stub liteparser package (font map, exit codes, the subset-error "
+     "one-line mapping, same-stem outputs, the text check); compare.py "
+     "structure checks and exit codes; measure.py page analysis and the "
+     "rotation refusal; the no-fallback litepdf package lookup exiting 2 with "
+     "one stderr line naming the missing module; the integration emit, build "
+     "and compare INFO when liteparser is absent", 61),
     ("checkpoint", run_checkpoint,
      "checkpoint.py section reader + TOC writer: Start/End land on the block "
      "and nothing else, the numbers describe the file AFTER the region was "

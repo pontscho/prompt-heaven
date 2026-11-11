@@ -37,7 +37,7 @@ In a session the fleet appears as `p:minion-*` (Agent tool `subagent_type`) and 
 
 ### Skills with external prerequisites
 
-Everything in this plugin works straight after the symlink except one skill, which talks to a server and therefore needs credentials in the environment.
+Everything in this plugin works straight after the symlink except two skills: `p:jira` talks to a server and therefore needs credentials in the environment, and `p:documents` needs a private external project (liteparser) that is not shipped here.
 
 **`p:jira`** — a stdlib-only Jira CLI at `skills/jira/scripts/jira.py`, covering both Jira Cloud and Jira Server/Data Center from one code path.
 
@@ -58,6 +58,20 @@ export JIRA_TOKEN=<personal access token>
 **Run `whoami` first, always.** Jira sends no authentication challenge and permits anonymous access, so a rejected token frequently comes back as a *successful* response containing only public data rather than a 401. `whoami` reports the detected deployment, the resolved URL, the auth mode, and the account the server thinks you are — and fails loudly on the anonymous fallthrough that a plain read would silently hide.
 
 Pass the token through the environment, not the `--token` flag: a flag value lands in shell history and in the session transcript. There is deliberately no switch to disable TLS verification — for a private CA, point `SSL_CERT_FILE` at it.
+
+**`p:documents`** — processes PDFs and produces documents from the results; the first supported workflow is the PDF replica (other output formats are planned, not yet supported). Three stdlib-only scripts at `skills/documents/scripts/` (`measure.py`, `replica.py`, `compare.py`) measure a sample PDF and reproduce its page layout with new content: `replica.py emit` writes the sample as editable Typst-subset source and `replica.py build` compiles it back to a PDF (unverified against the real Typst; no `typst` binary is involved). They depend on the **liteparser** project, which is private and **not published or bundled** with this plugin: `measure.py` and `compare.py` need `litepdf.py` (to dump a PDF), `replica.py` needs the whole package (`litepdf.py`, `litepdf_write.py`, `litepdf_flow.py`, `litepdf_hyph.py`, `litepdf_typst.py`).
+
+| Setting | Required | Meaning |
+|---|---|---|
+| `--litepdf-dir DIR` or `LITEPDF_DIR` | yes | Directory of a liteparser checkout. The flag wins over the variable; there is no other lookup and no fallback. A checkout missing a required module exits 2 with one stderr line naming it. |
+| TrueType fonts | yes | The sample's fonts as `.ttf` files (`--font-dir` for `replica.py emit` and `build`). TrueType (glyf) only; a character without a glyph is refused. |
+
+```bash
+export LITEPDF_DIR=/path/to/liteparser
+
+S=~/.claude/skills/p/skills/documents/scripts
+python3 -I $S/replica.py emit sample.pdf --font-dir /path/to/truetype-fonts -o WORK/report.typ
+```
 
 ### Authoring rules that bite
 

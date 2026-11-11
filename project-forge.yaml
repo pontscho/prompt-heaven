@@ -189,6 +189,14 @@ test:
     filter:
       grep: 'SUITE|AGGREGATE|cases|ALL|FAIL|INFO|SKIP|DRIFT|declared|PROBLEM'
 
+  documents:
+    description: "The documents skill (ClaudeCode/skills/documents/scripts; first workflow: the PDF replica), offline and without the private liteparser project: replica.py (the litepdf_typst Typst-flow wrapper) against a stub liteparser package - font map, CLI exit codes, the TypstSubsetError one-line line:col mapping, same-stem outputs, the pdftotext word check; compare.py structure checks and CLI exit codes; measure.py page analysis and the rotation refusal; the no-fallback --litepdf-dir / $LITEPDF_DIR package lookup exiting 2 with one stderr line naming the missing module. The one integration test (emit, build, compare of a real page) needs $LITEPDF_DIR and the Liberation Serif TTFs and is recorded as INFO when they are absent."
+    requires: [syntax]
+    commands:
+      - python3 tests/run.py documents
+    filter:
+      grep: 'SUITE|AGGREGATE|cases|ALL|FAIL|INFO|SKIP|DRIFT|declared|PROBLEM'
+
   task_scripts:
     description: "The task-script family's explicit --yaml PATH (task-update, task-show-details, task-implementation-plan), each run as a child beside a decoy ./requirements.yaml that must stay untouched: position-independent --yaml / -y / --yaml=, an unreadable file as one stderr line and exit 1 with no fallback to the cwd, and an explicit --yaml without --doc skipping the default plan document with one warning instead of another feature's plan."
     requires: [syntax]
