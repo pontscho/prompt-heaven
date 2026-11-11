@@ -916,8 +916,11 @@ def _tool_definition(description: str, names) -> dict:
             "type": "object",
             "properties": {
                 "function": {"type": "string", "enum": list(FUNCTIONS),
-                             "description": "load, run, list or validate; omit "
-                             "for status."},
+                             "description": "load, run, list or validate; "
+                             "REQUIRED at the top level, beside params, "
+                             "whenever anything else is sent (omit both "
+                             "function and params only for the status "
+                             "reply)."},
                 "params": {
                     "type": "object",
                     "description": "Function parameters.",
@@ -2425,8 +2428,23 @@ def handle_skill_call(arguments: dict) -> dict:
     except ValueError as exc:
         return _tool_refusal("invalid_params", str(exc))
 
-    # Omitted / null / empty: an UNFLAGGED status reply (R4:M1).
+    # Omitted / null / empty: an UNFLAGGED status reply (R4:M1) -- but only
+    # for a truly empty call. A call carrying params or any other argument
+    # without a top-level function is a refusal naming the cause.
     if not function:
+        others = sorted(str(key) for key in arguments
+                        if key not in ("function", "params"))
+        if params or others:
+            names = ", ".join(FUNCTIONS)
+            if isinstance(params.get("function"), str):
+                return _tool_refusal("invalid_params", (
+                    "function is required at the top level, beside params; "
+                    "you passed it inside params. Call with "
+                    '{"function": "<name>", "params": {...}}. Functions: '
+                    + names + "."))
+            return _tool_refusal("invalid_params", (
+                "function is required at the top level (" + names
+                + "); got params/arguments without it."))
         return {"__raw_text__": _status_text()}
 
     handler = _HANDLERS.get(function)

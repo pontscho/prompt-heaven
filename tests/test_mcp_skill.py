@@ -3639,6 +3639,54 @@ def _run_schema(suite, fx):
         return problems, ["refusal     : %r" % (_err(res),)]
     _guard(suite, GRP_L, "L6 load-empty-name-is-missing", load_empty_name)
 
+    def function_missing_or_nested():
+        """L7: a call without a top-level `function` that carries anything
+        else is a refusal naming the cause (the nested-in-params mistake says
+        so); only a truly empty call gets the unflagged status banner."""
+        mod = _mod()
+        problems = []
+        handle = mod.handle_skill_call
+        res = handle({"params": {"name": "x"}})
+        err = _err(res)
+        if err is None or err[0] != "invalid_params" \
+                or "top level" not in err[1] or "\n" in err[1]:
+            problems.append("params without function: %r" % (res,))
+        res = handle({"params": {"function": "load", "name": "x"}})
+        err = _err(res)
+        if err is None or err[0] != "invalid_params" \
+                or "inside params" not in err[1] or "top level" not in err[1]:
+            problems.append("function nested in params: %r" % (res,))
+        res = handle({"params": json.dumps({"function": "load"})})
+        err = _err(res)
+        if err is None or "inside params" not in err[1]:
+            problems.append("function nested in a JSON-string params: %r"
+                            % (res,))
+        res = handle({"other": 1})
+        if _err(res) is None:
+            problems.append("an extra top-level key without function: %r"
+                            % (res,))
+        for args in ({}, {"function": ""}, {"function": None},
+                     {"params": {}}):
+            res = handle(dict(args))
+            if "__raw_text__" not in res or "error" in res:
+                problems.append("%r: want the unflagged status, got %r"
+                                % (args, res))
+        res = _call(mod, "list")
+        if _err(res) is not None:
+            problems.append("a valid top-level function changed: %r"
+                            % (_err(res),))
+        schema = mod._tool_definition("", ())["inputSchema"]
+        fdesc = schema["properties"]["function"].get("description", "")
+        if "REQUIRED" not in fdesc:
+            problems.append("function description does not say it is "
+                            "required: %r" % (fdesc,))
+        if "required" in schema:
+            problems.append("inputSchema has a required list (it would "
+                            "forbid the empty status call)")
+        return problems, []
+    _guard(suite, GRP_L, "L7 function-missing-or-nested-refused",
+           function_missing_or_nested)
+
 
 # ---------------------------------------------------------------------------
 # M: produced documents as EmbeddedResource content blocks

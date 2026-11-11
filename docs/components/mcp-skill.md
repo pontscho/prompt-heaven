@@ -140,7 +140,7 @@ own valid lines, the number ai-soul's per-tier approval budget is counted in
 A refusal is a tool result with `isError` and an `error.code` — `busy`,
 `sandbox_unavailable`, `invalid_params` or `internal` — never a JSON-RPC error
 `Scripts/mcp-skill.py:_tool_refusal` ([[0010-a-handler-failure-must-reach-iserror]]).
-A call with no `function` gets an unflagged status reply: the function list,
+A call with no `function` and nothing else (no non-empty `params`, no other key) gets an unflagged status reply; with `params` or another key but no top-level `function` it is `invalid_params` naming the cause (a `function` nested inside `params` is called out as such). The status reply: the function list,
 per-tier counts, the description's size against the ceiling and whether a
 runner is configured — counts only, never a path, a token or skill text
 `Scripts/mcp-skill.py:_status_text`. An unknown function is refused with a

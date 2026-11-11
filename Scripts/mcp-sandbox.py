@@ -5233,7 +5233,9 @@ SANDBOX_CALL_TOOL = {
             "function": {
                 "type": "string",
                 "enum": ["run_script", "capabilities"],
-                "description": "run_script or capabilities (see description).",
+                "description": "run_script or capabilities; REQUIRED at the "
+                "top level, beside params, whenever anything else is sent "
+                "(omit both function and params only for the status reply).",
             },
             "params": {"type": "object", "description": "Function parameters."},
         },
@@ -5328,6 +5330,21 @@ def handle_sandbox_call(arguments: dict) -> dict:
         return _tool_refusal("invalid_params", str(exc))
 
     if not function:
+        # Only a truly empty call gets the status banner; params or any other
+        # argument without a top-level function is a refusal naming the cause.
+        others = sorted(str(key) for key in arguments
+                        if key not in ("function", "params"))
+        if params or others:
+            names = ", ".join(sorted(HANDLERS))
+            if isinstance(params.get("function"), str):
+                return _tool_refusal("invalid_params", (
+                    "function is required at the top level, beside params; "
+                    "you passed it inside params. Call with "
+                    '{"function": "<name>", "params": {...}}. Functions: '
+                    + names + "."))
+            return _tool_refusal("invalid_params", (
+                "function is required at the top level (" + names
+                + "); got params/arguments without it."))
         return {"__raw_text__": _status_text()}
 
     entry = HANDLERS.get(function)

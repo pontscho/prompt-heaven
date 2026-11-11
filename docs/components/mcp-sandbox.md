@@ -527,7 +527,7 @@ never a JSON-RPC error `Scripts/mcp-sandbox.py:_tool_refusal`
 
 **A failing script is not an error**: a non-zero exit, a signal or a timeout is
 a normal result with `isError` false. A call with no `function` (absent, empty
-or blank) gets an unflagged status reply — the function list, each interpreter's
+or blank) and nothing else (no non-empty `params`, no other key) gets an unflagged status reply; with `params` or another key but no top-level `function` it is `invalid_params` naming the cause (a `function` nested inside `params` is called out as such). The status reply: the function list, each interpreter's
 plan state, whether the runner is degraded and how many runs are in flight,
 never a path or the read set `Scripts/mcp-sandbox.py:_status_text`; a `function`
 that is not a string is `invalid_params`. The tool's `params` may arrive as a

@@ -4267,6 +4267,13 @@ def _run_f(suite, fx):
             problems.append("function enum %r, want %r" % (enum, FUNCTIONS))
         if (props.get("params") or {}).get("type") != "object":
             problems.append("params is not typed object")
+        if "required" not in ((props.get("function") or {})
+                              .get("description") or "").lower():
+            problems.append("function description does not say it is "
+                            "required")
+        if "required" in schema:
+            problems.append("inputSchema has a required list (it would "
+                            "forbid the empty status call)")
         desc = tool.get("description") or ""
         for code in ERROR_CODES:
             if code not in desc:
@@ -4503,6 +4510,25 @@ def _run_f(suite, fx):
             for args in ({"function": 7}, {"function": ["run_script"]}):
                 res = _result(w.call(args))
                 _expect_refusal(res, "invalid_params", repr(args), problems)
+            # A call that carries params / other keys but no top-level
+            # function is a refusal naming the cause, not the banner.
+            res = _result(w.call({"params": {"name": "x"}}))
+            _expect_refusal(res, "invalid_params", "params without function",
+                            problems)
+            if "top level" not in _text(res):
+                problems.append("params without function: no 'top level' "
+                                "in %r" % (_text(res),))
+            res = _result(w.call({"params": {"function": "capabilities",
+                                             "name": "x"}}))
+            _expect_refusal(res, "invalid_params", "function nested",
+                            problems)
+            if "inside params" not in _text(res):
+                problems.append("function nested: no 'inside params' in %r"
+                                % (_text(res),))
+            res = _result(w.call({"function": "capabilities"}))
+            if res.get("isError"):
+                problems.append("a valid top-level function refused: %r"
+                                % (_text(res)[:120],))
         return problems, ["status      : %r" % (texts[0][:120]
                                                 if texts else "")]
     _guard(suite, GRP_F, "F8 omitted-function-status-unflagged",
