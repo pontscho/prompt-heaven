@@ -2059,6 +2059,26 @@ def _run_h(suite, fx):
         return problems, ()
     _guard(suite, GRP_H, "H4 malformed list/send/status answers are errors, not passed through", bad_tool_answers)
 
+    def unknown_has_no_stamp():
+        w = World(fx, "h8")
+        c = w.server()
+        w.other()
+        registered(w, c)
+        problems = []
+        w.hub.fault("status", "raw", count=1, body=json.dumps(
+            {"messages": [{"msgId": MSG_A, "state": "unknown", "updatedAt": None}]}).encode())
+        is_error, _t, d = c.call("status", {"msg_ids": [MSG_A]})
+        if is_error or d.get("messages") != [{"msgId": MSG_A, "state": "unknown", "updatedAt": None}]:
+            problems.append("unknown with updatedAt null refused or altered: %r" % (d,))
+        for state in ("read", "queued", "expired"):
+            w.hub.fault("status", "raw", count=1, body=json.dumps(
+                {"messages": [{"msgId": MSG_A, "state": state, "updatedAt": None}]}).encode())
+            is_error, _t, d = c.call("status", {"msg_ids": [MSG_A]})
+            if is_error is not True or _err_code(d) != "hub_error":
+                problems.append("%s with updatedAt null accepted: %r" % (state, d))
+        return problems, ()
+    _guard(suite, GRP_H, "H8 an unknown status row may carry updatedAt null; every other state may not", unknown_has_no_stamp)
+
 
 # ---------------------------------------------------------------------------
 # I. spool hygiene

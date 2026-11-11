@@ -1078,7 +1078,7 @@ SUITES = [
      "backoff and Retry-After, hostile hub payloads rejected without a spool "
      "write, spool hygiene and the second-server flock, bye on EOF and "
      "SIGTERM, the start-up sweep, the handler crash layers, and the stub "
-     "hub's own state machine", 165),
+     "hub's own state machine", 166),
     # TYPED: a fixed case table, written RED first (every row failed on the
     # missing hook). The hook is a stdlib script, not an MCP server, so no
     # fleet roster sees it.

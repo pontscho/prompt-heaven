@@ -1705,7 +1705,10 @@ def fn_status(params: dict) -> dict:
         if not (isinstance(item, dict) and isinstance(item.get("msgId"), str)
                 and _MSG_ID_RE.match(item["msgId"])
                 and item.get("state") in _STATUS_STATES
-                and _valid_stamp(item.get("updatedAt"))):
+                and (_valid_stamp(item.get("updatedAt"))
+                     # an id this session never sent: the hub has no stamp for it
+                     or (item.get("state") == "unknown" and "updatedAt" in item
+                         and item["updatedAt"] is None))):
             raise ToolError("hub_error", "the hub answered a malformed status result")
         rows.append({"msgId": item["msgId"], "state": item["state"],
                      "updatedAt": item["updatedAt"]})
