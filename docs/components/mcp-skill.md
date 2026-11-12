@@ -478,7 +478,7 @@ limits act as a backstop and never as the binding limit for an approved skill:
 
 - a skill file name matches `^(refs|scripts)/[a-z0-9][a-z0-9._-]{0,63}$`;
 - at most 16 files and 262144 bytes per skill version, and a SKILL.md body of at
-  most 32768 bytes;
+  most 65536 bytes (raised from 32768 by ai-soul commit 78203d4, 2026-11-12);
 - base64 content only under `refs/`;
 - the publisher creates files with `O_EXCL|O_NOFOLLOW`;
 - as of ai-soul security round S28, approval refuses any text containing a code
