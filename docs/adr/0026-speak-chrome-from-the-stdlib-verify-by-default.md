@@ -799,3 +799,11 @@ What the trade buys: one transport, one request pattern per endpoint, and no sec
 ### Follow-up
 
 The roadmap follow-up is certificate verification on the Chrome path for the search endpoints. The existing item is R-0047 (implement certificate verification in `_ChTls`). Its description still names the search scripts' one-shot fallback, which no longer exists; the search endpoints, which now have no verified path at all, are now its strongest case.
+
+## Addendum (2026-11-12): the only-DDG-POSTs premise of the 307/308 rule no longer holds (R-0114, e168e3b)
+
+Redirect hygiene above keeps the canonical client's re-send of a POST body on a cross-origin 307/308 for fidelity, on the stated premise that only the DDG script POSTs, and only to DuckDuckGo. Since `e168e3b` that premise is false: `Scripts/mcp-webfetch.py` sends model-authored POSTs to any host the caller names.
+
+The canonical behaviour is unchanged and still right for the search scripts. webfetch does not inherit it: its host-side `_HopGuard` refuses a hop to another host:port while the body is still being sent, learning the redirect status from the client's `session: redirect hop=N status=S` log line, and failing closed when the status is unknown. The decision, the coupling and its pinning test row are recorded in [[0037-a-session-is-an-explicit-host-set]].
+
+A future canonical change to that log line, or to the 307/308 rule itself, now has a second consumer to re-check.

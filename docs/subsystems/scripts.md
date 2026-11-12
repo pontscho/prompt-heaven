@@ -28,6 +28,7 @@ links:
   - generated-regions
   - spec-ddg
   - chrome-profile-refresh
+  - 0037-a-session-is-an-explicit-host-set
   - 0001-purity-server-unification
   - 0004-never-pin-a-browser-impersonation-version
   - 0007-a-path-spelled-deny-protects-the-spelling
@@ -230,7 +231,7 @@ loop became thirteen in the first place.
 | `Scripts/mcp-context7.py` | mcp-context7 | Context7 documentation lookup |
 | `Scripts/mcp-wiki.py` | mcp-wiki | Wiki freshness / reindex / search / page reads over `docs/` |
 | `Scripts/mcp-inspect.py` | mcp-inspect | Read-only host/process/network inspection, file digests, syntax validation, markdown outline (`md_outline`) |
-| `Scripts/mcp-webfetch.py` | mcp-webfetch | URL fetching (verified TLS by default, Chrome emulation opt-in) with HTML→Markdown extraction, disk cache |
+| `Scripts/mcp-webfetch.py` | mcp-webfetch | URL fetching (GET/HEAD/POST; verified TLS by default, Chrome emulation opt-in) with HTML→Markdown extraction, disk cache, opt-in host-bound cookie-jar sessions |
 | `Scripts/mcp-jenkins.py` | mcp-jenkins | Jenkins CI: jobs, builds, console + stage logs, artifacts, queue, test reports |
 | `Scripts/mcp-postgres.py` | mcp-postgres | PostgreSQL over the native v3 wire protocol — stdlib only, no libpq |
 | `Scripts/mcp-gdc.py` | mcp-gdc | Chrome DevTools: navigation, DOM, network, screenshots, JS evaluation |
@@ -455,8 +456,10 @@ after. Its HTTP client is the stdlib one generated from `Scripts/_mcp_chrome.py`
 escalation: the default is the **verified** transport (certificates and host
 names checked, Chrome 154's headers over Python's own TLS, HTTP/1.1), and
 `profile="chrome"` opts into the Chrome 154 fingerprint, whose certificate is
-NOT verified `Scripts/mcp-webfetch.py:_create_session`. A 403/429/503 is retried
-on a fresh session over the **same** transport `Scripts/mcp-webfetch.py:RETRY_STATUSES`;
+NOT verified `Scripts/mcp-webfetch.py:_create_session`. A GET/HEAD answered
+403/429/503 is retried on a fresh session over the **same** transport
+`Scripts/mcp-webfetch.py:RETRY_STATUSES` (a POST or a session call is never
+retried; see POST and sessions, below);
 a likely bot block earns a one-line hint naming `profile=chrome` rather than a
 silent switch, and every answer's status line names its transport, fresh or
 cached `Scripts/mcp-webfetch.py:_transport_label`. The impersonation branch
@@ -615,6 +618,50 @@ project root, and a `save_to` into the cache directory — absolute or `../` —
 refused as outside the project root, before any fetch
 `tests/test_webfetch_roots.py:group_b`, plus the protected-path refusals above.
 The out-of-tree symlink, overwrite and non-2xx rules above are gated by no suite.
+
+### webfetch POST and sessions
+
+`fetch` also takes `method=POST` with a `body` -- a str sent as given or a dict
+of str to str sent urlencoded, capped on the encoded bytes and never echoed in a
+refusal `Scripts/mcp-webfetch.py:_encode_body` -- and a `cookies` dict sent as
+crumbs after the jar's own, dropped on a cross-origin hop like any caller header
+`Scripts/mcp-webfetch.py:_cookie_crumbs`. `session_open` returns the id of a
+session bound to an explicit list of exact host names; `fetch` with
+`session=<id>` then runs on that session's one `_ChSession`, so its cookie jar
+carries a multi-step login across calls, and `session_close` drops it
+`Scripts/mcp-webfetch.py:handle_session_open`, `Scripts/mcp-webfetch.py:handle_session_close`.
+The live count, the host-list length and the idle timeout are fixed constants,
+not caller-sized `Scripts/mcp-webfetch.py:SESSION_MAX_LIVE`; one call at a time
+runs on a session, a concurrent one refused as busy without waiting
+`Scripts/mcp-webfetch.py:_session_acquire`. The registry is the module's one
+mutable global besides the decoders' lazy state `Scripts/mcp-webfetch.py:McpServer`.
+
+The rules a model-driven POST needs and Chrome does not have are host-side only
+-- the canonical client already posts, keeps a jar and rewrites redirects, and
+nothing in `Scripts/_mcp_chrome.py` changed:
+
+- a hop outside the session's host set, a redirect included, is refused before
+  it is resolved, and a POST body is never re-sent to another host:port on a
+  307/308; the guard learns the redirect status from the canonical client's
+  `session: redirect hop=N status=S` log line and fails closed without it
+  `Scripts/mcp-webfetch.py:_HopGuard`;
+- a POST and a session call use the verified transport only (`profile=chrome`
+  refused, no https->http downgrade), never touch the cache and are never
+  retried, and a GET carrying credentials (`cookies`, a caller `Cookie`,
+  `Authorization` or `Proxy-Authorization`) neither reads, writes nor
+  revalidates the cache `Scripts/mcp-webfetch.py:handle_fetch`;
+- every Set-Cookie line of a fresh verified answer, on every hop, is copied off
+  the jar's `ingest` and listed in a fenced report block within a share of
+  `max_answer_chars` `Scripts/mcp-webfetch.py:_SetCookieTape`,
+  `Scripts/mcp-webfetch.py:_set_cookie_display`; a session report adds one line
+  naming the cookies the jar holds, where a name outside a markup-free character
+  set is counted, not echoed `Scripts/mcp-webfetch.py:_jar_line`. Values never
+  reach the log, and the cache still never stores a Set-Cookie.
+
+The decision, the alternatives rejected, the security review and the declared
+limits (a port- and scheme-agnostic host set, the session id as a bearer, no
+absolute lifetime cap) are [[0037-a-session-is-an-explicit-host-set]]. The rows
+live in the `mcp_chrome` suite ([[tests]]) `tests/test_mcp_chrome.py`.
 
 ### What `purity_call`'s ignore filter will and will not hide
 
