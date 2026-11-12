@@ -683,9 +683,12 @@ SUITES = [
      "the cache, the policy split, every transport label, cache admission "
      "and the S3 chain-honesty rows, the status reply, the security-review "
      "fix rows (cache keyed on allow_private, 0700/0600 modes, printable URL "
-     "and header echoes), one uv stdio row); "
+     "and header echoes), POST and session mode (R-0114: the body and its "
+     "cap, the session lifecycle, limits and idle clock, cookie continuity "
+     "and visible Set-Cookie, the host set, the 307 body rule, concurrency, "
+     "no secret in logs or errors), one uv stdio row); "
      "every refusal and the hmac.compare_digest tag gate, the generator block "
-     "contract, and the AES-256-GCM decrypt floor", 848),
+     "contract, and the AES-256-GCM decrypt floor", 883),
     # TYPED, not None, although it is one-plus-one cases per server: here a
     # server appearing WITHOUT a declared row is the defect, so a count that
     # moves when the roster moves is the alarm working rather than noise.  That

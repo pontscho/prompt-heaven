@@ -8496,6 +8496,699 @@ def wf_hardening_rows(suite, wf, root, vp):
     run_row(suite, GO, "webfetch-header-block-esc-and-backtick-fence-escaped", header_block, src + "; F22b")
 
 
+# --- O. hosts: mcp-webfetch's POST and session mode (R-0114) ----------------------
+
+# The secrets the planted-sentinel rows look for: none of them may reach a log line or an error string.
+WF_SECRET_COOKIE = "tok-9f3a7c41"
+WF_SECRET_PASSWORD = "hunter2-pw-77"
+WF_SECRET_CRUMB = "cookieparam-secret-31"
+WF_FORM_TYPE = "application/x-www-form-urlencoded;charset=UTF-8"
+WF_SLOW_S = 1.5
+
+
+class WfLoginPeer(WebfetchPeer):
+    """A WebfetchPeer with a login-shaped flow: POST /login -> 302 /home + Set-Cookie, /home answering 200 only with the cookie.
+
+    `answer` reads the request `_record` stored just before it (the row drives
+    one request at a time; /slow is path-only). `other_port` is the second
+    peer the cross-origin redirects point at.
+    """
+
+    other_port = None
+
+    def answer(self, path):
+        base = path.partition("?")[0]
+        req = self.requests[-1]
+        cookie = one(req, "cookie") or ""
+        html = [("content-type", "text/html; charset=utf-8")]
+        text = [("content-type", "text/plain")]
+        if base == "/login" and req["method"] == "POST":
+            return 302, [("location", "/home"), ("set-cookie", "sid=%s; Path=/; HttpOnly" % WF_SECRET_COOKIE)], b""
+        if base == "/home":
+            if "sid=%s" % WF_SECRET_COOKIE in cookie:
+                return 200, html, b"<html><body><p>welcome back</p></body></html>"
+            return 401, html, b"<html><body><p>denied</p></body></html>"
+        if base == "/echo":
+            return 200, text, b"echo method=%s len=%d ctype=%s cookie=%s body=%s" % (
+                req["method"].encode(), len(req["body"]), (one(req, "content-type") or "-").encode(), cookie.encode(), req["body"][:200])
+        if base == "/multi":
+            return 200, html + [("set-cookie", "a=1; Path=/"), ("set-cookie", "b=2; Path=/x")], b"<html><body><p>multi</p></body></html>"
+        if base == "/hostile":
+            names = ("_ga", "[x](https://evil.test)", "**IMPORTANT**", "a, b", "<img>", "ok-name")
+            return 200, html + [("set-cookie", "%s=1; Path=/" % n) for n in names], b"<html><body><p>hostile</p></body></html>"
+        if base == "/flood":
+            return 200, html + [("set-cookie", "f%d=%s; Path=/" % (i, "v" * 600)) for i in range(20)], b"<html><body><p>flood</p></body></html>"
+        if base == "/p307x":
+            return 307, [("location", "https://127.0.0.1:%d/landing" % self.other_port)], b""
+        if base == "/p302x":
+            return 302, [("location", "https://127.0.0.1:%d/landing" % self.other_port)], b""
+        if base == "/p307s":
+            return 307, [("location", "/echo")], b""
+        if base == "/out":
+            return 302, [("location", "https://localhost:%d/x" % self.other_port)], b""
+        if base == "/p503":
+            return 503, html, b"<html><body><p>busy</p></body></html>"
+        if base == "/slow":
+            time.sleep(WF_SLOW_S)
+            return 200, html, b"<html><body><p>slow done</p></body></html>"
+        return WebfetchPeer.answer(self, path)
+
+
+def wf_call(wf, root, function, params, news=None, swaps=(), trusted=True):
+    """handle_webfetch_call({function, params}) with _ch_session_new wrapped (kwargs recorded in `news`, the test-CA factory injected when `trusted`) and the retry jitter 0 s.
+
+    Session mode builds its session at session_open, so that call needs the
+    wrapper as much as fetch does.
+    """
+    original = wf._ch_session_new
+    seen = news if news is not None else []
+
+    def session_new(*args, **kw):
+        seen.append(dict(kw))
+        if trusted:
+            kw["ssl_context_factory"] = trusted_context
+        return original(*args, **kw)
+    with Swapped((wf, "_ch_session_new", session_new), (wf, "random", NoWait), *swaps):
+        return wf.handle_webfetch_call({"function": function, "params": dict(params)}, root, root)
+
+
+def wf_text(got):
+    return (got.get("__raw_text__") if isinstance(got, dict) else None) or ""
+
+
+def wf_lines(got, prefix):
+    return [ln for ln in wf_text(got).split("\n") if ln.startswith(prefix)]
+
+
+class WfOpen:
+    """A session for one block: session_open on enter (`sid` is None when it was refused, `got` is the reply), session_close on exit."""
+
+    def __init__(self, wf, root, hosts, news=None, **extra):
+        self.wf, self.root, self.hosts, self.news, self.extra = wf, root, hosts, news, extra
+        self.sid = None
+        self.got = None
+
+    def __enter__(self):
+        self.got = wf_call(self.wf, self.root, "session_open", dict({"hosts": self.hosts}, **self.extra), news=self.news)
+        match = re.search(r"^session: (\S+)$", wf_text(self.got), re.M)
+        self.sid = match.group(1) if match else None
+        return self
+
+    def __exit__(self, *_exc):
+        if self.sid:
+            wf_call(self.wf, self.root, "session_close", {"session": self.sid})
+        return False
+
+    def fetch(self, url, swaps=(), news=None, **params):
+        call = {"url": url, "session": self.sid, "allow_private": True, "output": "html"}
+        call.update(params)
+        return wf_call(self.wf, self.root, "fetch", call, news=news, swaps=swaps)
+
+
+def wf_post_rows(suite, wf, root, lp, lp2):
+    """POST on the verified default: the body, the cap, the refusals, no cache, no retry, and the 307/308 body rule."""
+    src = "R-0114 group O: POST in handle_fetch (Scripts/mcp-webfetch.py) over loopback, the verified default"
+    url = "https://127.0.0.1:%d" % lp.port
+    echo = url + "/echo"
+
+    def form():
+        news, loads, saves = [], [], []
+        mark = lp.mark()
+        got = wf_call(wf, root, "fetch", {"url": echo, "method": "post", "body": {"a": "1", "b": "x y&z"}, "allow_private": True, "output": "html"}, news=news,
+                      swaps=((wf, "_cache_load", recorder_of(loads, wf._cache_load)), (wf, "_cache_save", recorder_of(saves, wf._cache_save))))
+        seen, conns = lp.since(mark)
+        req = seen[0] if seen else {"method": None, "headers": [], "body": b""}
+        want = b"a=1&b=x+y%26z"
+        return (wf_report(got, echo, 200, WF_VERIFIED)
+                + problem_if(len(seen) != 1 or conns != 1 or req["method"] != "POST", "the peer saw %r" % [(q["method"], q["path"]) for q in seen])
+                + problem_if(req["body"] != want, "body %r, wanted %r" % (req["body"], want))
+                + problem_if(one(req, "content-type") != WF_FORM_TYPE or one(req, "content-length") != str(len(want)), "content-type %r content-length %r" % (one(req, "content-type"), one(req, "content-length")))
+                + problem_if("body=a=1&b=x+y%26z" not in wf_text(got), "the echo does not show the body: %r" % wf_text(got)[-160:])
+                + problem_if(loads or saves, "the cache was touched by a POST: %d load(s), %d save(s)" % (len(loads), len(saves)))
+                + problem_if(len(news) != 1 or news[0].get("transport") != "verified" or news[0].get("allow_downgrade") is not False, "session kwargs %r" % news)), ["POST with a dict body: urlencoded under the profile's form content-type, one request, no cache read or write, allow_downgrade False"]
+    run_row(suite, GO, "webfetch-post-dict-body-urlencoded-verified-no-cache", form, src)
+
+    def raw():
+        mark = lp.mark()
+        first = wf_call(wf, root, "fetch", {"url": echo, "method": "POST", "body": "{\"k\": 1}", "headers": {"Content-Type": "application/json"}, "allow_private": True, "output": "html"})
+        second = wf_call(wf, root, "fetch", {"url": echo, "method": "POST", "data": "plain=1", "allow_private": True, "output": "html"})
+        seen, _c = lp.since(mark)
+        got = [(one(q, "content-type"), q["body"]) for q in seen]
+        return (wf_report(first, echo, 200, WF_VERIFIED) + wf_report(second, echo, 200, WF_VERIFIED)
+                + problem_if(got != [("application/json", b"{\"k\": 1}"), (WF_FORM_TYPE, b"plain=1")], "(content-type, body) per request %r" % got)), ["a str body is sent as given; the caller's Content-Type wins, else the form type; `data` is the alias of `body`"]
+    run_row(suite, GO, "webfetch-post-raw-string-body-caller-content-type-and-data-alias", raw, src + "; PARAM_ALIASES")
+
+    def cap():
+        mark = lp.mark()
+        edge = wf_call(wf, root, "fetch", {"url": echo, "method": "POST", "body": "k" * 65536, "allow_private": True, "output": "html"})
+        over = wf_call(wf, root, "fetch", {"url": echo, "method": "POST", "body": "k" * 65537, "allow_private": True, "output": "html"})
+        wide = wf_call(wf, root, "fetch", {"url": echo, "method": "POST", "body": "é" * 40000, "allow_private": True, "output": "html"})
+        dct = wf_call(wf, root, "fetch", {"url": echo, "method": "POST", "body": {"k": "v" * 65537}, "allow_private": True, "output": "html"})
+        seen, _c = lp.since(mark)
+        errs = [wf_error(x) or "" for x in (over, wide, dct)]
+        return (wf_report(edge, echo, 200, WF_VERIFIED)
+                + problem_if(len(seen) != 1 or len(seen[0]["body"]) != 65536, "the peer saw %r" % [len(q["body"]) for q in seen])
+                + problem_if(any("65536" not in e or "kkkk" in e or "éé" in e for e in errs), "refusals %r" % [e[:100] for e in errs])), ["exactly 65536 bytes served; 65537 bytes, 40000 two-byte characters and a urlencoded dict over it refused naming the cap, nothing echoed, one request in all"]
+    run_row(suite, GO, "webfetch-post-body-cap-64-kib-in-bytes", cap, src)
+
+    def refused_without_post():
+        mark = lp.mark()
+        problems, detail = [], []
+        for method in (None, "GET", "HEAD", "post"):
+            params = {"url": echo, "body": "a=1", "allow_private": True}
+            if method:
+                params["method"] = method
+            got = wf_call(wf, root, "fetch", params)
+            err = wf_error(got) or ""
+            if method == "post":
+                problems += problem_if("error" in got, "method post with a body was refused: %s" % short(got))
+                continue
+            problems += problem_if("body" not in err or "POST" not in err, "%s: %s" % (method, short(got)))
+            detail.append("%s: %r" % (method, err[:70]))
+        return problems + problem_if(len(lp.since(mark)[0]) != 1, "the peer saw %d request(s), wanted the one POST" % len(lp.since(mark)[0])), ["a body without method POST (none, GET, HEAD) is refused naming POST: " + "; ".join(detail)]
+    run_row(suite, GO, "webfetch-post-body-on-get-head-or-default-method-refused", refused_without_post, src)
+
+    def body_types():
+        mark = lp.mark()
+        problems = []
+        for what, body in (("int", 5), ("bool", True), ("list", ["a"]), ("dict with an int value", {"a": 1}), ("dict with a null", {"a": None})):
+            got = wf_call(wf, root, "fetch", {"url": echo, "method": "POST", "body": body, "allow_private": True})
+            err = wf_error(got) or ""
+            problems += problem_if("body" not in err or err.startswith("Unknown params"), "%s: %s" % (what, short(got)))
+        return problems + problem_if(lp.since(mark)[0], "a request was sent for a refused body"), ["body must be a str or a dict of str to str: int, bool, list and non-str dict values are refused before any request"]
+    run_row(suite, GO, "webfetch-post-body-types-refused", body_types, src)
+
+    def chrome_refused():
+        news = []
+        got = wf_call(wf, root, "fetch", {"url": echo, "method": "POST", "body": "a=1", "profile": "chrome", "allow_private": True}, news=news)
+        err = wf_error(got) or ""
+        return (problem_if("profile=chrome" not in err or "POST" not in err, "error %s" % short(got))
+                + problem_if(news, "a session was built: %r" % news)), ["POST with profile=chrome refused naming both; no session built (R-0047: the Chrome path does not verify certificates)"]
+    run_row(suite, GO, "webfetch-post-profile-chrome-refused", chrome_refused, src + "; R-0047")
+
+    def other_methods():
+        got = wf_call(wf, root, "fetch", {"url": echo, "method": "PUT", "body": "a=1", "allow_private": True})
+        err = wf_error(got) or ""
+        return problem_if("PUT" not in err or "POST" not in err, "error %s" % short(got)), ["method PUT still refused, the message now lists POST: %r" % err[:80]]
+    run_row(suite, GO, "webfetch-post-other-methods-still-refused", other_methods, src)
+
+    def no_retry():
+        mark = lp.mark()
+        got = wf_call(wf, root, "fetch", {"url": url + "/p503", "method": "POST", "body": "a=1", "allow_private": True, "output": "html"})
+        seen, _c = lp.since(mark)
+        text = wf_text(got)
+        return (wf_report(got, url + "/p503", 503, WF_VERIFIED)
+                + problem_if(len(seen) != 1, "the peer saw %d request(s), wanted 1 (a POST is never retried)" % len(seen))
+                + problem_if(WF_HINT in text or "**retries**" in text, "the opt-in hint or a retries line is in the report")), ["POST answered 503: one request, no retries line, no chrome opt-in hint (the opt-in cannot carry a POST)"]
+    run_row(suite, GO, "webfetch-post-never-retried-no-opt-in-hint", no_retry, src)
+
+    def redirects():
+        m1, m2 = lp.mark(), lp2.mark()
+        cross = wf_call(wf, root, "fetch", {"url": url + "/p307x", "method": "POST", "body": {"pw": WF_SECRET_PASSWORD}, "allow_private": True, "output": "html"})
+        after_cross = lp2.since(m2)[0]
+        same = wf_call(wf, root, "fetch", {"url": url + "/p307s", "method": "POST", "body": "keep=1", "allow_private": True, "output": "html"})
+        seen, _c = lp.since(m1)
+        to_get = wf_call(wf, root, "fetch", {"url": url + "/p302x", "method": "POST", "body": "drop=1", "allow_private": True, "output": "html"})
+        landed = lp2.since(m2)[0]
+        err = wf_error(cross) or ""
+        return (problem_if("307" not in err or "re-send" not in err or "POST" not in err, "cross-origin 307: %s" % short(cross))
+                + problem_if(WF_SECRET_PASSWORD in err, "the refusal echoes the body")
+                + problem_if(after_cross, "the other origin saw %d request(s) after a refused 307" % len(after_cross))
+                + problem_if("body=keep=1" not in wf_text(same), "same-origin 307 did not re-send the body: %s" % short(same))
+                + problem_if([q["method"] for q in seen if q["path"] == "/echo"] != ["POST"], "same-origin 307 requests %r" % [(q["method"], q["path"]) for q in seen])
+                + wf_report(to_get, "https://127.0.0.1:%d/landing" % lp2.port, 200, WF_VERIFIED)
+                + problem_if([(q["method"], q["body"]) for q in landed] != [("GET", b"")], "302 after POST reached the other origin as %r" % [(q["method"], q["body"]) for q in landed])), ["cross-origin 307 refused before any request to the new origin (the canonical client would re-send the body); same-origin 307 re-sends; a 302 becomes a bodiless GET and may leave the origin"]
+    run_row(suite, GO, "webfetch-post-307-cross-origin-body-never-resent", redirects, src + "; ADR 0026 redirect hygiene")
+
+
+def wf_session_rows(suite, wf, root, lp, lp2, dp):
+    """session_open / session_close and fetch's `session`: lifecycle, limits, TTL, jar, host set, 307, concurrency, logs."""
+    src = "R-0114 group O: session mode in Scripts/mcp-webfetch.py over loopback, the verified default"
+    url = "https://127.0.0.1:%d" % lp.port
+    echo = url + "/echo"
+    already = "unknown or expired"
+
+    def lifecycle():
+        mark = lp.mark()
+        with WfOpen(wf, root, ["127.0.0.1", "127.0.0.1", "LOCALHOST"]) as s:
+            sid, text = s.sid, wf_text(s.got)
+            live = wf._sessions_live()
+            status = wf_text(wf.handle_webfetch_call({}, root, root))
+            closed = wf_call(wf, root, "session_close", {"session": sid})
+            again = wf_call(wf, root, "session_close", {"session": sid})
+            after = s.fetch(echo)
+            gone = wf._sessions_live()
+        return (problem_if(not sid or len(sid) < 32 or not re.fullmatch(r"[A-Za-z0-9_-]+", sid), "session id %r" % sid)
+                + problem_if("hosts: 127.0.0.1, localhost" not in text.split("\n"), "hosts line missing or not sorted, lowercased and de-duplicated: %r" % text[:240])
+                + problem_if("idle_timeout: 600" not in text, "the effective idle timeout is not stated: %r" % text[:240])
+                + problem_if(live != 1 or "Sessions: 1 live" not in status, "live count %r, status %r" % (live, [ln for ln in status.split("\n") if "ession" in ln]))
+                + problem_if("error" in closed, "session_close: %s" % short(closed))
+                + problem_if(already not in (wf_error(again) or "") or already not in (wf_error(after) or ""), "close again / fetch after close: %s / %s" % (short(again), short(after)))
+                + problem_if(sid in (wf_error(again) or "") + (wf_error(after) or ""), "a refusal echoes the id")
+                + problem_if(gone != 0 or lp.since(mark)[0], "live %r after close, %d request(s) sent" % (gone, len(lp.since(mark)[0])))), ["session_open: an opaque urlsafe id, the hosts sorted lowercased unique, the effective idle timeout; session_close drops it; a second close and a fetch after it are the unknown-or-expired refusal and send nothing"]
+    run_row(suite, GO, "webfetch-session-open-close-lifecycle", lifecycle, src)
+
+    def open_validation():
+        many = ["h%d.example" % i for i in range(9)]
+        table = [({}, "hosts"), ({"hosts": []}, "hosts"), ({"hosts": "127.0.0.1"}, "list"), ({"hosts": many}, "at most 8"),
+                 ({"hosts": ["https://x.example/"]}, "host name"), ({"hosts": [""]}, "host name"), ({"hosts": [5]}, "host name"),
+                 ({"hosts": ["a b"]}, "host name"), ({"hosts": ["x.example:8443"]}, "host name"),
+                 ({"hosts": ["127.0.0.1"], "idle_timeout": 0}, "idle_timeout"), ({"hosts": ["127.0.0.1"], "idle_timeout": 601}, "idle_timeout"),
+                 ({"hosts": ["127.0.0.1"], "idle_timeout": "x"}, "idle_timeout"), ({"hosts": ["127.0.0.1"], "idle_timeout": True}, "idle_timeout"),
+                 ({"hosts": ["127.0.0.1"], "url": "https://x.example/"}, "Unknown params for 'session_open'")]
+        problems = []
+        for params, want in table:
+            got = wf_call(wf, root, "session_open", params)
+            problems += problem_if(want not in (wf_error(got) or ""), "%r: %s" % (params if len(str(params)) < 80 else "...", short(got)))
+        problems += problem_if(wf._sessions_live() != 0, "a refused open left %d session(s) live" % wf._sessions_live())
+        with WfOpen(wf, root, many[:8], idle_timeout=30) as s:
+            text = wf_text(s.got)
+            problems += problem_if(not s.sid or "idle_timeout: 30" not in text, "8 hosts / idle_timeout=30: %s" % short(s.got))
+        return problems, ["hosts missing, empty, not a list, over 8, URL-shaped, empty, non-str, with a space or a port; idle_timeout 0, 601, a string, a bool; an unknown key: each refused and nothing live; 8 hosts and idle_timeout=30 accepted"]
+    run_row(suite, GO, "webfetch-session-open-validation", open_validation, src)
+
+    def max_live():
+        opened, problems = [], []
+        try:
+            for _i in range(4):
+                s = WfOpen(wf, root, ["127.0.0.1"]).__enter__()
+                opened.append(s)
+            fifth = wf_call(wf, root, "session_open", {"hosts": ["127.0.0.1"]})
+            problems += problem_if(any(not s.sid for s in opened), "one of the first four opens failed")
+            problems += problem_if("4" not in (wf_error(fifth) or "") or "session" not in (wf_error(fifth) or ""), "5th open: %s" % short(fifth))
+            problems += problem_if(wf._sessions_live() != 4, "live %r" % wf._sessions_live())
+            opened[0].__exit__(None, None, None)
+            again = WfOpen(wf, root, ["127.0.0.1"]).__enter__()
+            opened.append(again)
+            problems += problem_if(not again.sid, "no slot after a close: %s" % short(again.got))
+        finally:
+            for s in opened:
+                s.__exit__(None, None, None)
+        return problems + problem_if(wf._sessions_live() != 0, "left %d live" % wf._sessions_live()), ["four live sessions; the fifth open refused naming the limit; a close frees a slot"]
+    run_row(suite, GO, "webfetch-session-at-most-four-live", max_live, src)
+
+    def ttl():
+        now = [1000.0]
+        problems = []
+        with Swapped((wf, "_session_clock", lambda: now[0])):
+            with WfOpen(wf, root, ["127.0.0.1"]) as s:
+                now[0] += 590
+                a = s.fetch(echo)
+                now[0] += 590
+                b = s.fetch(echo)
+                now[0] += 601
+                c = s.fetch(echo)
+                problems += wf_report(a, echo, 200, WF_VERIFIED) + wf_report(b, echo, 200, WF_VERIFIED)
+                problems += problem_if(already not in (wf_error(c) or ""), "after 601 idle seconds: %s" % short(c))
+                problems += problem_if(wf._sessions_live() != 0, "the expired session is still counted live")
+            with WfOpen(wf, root, ["127.0.0.1"], idle_timeout=30) as s:
+                now[0] += 29
+                d = s.fetch(echo)
+                now[0] += 31
+                e = s.fetch(echo)
+                problems += wf_report(d, echo, 200, WF_VERIFIED) + problem_if(already not in (wf_error(e) or ""), "idle_timeout=30, 31 s idle: %s" % short(e))
+            full = [WfOpen(wf, root, ["127.0.0.1"], idle_timeout=30).__enter__() for _i in range(4)]
+            now[0] += 31
+            fresh = WfOpen(wf, root, ["127.0.0.1"]).__enter__()
+            problems += problem_if(not fresh.sid or wf._sessions_live() != 1, "open over four expired sessions: %s, live %r" % (short(fresh.got), wf._sessions_live()))
+            for s in full + [fresh]:
+                s.__exit__(None, None, None)
+        return problems + problem_if(wf._sessions_live() != 0, "left %d live" % wf._sessions_live()), ["the idle clock is refreshed by every use (590 s + 590 s ok, 601 s idle expired); idle_timeout=30 honoured; four expired sessions are reaped by the next open"]
+    run_row(suite, GO, "webfetch-session-idle-timeout-refreshed-by-use-reaped-on-open", ttl, src)
+
+    def login():
+        mark = lp.mark()
+        with WfOpen(wf, root, ["127.0.0.1"]) as s:
+            first = s.fetch(url + "/login", method="POST", body={"user": "u", "pass": WF_SECRET_PASSWORD})
+            seen, _c = lp.since(mark)
+            second = s.fetch(url + "/home")
+            third = wf_call(wf, root, "fetch", {"url": url + "/home", "allow_private": True, "output": "html"})
+        t1, t2 = wf_text(first), wf_text(second)
+        jar1, jar2 = wf_lines(first, "**session cookies**:"), wf_lines(second, "**session cookies**:")
+        want_set = "  set-cookie: sid=%s; Path=/; HttpOnly" % WF_SECRET_COOKIE
+        return (wf_report(first, url + "/home", 200, WF_VERIFIED) + wf_report(second, url + "/home", 200, WF_VERIFIED) + wf_report(third, url + "/home", 401, WF_VERIFIED)
+                + problem_if("welcome back" not in t1 or "welcome back" not in t2, "the session did not carry the cookie to /home")
+                + problem_if([(q["method"], q["path"]) for q in seen] != [("POST", "/login"), ("GET", "/home")], "hops %r" % [(q["method"], q["path"]) for q in seen])
+                + problem_if(len(seen) == 2 and (seen[0]["body"] != b"user=u&pass=" + WF_SECRET_PASSWORD.encode() or seen[1]["body"] != b""), "bodies %r" % [q["body"] for q in seen])
+                + problem_if(len(seen) == 2 and crumbs(seen[1]) != ["sid=" + WF_SECRET_COOKIE], "crumbs on the redirected GET %r" % crumbs(seen[1]))
+                + problem_if(want_set not in t1.split("\n"), "the Set-Cookie of the 302 hop is not in the report: %r" % t1[:600])
+                + problem_if("## Set-Cookie" not in t1 or "## Set-Cookie" in t2 or "set-cookie" in t2.lower(), "Set-Cookie section: first %r, second %r" % ("## Set-Cookie" in t1, "## Set-Cookie" in t2))
+                + problem_if(jar1 != ["**session cookies**: 1 held (sid)"] or jar2 != jar1, "jar lines %r / %r" % (jar1, jar2))
+                + problem_if(WF_SECRET_COOKIE in "".join(jar1 + jar2), "a cookie value is in the jar summary")), ["POST /login -> 302 + Set-Cookie -> GET /home with the cookie: 200 in one call; a later call on the same session still carries it; the same GET without a session is 401; the Set-Cookie line of the intermediate hop is in the report, the jar line holds names only"]
+    run_row(suite, GO, "webfetch-session-login-flow-cookie-continuity-and-visible-set-cookie", login, src)
+
+    def jar_per_session():
+        with WfOpen(wf, root, ["127.0.0.1"]) as a, WfOpen(wf, root, ["127.0.0.1"]) as b:
+            a.fetch(url + "/login", method="POST", body="u=1")
+            in_b = b.fetch(url + "/home")
+            in_a = a.fetch(url + "/home")
+            jar_b = wf_lines(in_b, "**session cookies**:")
+        return (wf_report(in_b, url + "/home", 401, WF_VERIFIED) + wf_report(in_a, url + "/home", 200, WF_VERIFIED)
+                + problem_if(jar_b != ["**session cookies**: none held"], "the other session's jar line %r" % jar_b)), ["two sessions: the cookie set in A is neither sent in B nor counted in B's jar"]
+    run_row(suite, GO, "webfetch-session-jar-is-per-session", jar_per_session, src)
+
+    def cookies_param():
+        problems = []
+        with WfOpen(wf, root, ["127.0.0.1"]) as s:
+            s.fetch(url + "/login", method="POST", body="u=1")
+            m1, m2 = lp.mark(), lp2.mark()
+            a = s.fetch(echo, cookies={"a": "1", "b": "2"})
+            b = s.fetch(url + "/p302x", cookies={"a": "1"})
+            seen, other = lp.since(m1)[0], lp2.since(m2)[0]
+            problems += wf_report(a, echo, 200, WF_VERIFIED)
+            problems += problem_if(crumbs(seen[0]) != ["sid=" + WF_SECRET_COOKIE, "a=1", "b=2"], "session call crumbs %r" % crumbs(seen[0]))
+            problems += problem_if(len(other) != 1 or "a=1" in crumbs(other[0]), "the other origin saw %r" % [crumbs(q) for q in other])
+            problems += wf_report(b, "https://127.0.0.1:%d/landing" % lp2.port, 200, WF_VERIFIED)
+        mark = lp.mark()
+        wf_call(wf, root, "fetch", {"url": echo, "cookies": {"a": "1"}, "headers": {"Cookie": "x=9"}, "allow_private": True, "cache_ttl": 0})
+        wf_call(wf, root, "fetch", {"url": echo, "cookies": {"a": "1"}, "allow_private": True, "cache_ttl": 0})
+        plain = [crumbs(q) for q in lp.since(mark)[0]]
+        return problems + problem_if(plain != [["x=9", "a=1"], ["a=1"]], "plain-call crumbs %r" % plain), ["the cookies param is sent as Cookie crumbs after the jar's, merged after a caller Cookie header, dropped on a cross-origin hop; usable without a session too"]
+    run_row(suite, GO, "webfetch-cookies-param-sent-after-the-jar-and-dropped-cross-origin", cookies_param, src + "; FR-16")
+
+    def cookies_invalid():
+        mark = lp.mark()
+        problems = []
+        for what, value in (("space in a name", {"a b": "1"}), ("semicolon in a value", {"a": "x;y"}), ("space in a value", {"a": "x y"}), ("comma", {"a": "x,y"}),
+                            ("CRLF", {"a": "1\r\nX-Evil: 1"}), ("empty name", {"": "1"}), ("int value", {"a": 1}), ("str", "a=1"), ("list", ["a"])):
+            got = wf_call(wf, root, "fetch", {"url": echo, "cookies": value, "allow_private": True, "cache_ttl": 0})
+            err = wf_error(got) or ""
+            problems += problem_if("cookies" not in err or err.startswith("Unknown params") or "x;y" in err or "X-Evil" in err, "%s: %s" % (what, short(got)))
+        return problems + problem_if(lp.since(mark)[0], "a request was sent for refused cookies"), ["a cookies value that is not a dict of str to str, a name that is not a token and a value with ; , space, a quote or a control character are refused naming `cookies`, never echoing the value, before any request"]
+    run_row(suite, GO, "webfetch-cookies-param-validation", cookies_invalid, src)
+
+    def set_cookie_plain():
+        dp.plan["/sc"] = (200, [("content-type", "text/html; charset=utf-8"), ("set-cookie", "z=9; Path=/")], b"<html><body>chrome</body></html>")
+        multi = url + "/multi"
+        fresh = wf_call(wf, root, "fetch", {"url": multi, "allow_private": True, "output": "html"})
+        cached = wf_call(wf, root, "fetch", {"url": multi, "allow_private": True, "output": "html"})
+        entry = wf._cache_load(root, wf_key(wf, multi)) or {}
+        path = wf._cache_path(root, wf_key(wf, multi))
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                on_disk = fh.read().lower()
+        except OSError:
+            on_disk = ""
+        chrome = wf_call(wf, root, "fetch", {"url": "https://127.0.0.1:%d/sc" % dp.port, "profile": "chrome", "allow_private": True, "cache_ttl": 0, "output": "html"})
+        t1 = wf_text(fresh)
+        return (wf_report(fresh, multi, 200, WF_VERIFIED)
+                + problem_if("  set-cookie: a=1; Path=/" not in t1 or "  set-cookie: b=2; Path=/x" not in t1 or "## Set-Cookie (2" not in t1, "both Set-Cookie lines are not shown: %r" % t1[:500])
+                + problem_if(not entry or any(k.lower().startswith("set-cookie") for k in entry.get("headers", {})) or "set-cookie" in on_disk, "the cache entry holds a Set-Cookie: %r" % (sorted(entry.get("headers", {})),))
+                + problem_if("(cached)" not in wf_text(cached).split("\n")[0] or "set-cookie" in wf_text(cached).lower(), "the cached replay %r" % wf_text(cached)[:200])
+                + wf_report(chrome, "https://127.0.0.1:%d/sc" % dp.port, 200, WF_CHROME)
+                + problem_if("z=9" in wf_text(chrome), "a profile=chrome answer shows Set-Cookie")), ["a verified answer lists every Set-Cookie line of the chain; the cache entry and a cached replay carry none; the Chrome path keeps stripping them"]
+    run_row(suite, GO, "webfetch-set-cookie-shown-on-verified-never-cached-stripped-on-chrome", set_cookie_plain, src)
+
+    def host_set():
+        problems = []
+        with WfOpen(wf, root, ["127.0.0.1"]) as s:
+            m2 = lp2.mark()
+            outside = s.fetch("https://localhost:%d/x" % lp2.port)
+            m1 = lp.mark()
+            leaving = s.fetch(url + "/out")
+            seen = lp.since(m1)[0]
+            ok = s.fetch(echo)
+            problems += [p for e in (outside, leaving) for p in problem_if("localhost" not in (wf_error(e) or "") or "host set" not in (wf_error(e) or ""), "refusal %s" % short(e))]
+            problems += problem_if([q["path"] for q in seen] != ["/out"], "the first peer saw %r" % [q["path"] for q in seen])
+            problems += problem_if(lp2.since(m2)[0], "the host outside the set received %d request(s)" % len(lp2.since(m2)[0]))
+            problems += wf_report(ok, echo, 200, WF_VERIFIED)
+        with WfOpen(wf, root, ["example.com"]) as s2:
+            for other in ("https://www.example.com/", "https://example.com.evil.test/", "https://notexample.com/"):
+                got = s2.fetch(other)
+                problems += problem_if("host set" not in (wf_error(got) or ""), "%s: %s" % (other, short(got)))
+        guard = wf._HopGuard(frozenset(["example.com"]))
+        with Swapped((wf, "_vet_host", lambda _h, _p, _a: ["127.0.0.1"])):
+            upper = outcome(lambda: guard.policy("EXAMPLE.com", 443))
+            sub = outcome(lambda: guard.policy("www.example.com", 443))
+        problems += expect_value(upper, ["127.0.0.1"])
+        problems += problem_if(sub[0] != "exc" or type(sub[1]).__name__ != "ChromeClientError", "a subdomain was %s" % short(sub))
+        return problems, ["a first hop outside the set is refused before anything is resolved; a redirect to localhost leaves the set: the call fails naming the host, the target peer got no request, the session survives; subdomains and look-alikes do not count; the match is case-insensitive"]
+    run_row(suite, GO, "webfetch-session-host-set-exact-redirect-leaving-refused", host_set, src)
+
+    def chrome_with_session():
+        news = []
+        with WfOpen(wf, root, ["127.0.0.1"]) as s:
+            mark = lp.mark()
+            got = s.fetch(echo, profile="chrome", news=news)
+        err = wf_error(got) or ""
+        return (problem_if("profile=chrome" not in err or "session" not in err, "error %s" % short(got))
+                + problem_if(news or lp.since(mark)[0], "a session was built (%r) or a request was sent" % news)), ["profile=chrome together with a session is refused outright"]
+    run_row(suite, GO, "webfetch-session-profile-chrome-refused", chrome_with_session, src + "; R-0047")
+
+    def session_shape():
+        news, loads, saves = [], [], []
+        with WfOpen(wf, root, ["127.0.0.1"], news=news) as s:
+            m = lp.mark()
+            s.fetch(echo, swaps=((wf, "_cache_load", recorder_of(loads, wf._cache_load)), (wf, "_cache_save", recorder_of(saves, wf._cache_save))))
+            s.fetch(echo)
+            twice = lp.since(m)[0]
+            m = lp.mark()
+            busy = s.fetch(url + "/p503")
+            seen = lp.since(m)[0]
+        text = wf_text(busy)
+        return (problem_if(len(news) != 1 or news[0].get("transport") != "verified" or news[0].get("allow_downgrade") is not False, "session kwargs %r" % news)
+                + problem_if(len(twice) != 2, "two identical GETs sent %d request(s)" % len(twice))
+                + problem_if(loads or saves, "the cache was touched: %d load(s), %d save(s)" % (len(loads), len(saves)))
+                + wf_report(busy, url + "/p503", 503, WF_VERIFIED)
+                + problem_if(len(seen) != 1 or WF_HINT in text or "**retries**" in text, "503 in a session: %d request(s), hint/retries in the report: %r" % (len(seen), WF_HINT in text or "**retries**" in text))), ["a session is built on the verified transport with allow_downgrade False; its GETs neither read nor write the cache; a 503 is answered once, with no retry, no retries line and no chrome hint"]
+    run_row(suite, GO, "webfetch-session-no-cache-no-retry-no-hint-no-downgrade", session_shape, src)
+
+    def session_307():
+        with WfOpen(wf, root, ["127.0.0.1"]) as s:
+            m2 = lp2.mark()
+            cross = s.fetch(url + "/p307x", method="POST", body={"pw": WF_SECRET_PASSWORD})
+            after = lp2.since(m2)[0]
+            same = s.fetch(url + "/p307s", method="POST", body="keep=1")
+            to_get = s.fetch(url + "/p302x", method="POST", body="drop=1")
+            landed = lp2.since(m2)[0]
+        err = wf_error(cross) or ""
+        return (problem_if("307" not in err or "re-send" not in err or WF_SECRET_PASSWORD in err, "cross-origin 307 in a session: %s" % short(cross))
+                + problem_if(after, "the other origin saw %d request(s) after the refused 307" % len(after))
+                + problem_if("body=keep=1" not in wf_text(same), "same-origin 307: %s" % short(same))
+                + problem_if([(q["method"], q["body"]) for q in landed] != [("GET", b"")], "302 after POST reached the other origin as %r" % [(q["method"], q["body"]) for q in landed])
+                + problem_if("error" in to_get, "302 -> GET across origins inside the set: %s" % short(to_get))), ["session mode: a cross-origin 307 is refused before the new origin sees the body; same-origin 307 re-sends; a 302 turns into a bodiless GET"]
+    run_row(suite, GO, "webfetch-session-307-cross-origin-body-never-resent", session_307, src)
+
+    def concurrency():
+        problems = []
+        with WfOpen(wf, root, ["127.0.0.1"]) as s:
+            box = {}
+            mark = lp.mark()
+
+            def slow():
+                box["a"] = s.fetch(url + "/slow", timeout=15)
+            worker = threading.Thread(target=slow)
+            worker.start()
+            if not wait_for(lambda: any(q["path"] == "/slow" for q in lp.since(mark)[0])):
+                problems.append("the slow request never arrived")
+            t0 = time.monotonic()
+            busy = wf.handle_webfetch_call({"function": "fetch", "params": {"url": echo, "session": s.sid, "allow_private": True}}, root, root)
+            took = time.monotonic() - t0
+            closed = wf.handle_webfetch_call({"function": "session_close", "params": {"session": s.sid}}, root, root)
+            worker.join(20)
+            problems += problem_if(worker.is_alive(), "the slow call never finished")
+            problems += problem_if("busy" not in (wf_error(busy) or "") or "may still be finishing" not in (wf_error(busy) or "") or took > WF_SLOW_S * 0.6, "second concurrent call: %s after %.2f s" % (short(busy), took))
+            problems += problem_if("error" in closed, "closing a busy session: %s" % short(closed))
+            problems += problem_if("slow done" not in wf_text(box.get("a")), "the in-flight call after the close: %s" % short(box.get("a")))
+            problems += problem_if(wf._sessions_live() != 0, "the closed session is still live")
+        return problems, ["a second call on a session with a call in flight is refused as busy at once (no worker held); closing a busy session succeeds and the in-flight call still completes"]
+    run_row(suite, GO, "webfetch-session-concurrent-call-refused-close-while-busy", concurrency, src)
+
+    def lock_released():
+        def boom(*_a, **_kw):
+            raise RuntimeError("planted")
+        with WfOpen(wf, root, ["127.0.0.1"]) as s:
+            failed = s.fetch(echo, swaps=((wf, "_fetch_once", boom),))
+            invalid = s.fetch(echo, cookies={"a b": "1"})
+            fine = s.fetch(echo)
+        return (problem_if("error" not in failed or "busy" in (wf_error(failed) or ""), "planted failure: %s" % short(failed))
+                + problem_if("cookies" not in (wf_error(invalid) or ""), "invalid cookies: %s" % short(invalid))
+                + wf_report(fine, echo, 200, WF_VERIFIED)), ["a call that raised, and one refused after the lock was taken, leave the session usable: the next call is not busy"]
+    run_row(suite, GO, "webfetch-session-lock-released-after-a-failed-call", lock_released, src)
+
+    def unknown_id():
+        mark = lp.mark()
+        problems = []
+        for sid in ("nope", "x" * 500, "", 5, ["a"]):
+            got = wf_call(wf, root, "fetch", {"url": echo, "session": sid, "allow_private": True})
+            err = wf_error(got) or ""
+            problems += problem_if("session" not in err or len(err) > 400 or ("x" * 50) in err, "session=%r: %s" % (str(sid)[:10], short(got)))
+        closed = wf_call(wf, root, "session_close", {"session": "nope"})
+        missing = wf_call(wf, root, "session_close", {})
+        return (problems + problem_if(already not in (wf_error(closed) or ""), "close of an unknown id: %s" % short(closed))
+                + problem_if("session" not in (wf_error(missing) or ""), "close without an id: %s" % short(missing))
+                + problem_if(lp.since(mark)[0], "a request was sent")), ["an unknown, empty, non-string or oversized session id is a clear refusal that does not echo it; session_close likewise"]
+    run_row(suite, GO, "webfetch-session-unknown-id-refused", unknown_id, src)
+
+    def private_per_call():
+        calls = []
+        with WfOpen(wf, root, ["127.0.0.1"]) as s:
+            m = lp.mark()
+            without = s.fetch(echo, allow_private=False)
+            sent_without = lp.since(m)[0]
+            with_flag = s.fetch(echo, swaps=((wf, "_vet_host", counting_vet(wf, calls)),))
+        return (problem_if("allow_private" not in (wf_error(without) or "") or sent_without, "without allow_private: %s, %d request(s)" % (short(without), len(sent_without)))
+                + wf_report(with_flag, echo, 200, WF_VERIFIED)
+                + problem_if(calls != [("127.0.0.1", lp.port, True)], "_vet_host calls %r" % calls)), ["loopback in a session needs allow_private on that very call; with it the connect policy still runs for the hop"]
+    run_row(suite, GO, "webfetch-session-allow-private-is-per-call", private_per_call, src)
+
+    def no_secret_in_logs():
+        records = []
+
+        class Tap(logging.Handler):
+            def emit(self, record):
+                records.append(record.getMessage() + (" " + record.exc_text if record.exc_text else ""))
+        logger = logging.getLogger("mcp-webfetch")
+        old_level = logger.level
+        tap = Tap(level=logging.DEBUG)
+        logger.addHandler(tap)
+        logger.setLevel(logging.DEBUG)
+        errors = []
+        try:
+            with WfOpen(wf, root, ["127.0.0.1"]) as s:
+                sid = s.sid
+                s.fetch(url + "/login", method="POST", body={"user": "u", "pass": WF_SECRET_PASSWORD})
+                s.fetch(echo, cookies={"c": WF_SECRET_CRUMB})
+                for params in ({"url": "https://localhost:%d/x" % lp2.port, "method": "POST", "body": {"pass": WF_SECRET_PASSWORD}, "cookies": {"c": WF_SECRET_CRUMB}},
+                               {"url": url + "/p307x", "method": "POST", "body": {"pass": WF_SECRET_PASSWORD}},
+                               {"url": echo, "method": "PUT", "body": WF_SECRET_PASSWORD}):
+                    errors.append(wf_error(s.fetch(params.pop("url"), **params)) or "")
+            errors.append(wf_error(wf_call(wf, root, "fetch", {"url": "https://127.0.0.1:1/", "method": "POST", "body": WF_SECRET_PASSWORD, "cookies": {"c": WF_SECRET_CRUMB}, "allow_private": True, "profile": "chrome"})) or "")
+        finally:
+            logger.removeHandler(tap)
+            logger.setLevel(old_level)
+        secrets = (WF_SECRET_COOKIE, WF_SECRET_PASSWORD, WF_SECRET_CRUMB, sid or "<no id>")
+        leaked_logs = [(sec, line[:100]) for sec in secrets for line in records if sec in line]
+        leaked_errors = [(sec, err[:100]) for sec in secrets for err in errors if sec in err]
+        return (problem_if(len(records) < 5, "only %d debug record(s): the sentinel scan would be vacuous" % len(records))
+                + problem_if(leaked_logs, "a secret reached a log line: %r" % leaked_logs[:3])
+                + problem_if(leaked_errors, "a secret reached an error string: %r" % leaked_errors[:3])
+                + problem_if(len(errors) != 4 or not all(errors), "errors %r" % [e[:60] for e in errors])), ["planted sentinels (cookie value, form password, cookies param, session id) over a login flow and four refusals: none appears in any DEBUG log record (%d) or error string" % len(records)]
+    run_row(suite, GO, "webfetch-session-no-body-cookie-or-id-in-logs-or-errors", no_secret_in_logs, src + "; ADR 0011")
+
+    def flood():
+        with WfOpen(wf, root, ["127.0.0.1"]) as s:
+            wide = s.fetch(url + "/flood")
+            narrow = s.fetch(url + "/flood", max_answer_chars=1200)
+        shown = wf_lines(wide, "  set-cookie: ")
+        return (problem_if(len(wf_text(wide)) > 24000, "default ceiling: %d chars" % len(wf_text(wide)))
+                + problem_if(len(shown) > 12 or "more set-cookie" not in wf_text(wide), "%d line(s) shown, note present %r" % (len(shown), "more set-cookie" in wf_text(wide)))
+                + problem_if(len(wf_text(narrow)) > 1200, "max_answer_chars=1200: %d chars" % len(wf_text(narrow)))
+                + problem_if("**session cookies**: 20 held" not in wf_text(wide), "jar line %r" % wf_lines(wide, "**session cookies**:"))), ["20 Set-Cookie lines of 600+ characters: at most 12 shown and a note for the rest, the reply under the default ceiling and under max_answer_chars=1200"]
+    run_row(suite, GO, "webfetch-session-set-cookie-section-bounded-by-the-ceiling", flood, src + "; ADR 0013")
+
+    def surface():
+        status = wf_text(wf.handle_webfetch_call({}, root, root))
+        unknown = wf_error(wf.handle_webfetch_call({"function": "nope", "params": {}}, root, root)) or ""
+        desc = wf.WEBFETCH_CALL_TOOL["description"]
+        doc = wf.__doc__ or ""
+        return (problem_if("session_open" not in status or "session_close" not in status or "Sessions: 0 live" not in status, "status reply %r" % [ln for ln in status.split("\n") if "ession" in ln])
+                + problem_if("session_open" not in unknown or "session_close" not in unknown, "Available: %r" % unknown[:160])
+                + problem_if(sorted(set(["fetch", "session_open", "session_close"]) - set(wf.HANDLERS)), "HANDLERS lacks a session function")
+                + problem_if(not all(k in wf.ACCEPTED_FETCH_PARAMS for k in ("session", "body", "cookies")), "ACCEPTED_FETCH_PARAMS %r" % sorted(wf.ACCEPTED_FETCH_PARAMS))
+                + problem_if(wf.PARAM_ALIASES.get("data") != "body" or wf.PARAM_ALIASES.get("session_id") != "session", "aliases")
+                + problem_if("Fetch a URL (GET/HEAD)" in desc or "(GET/HEAD)" in desc, "the description still says GET/HEAD only")
+                + problem_if(not all(w in desc for w in ("POST", "session_open", "session_close", "cookies", "Set-Cookie", "host")), "the description lacks one of POST / session_open / session_close / cookies / Set-Cookie / host")
+                + problem_if("session_open" not in doc or "POST" not in doc, "the module docstring does not describe POST and session_open")), ["status reply names both session functions and the live count; the unknown-function list, HANDLERS, the accepted table, the aliases, the tool description and the module docstring all carry the new surface"]
+    run_row(suite, GO, "webfetch-session-surface-status-description-docstring-roster", surface, src + "; ADR 0030")
+
+    def hostile_cookie_names():
+        raw_bits = ("[x]", "evil.test", "IMPORTANT", "**I", "a, b", "<img>")
+        with WfOpen(wf, root, ["127.0.0.1"]) as s:
+            got = s.fetch(url + "/hostile")
+        jar = wf_lines(got, "**session cookies**:")
+        line = jar[0] if jar else ""
+        direct = wf._jar_line(["ok", "evil\n# heading", "[l](https://y)", "`code`", "~~s~~", "x" * 80, "evil\n# heading"])
+        long_ok = wf._jar_line(["n%02d" % i for i in range(30)])
+        return (wf_report(got, url + "/hostile", 200, WF_VERIFIED)
+                + problem_if(jar != ["**session cookies**: 6 held (_ga, ok-name, <non-token name> x4)"], "jar line %r" % jar)
+                + problem_if(any(bit in line for bit in raw_bits), "a raw hostile character run reached the jar line: %r" % line)
+                + problem_if("\n" in direct or "heading" in direct or "](" in direct or "`" in direct or "~" in direct, "direct _jar_line %r" % direct)
+                + problem_if(direct != "**session cookies**: 7 held (ok, " + "x" * 64 + ", <non-token name> x4)", "direct _jar_line %r" % direct)
+                + problem_if(not long_ok.endswith("n19, +10 more)"), "the 20-name cap is gone: %r" % long_ok[-40:])), ["a cookie name outside the safe charset (markdown link, emphasis, a comma, an HTML tag, a newline, a backtick) is never echoed in the unfenced jar line: it is counted as <non-token name>; safe names, the 64-char and 20-name caps are kept"]
+    run_row(suite, GO, "webfetch-session-jar-line-never-echoes-a-hostile-cookie-name", hostile_cookie_names, src + "; security review 20261112-1100 finding 1")
+
+    def authenticated_get_not_cached():
+        problems = []
+        details = []
+        cases = (("cookies param", {"cookies": {"a": "1"}}), ("Cookie header", {"headers": {"Cookie": "x=9"}}),
+                 ("Authorization header", {"headers": {"Authorization": "Bearer t"}}), ("lowercase authorization", {"headers": {"authorization": "Bearer t"}}))
+        for i, (what, extra) in enumerate(cases):
+            target = "%s/echo?auth=%d" % (url, i)
+            loads, saves = [], []
+            mark = lp.mark()
+            swaps = ((wf, "_cache_load", recorder_of(loads, wf._cache_load)), (wf, "_cache_save", recorder_of(saves, wf._cache_save)))
+            first = wf_call(wf, root, "fetch", dict({"url": target, "allow_private": True, "output": "html"}, **extra), swaps=swaps)
+            second = wf_call(wf, root, "fetch", dict({"url": target, "allow_private": True, "output": "html"}, **extra), swaps=swaps)
+            seen = lp.since(mark)[0]
+            problems += wf_report(first, target, 200, WF_VERIFIED) + wf_report(second, target, 200, WF_VERIFIED)
+            problems += problem_if(len(seen) != 2, "%s: two identical GETs sent %d request(s)" % (what, len(seen)))
+            problems += problem_if(loads or saves, "%s: the cache was touched: %d load(s), %d save(s)" % (what, len(loads), len(saves)))
+            problems += problem_if("(cached)" in wf_text(second).split("\n")[0], "%s: the second answer is a cache hit" % what)
+            details.append(what)
+        plain = "%s/echo?auth=plain" % url
+        mark = lp.mark()
+        wf_call(wf, root, "fetch", {"url": plain, "allow_private": True, "output": "html"})
+        again = wf_call(wf, root, "fetch", {"url": plain, "allow_private": True, "output": "html"})
+        problems += problem_if(len(lp.since(mark)[0]) != 1 or "(cached)" not in wf_text(again).split("\n")[0], "a plain GET stopped caching: %d request(s)" % len(lp.since(mark)[0]))
+        return problems, ["a GET carrying the cookies param, a Cookie header or an Authorization header (any case) neither reads nor writes the disk cache, so two identical calls hit the peer twice (" + ", ".join(details) + "); a plain GET still caches"]
+    run_row(suite, GO, "webfetch-get-with-cookies-or-credentials-bypasses-the-cache", authenticated_get_not_cached, src + "; security review 20261112-1100 finding 2")
+
+    def host_set_idna():
+        problems = []
+        for what, host in (("sharp s", "straße.example"), ("final sigma", "oς.example"), ("zero-width joiner", "a‍b.example"), ("zero-width non-joiner", "a‌b.example")):
+            got = wf_call(wf, root, "session_open", {"hosts": [host]})
+            problems += problem_if("host name" not in (wf_error(got) or ""), "%s: %s" % (what, short(got)))
+            opened = re.search(r"^session: (\S+)$", wf_text(got), re.M)
+            if opened:
+                wf_call(wf, root, "session_close", {"session": opened.group(1)})
+        problems += problem_if(wf._sessions_live() != 0, "a refused open left a session live")
+        with WfOpen(wf, root, ["bücher.example"]) as s:
+            text = wf_text(s.got)
+            problems += problem_if("hosts: xn--bcher-kva.example" not in text.split("\n"), "an IDNA2003-safe host: %r" % text[:200])
+        return problems, ["a hosts entry with U+00DF, U+03C2, U+200D or U+200C is refused as not a host name (the same _ch_idna_encode the URL side uses); a plain non-ASCII host is accepted as its A-label"]
+    run_row(suite, GO, "webfetch-session-hosts-refuse-idna-deviation-characters", host_set_idna, src + "; security review 20261112-1100 finding 3")
+
+    def close_clears_state():
+        with WfOpen(wf, root, ["127.0.0.1"]) as s:
+            s.fetch(url + "/login", method="POST", body="u=1")
+            sess = wf._SESSIONS.get(s.sid)
+            before = (len(sess.tape.lines), len(sess.session.cookies._cookies)) if sess and sess.tape else None
+            closed = wf_call(wf, root, "session_close", {"session": s.sid})
+        text = wf_text(closed)
+        after = (len(sess.tape.lines), len(sess.session.cookies._cookies)) if sess and sess.tape else None
+        return (problem_if(before is None or before[0] < 1 or before[1] < 1, "nothing was held before the close: %r" % (before,))
+                + problem_if(after != (0, 0), "after the close the tape and jar hold %r" % (after,))
+                + problem_if("closed" not in text or "dropped" not in text, "close reply %r" % text[:160])), ["session_close empties the session's Set-Cookie tape and its cookie jar (it held %s) and the reply says the jar is dropped" % (before,)]
+    run_row(suite, GO, "webfetch-session-close-empties-tape-and-jar", close_clears_state, src + "; security review 20261112-1100 finding 4")
+
+    def redirect_status_reaches_the_guard():
+        seen = []
+        original = wf._HopGuard.policy
+
+        def spy(self, host, port):
+            seen.append(self._redirect_status)
+            return original(self, host, port)
+        problems = []
+        # The swap comes first: the session binds guard.policy when it is opened.
+        with Swapped((wf._HopGuard, "policy", spy)):
+            with WfOpen(wf, root, ["127.0.0.1"]) as s:
+                s.fetch(url + "/p307s", method="POST", body="keep=1")
+                after_307 = list(seen)
+                del seen[:]
+                s.fetch(url + "/p302x", method="POST", body="drop=1")
+                after_302 = list(seen)
+        problems += problem_if(after_307 != [None, 307], "the guard's status per hop for a same-origin 307 was %r, wanted [None, 307]: the client's `session: redirect hop=N status=S` log line no longer matches _HopGuard._REDIRECT_LINE" % after_307)
+        problems += problem_if(after_302 != [None, 302], "the guard's status per hop for a 302 was %r, wanted [None, 302]" % after_302)
+        return problems, ["the canonical client's real redirect log line reaches _HopGuard: the guard saw status 307 on the hop after /p307s and 302 on the hop after /p302x (the 307/308 body rule rides on that regex)"]
+    run_row(suite, GO, "webfetch-session-guard-receives-the-redirect-status-from-the-client-log", redirect_status_reaches_the_guard, src + "; _HopGuard._REDIRECT_LINE vs _mcp_chrome.py 'session: redirect hop='")
+
+    def hygiene():
+        return (problem_if(wf._SESSIONS, "%d session(s) left in the registry" % len(wf._SESSIONS))
+                + problem_if(wf._session_clock is not time.monotonic, "_session_clock is %r" % (wf._session_clock,))), ["no session survives the rows above; the idle clock is time.monotonic again"]
+    run_row(suite, GO, "hygiene-webfetch-no-session-left-clock-restored", hygiene, src)
+
+
 def wf_uv_row(suite, s1p, ws):
     cid = "webfetch-uv-stdio-test-cli-against-a-loopback-url"
     uv = shutil.which("uv")
@@ -8541,6 +9234,10 @@ def group_webfetch(suite, cc):
     vp = WebfetchPeer(cc)
     vp2 = WebfetchPeer(cc)
     dp = DualPeer(cc)
+    lp = WfLoginPeer(cc)
+    lp2 = WfLoginPeer(cc)
+    lp.other_port = lp2.port
+    lp2.other_port = lp.port
     s1p = SessionPeer("h1-plain", cc)
     t12 = Tls12Peer()
     # Every call below names its cache directory; HOME and XDG_CACHE_HOME are
@@ -8566,12 +9263,14 @@ def group_webfetch(suite, cc):
         wf_optin_rows(suite, wf, root, vp, dp)
         wf_status_row(suite, wf, root)
         wf_hardening_rows(suite, wf, root, vp)
+        wf_post_rows(suite, wf, root, lp, lp2)
+        wf_session_rows(suite, wf, root, lp, lp2, dp)
         # Restored first: the uv child needs the real HOME for uv's own cache,
         # and it is handed --cache-root explicitly.
         restore_env()
         wf_uv_row(suite, s1p, root)
     finally:
-        for srv in (vp, vp2, dp, s1p, t12):
+        for srv in (vp, vp2, dp, lp, lp2, s1p, t12):
             srv.close()
         restore_env()
         ws.cleanup()

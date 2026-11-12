@@ -21,7 +21,22 @@ to lack beautifulsoup4 dies at import. Every documented invocation uses uv.
 Single-tool dispatcher: webfetch_call(function, params)
 
 Functions:
-    fetch    Fetch a URL (GET/HEAD), return body as markdown/html/text
+    fetch          Fetch a URL (GET/HEAD/POST), return body as markdown/html/text
+    session_open   Open a cookie-jar session bound to a set of exact host names
+    session_close  Close a session and drop its jar
+
+POST and sessions (R-0114): fetch takes method=POST with `body` (a str sent as
+given, or a dict of str to str sent urlencoded; at most 64 KiB) and `cookies`
+(a dict of name to value, sent as Cookie crumbs for that call). A session
+(session_open, then fetch with `session=<id>`) keeps ONE cookie jar across
+calls so a multi-step login can be driven: it is bound to at most 8 exact host
+names (a hop to any other host is refused, redirects included), lives for an
+idle timeout of at most 10 minutes refreshed by each use, at most 4 are live,
+and one call at a time runs on it. POST and every session call use the
+verified transport only (profile=chrome is refused), never touch the cache,
+are never retried, and never re-send a POST body to another origin on a
+307/308. Set-Cookie lines are shown in the report (every hop of the call) and a
+session report names the cookies the jar holds; they are never logged.
 
 Transport — the stdlib HTTP client generated from Scripts/_mcp_chrome.py:
     Default transport: verified stdlib TLS (certificates and host names
@@ -46,7 +61,8 @@ SHA256(method + url + allow_private + request-affecting headers), directory
 0700, entries 0600. Default TTL 900s (15 min);
 cache_ttl=0 bypasses it entirely. A stale entry is revalidated with
 If-None-Match / If-Modified-Since and refreshed in place on a 304. The raw HTML
-is what gets stored; output-mode conversion happens on read.
+is what gets stored; output-mode conversion happens on read. A POST and a
+session call neither read nor write it, and a Set-Cookie is never stored in it.
 """
 
 import argparse
@@ -60,6 +76,7 @@ import logging
 import os
 import random
 import re
+import secrets
 import socket
 import sys
 import threading
@@ -180,8 +197,15 @@ def _session_log(line: str) -> None:
 	log.debug("chrome: %s", line)
 
 
+_PROFILE_REFUSAL = (
+	"profile: only 'chrome' (Chrome 154 fingerprint, certificate NOT "
+	"verified) is available; omit profile for the verified default"
+)
+
+
 def _create_session(profile: Optional[str] = None, timeout: int = 30,
-                    allow_private: bool = False, max_bytes: int = 0) -> Any:
+                    allow_private: bool = False, max_bytes: int = 0,
+                    guard: Any = None) -> Any:
 	"""A fresh stdlib HTTP session: the verified transport unless profile="chrome".
 
 	profile None (the handler turns "" into None) is the VERIFIED default:
@@ -195,21 +219,25 @@ def _create_session(profile: Optional[str] = None, timeout: int = 30,
 	allow_downgrade=True because a caller asking for a page wants it wherever it
 	moved, https->http included (R2-N3); the connect policy still re-vets that
 	hop. No rand= is ever passed.
+
+	*guard* (a _HopGuard) is the POST and session case (R-0114): its policy and
+	log replace the plain ones, the transport is the verified one only (a guard
+	with profile="chrome" raises ValueError), and allow_downgrade is False, so a
+	POST body or a session cookie never follows a redirect from https to http.
 	"""
 	if profile is not None and profile != "chrome":
-		raise ValueError(
-			"profile: only 'chrome' (Chrome 154 fingerprint, certificate NOT "
-			"verified) is available; omit profile for the verified default"
-		)
+		raise ValueError(_PROFILE_REFUSAL)
+	if guard is not None and profile == "chrome":
+		raise ValueError("profile: a POST or a session uses the verified transport only")
 	transport = "chrome" if profile == "chrome" else "verified"
 	return _ch_session_new(
 		decoders=_DECODERS,
-		connect_policy=_connect_policy_for(allow_private),
+		connect_policy=guard.policy if guard is not None else _connect_policy_for(allow_private),
 		timeout=timeout,
 		max_bytes=max_bytes,
-		log=_session_log,
+		log=guard.log if guard is not None else _session_log,
 		tls12_fallback=True,
-		allow_downgrade=True,
+		allow_downgrade=guard is None,
 		transport=transport,
 	)
 
@@ -311,6 +339,464 @@ def _check_host_allowed(url: str, allow_private: bool) -> Optional[str]:
 	except ChromeClientError as exc:
 		return str(exc)
 	return None
+
+
+# ---------------------------------------------------------------------------
+# POST and session mode (R-0114)
+# ---------------------------------------------------------------------------
+
+# A POST body, in BYTES after encoding. A model-authored body is a credential
+# or a form; 64 KiB is far past either and bounds what one call can push.
+FETCH_BODY_MAX_BYTES = 64 * 1024
+
+# Sessions are an opt-in, bounded resource: a jar is a bearer of credentials,
+# so how many can exist, how long one lives and how many hosts it may talk to
+# are all fixed, not caller-sized.
+SESSION_MAX_LIVE = 4
+SESSION_MAX_HOSTS = 8
+SESSION_IDLE_MAX_SEC = 600
+
+# What one report may show of the Set-Cookie lines a call received. The tape
+# stores at most SET_COOKIE_TAPE_MAX lines of SET_COOKIE_TAPE_LINE_CHARS; the
+# report shows SET_COOKIE_SHOWN_LINES of them, each cut at
+# SET_COOKIE_SHOWN_LINE_CHARS, within SET_COOKIE_SECTION_CHARS and a third of
+# max_answer_chars (ADR 0013: the reply is composed here, so it stays under the
+# ceiling the caller asked for).
+SET_COOKIE_TAPE_MAX = 64
+SET_COOKIE_TAPE_LINE_CHARS = 4200
+SET_COOKIE_SHOWN_LINES = 12
+SET_COOKIE_SHOWN_LINE_CHARS = 1500
+SET_COOKIE_SECTION_CHARS = 8192
+JAR_NAMES_SHOWN = 20
+COOKIES_PARAM_MAX = 32
+
+# The session idle clock. A module global read at call time so a test can drive
+# it; production never rebinds it.
+_session_clock = time.monotonic
+
+
+def _host_key(host: str) -> str:
+	"""A host as the session host set compares it: lowercase, an IP literal in its canonical text."""
+	text = host.lower()
+	try:
+		return str(ipaddress.ip_address(text.strip("[]")))
+	except ValueError:
+		return text
+
+
+class _HopGuard:
+	"""The connect policy and log of a POST call or a session (R-0114).
+
+	It wraps _vet_host (the SSRF guard, with the allow_private of the call in
+	progress) with the two rules the canonical client cannot know:
+
+	- the host set: a hop to a host outside `hosts` (exact match, any port,
+	  subdomains do not count) is refused BEFORE it is resolved or connected,
+	  so a redirect that leaves the set sends nothing to the new host. None
+	  means no set (a plain POST).
+	- the body rule: the canonical client re-sends a POST body on a 307/308 to
+	  another origin, as Chrome does (ADR 0026). A model-driven POST must not
+	  hand its body, or a credential in it, to whatever a redirect names, so a
+	  hop to another host:port while the body is still being sent is refused.
+	  The status of the redirect arrives through `log`, which the session calls
+	  with its own structure-only line just before the next hop; a hop whose
+	  redirect status is unknown is treated like a 307 (fail closed). A 301/302
+	  after a POST and a 303 turn into a bodiless GET, which may leave the
+	  origin, and clear the flag for the rest of the chain.
+
+	One guard belongs to one session and its calls run one at a time (the
+	session lock), so the per-call state needs no lock of its own.
+	"""
+
+	_REDIRECT_LINE = re.compile(r"session: redirect hop=(\d+) status=(\d+)\Z")
+
+	def __init__(self, hosts: Optional[frozenset] = None):
+		self.hosts = hosts
+		self.begin_call(False, False)
+
+	def begin_call(self, allow_private: bool, sends_body: bool) -> None:
+		self.allow_private = allow_private
+		self.sends_body = sends_body
+		self._previous: Optional[Tuple[str, int]] = None
+		self._redirect_status: Optional[int] = None
+
+	def log(self, line: str) -> None:
+		match = self._REDIRECT_LINE.match(line)
+		if match:
+			self._redirect_status = int(match.group(2))
+		_session_log(line)
+
+	def policy(self, host: str, port: int) -> list:
+		if self.hosts is not None and _host_key(host) not in self.hosts:
+			raise ChromeClientError(
+				"policy: session host set: %s is not one of the session's hosts" % _printable(host)[:80])
+		previous = self._previous
+		rewritten = self._redirect_status in (301, 302, 303)
+		if previous is not None and self.sends_body and previous != (host, port) and not rewritten:
+			raise ChromeClientError(
+				"policy: a %s redirect to another origin (%s:%d) would re-send the POST body; refused" % (
+					self._redirect_status or "?", _printable(host)[:80], port))
+		addresses = _vet_host(host, port, self.allow_private)
+		if previous is not None and rewritten:
+			self.sends_body = False
+		self._previous = (host, port)
+		self._redirect_status = None
+		return addresses
+
+
+class _SetCookieTape:
+	"""Every Set-Cookie line the session's cookie jar was handed during one call, in wire order, bounded.
+
+	The canonical client stores a Set-Cookie in its jar and drops it from the
+	response it hands back, and a login's Set-Cookie sits on a redirect hop the
+	final response never shows. The tape wraps the jar's `ingest` on the
+	INSTANCE (the generated class is not edited) and copies the raw lines before
+	the jar sees them. It records only; nothing here logs a value.
+	"""
+
+	def __init__(self, jar: Any):
+		self.lines: List[str] = []
+		self.dropped = 0
+		original = jar.ingest
+
+		def ingest(scheme, host, target, set_cookie_values):
+			self.record(set_cookie_values)
+			return original(scheme, host, target, set_cookie_values)
+		jar.ingest = ingest
+
+	def record(self, values: Any) -> None:
+		for value in values:
+			if not isinstance(value, str):
+				continue
+			if len(self.lines) >= SET_COOKIE_TAPE_MAX:
+				self.dropped += 1
+			else:
+				self.lines.append(value[:SET_COOKIE_TAPE_LINE_CHARS])
+
+	def clear(self) -> None:
+		self.lines = []
+		self.dropped = 0
+
+
+def _attach_tape(session: Any) -> Optional[_SetCookieTape]:
+	"""A tape on *session*'s jar when the session is on the verified transport, else None (the Chrome path keeps stripping Set-Cookie)."""
+	if getattr(session, "transport", None) != "verified":
+		return None
+	try:
+		return _SetCookieTape(session.cookies)
+	except AttributeError:
+		return None
+
+
+def _encode_body(body: Any) -> bytes:
+	"""A POST body as bytes: a str as UTF-8, a dict of str to str urlencoded. Raises ValueError, never echoing the body."""
+	try:
+		if isinstance(body, dict):
+			if not all(isinstance(k, str) and isinstance(v, str) for k, v in body.items()):
+				raise ValueError("body: a dict body must map str to str (send a str for a raw body)")
+			data = urllib.parse.urlencode(body).encode("ascii")
+		elif isinstance(body, str):
+			data = body.encode("utf-8")
+		else:
+			raise ValueError("body: must be a str (sent as given) or a dict of str to str (urlencoded)")
+	except UnicodeError:
+		raise ValueError("body: the text cannot be encoded as UTF-8") from None
+	if len(data) > FETCH_BODY_MAX_BYTES:
+		raise ValueError("body: %d bytes is over the %d-byte cap" % (len(data), FETCH_BODY_MAX_BYTES))
+	return data
+
+
+# Request headers whose presence makes a GET's answer private to the caller.
+_CREDENTIAL_HEADERS = frozenset(("cookie", "authorization", "proxy-authorization"))
+_COOKIE_NAME_RE = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+\Z")
+
+
+def _cookie_crumbs(value: Any) -> str:
+	"""The `cookies` param as the crumbs of a Cookie header ("a=1; b=2"), "" for none. Raises ValueError, never echoing a value."""
+	if value is None:
+		return ""
+	if not isinstance(value, dict):
+		raise ValueError("cookies: must be a dict of cookie name to value (both str)")
+	if len(value) > COOKIES_PARAM_MAX:
+		raise ValueError("cookies: at most %d cookies per call" % COOKIES_PARAM_MAX)
+	parts = []
+	for name, val in value.items():
+		shown = repr(name)[:40]
+		if not isinstance(name, str) or not _COOKIE_NAME_RE.match(name):
+			raise ValueError("cookies: invalid cookie name %s" % shown)
+		if not isinstance(val, str):
+			raise ValueError("cookies: the value of %s must be a str" % shown)
+		if any(not 0x21 <= ord(c) <= 0x7e or c in ';,"\\' for c in val):
+			raise ValueError(
+				"cookies: the value of %s has a character a cookie value cannot carry "
+				"(space, control, non-ASCII, ; , \" or \\)" % shown)
+		parts.append("%s=%s" % (name, val))
+	return "; ".join(parts)
+
+
+def _merge_cookie_header(headers: Dict[str, str], crumbs: str) -> Dict[str, str]:
+	"""*headers* with *crumbs* appended to a caller Cookie header, or added as one."""
+	merged = dict(headers)
+	for key in merged:
+		if key.lower() == "cookie":
+			merged[key] = (merged[key] + "; " + crumbs) if merged[key] else crumbs
+			return merged
+	merged["Cookie"] = crumbs
+	return merged
+
+
+def _jar_names(jar: Any) -> List[str]:
+	"""The names of the cookies *jar* holds (expired ones purged first). The jar has no listing API, so this reads its list."""
+	try:
+		len(jar)
+		return [str(c["name"]) for c in jar._cookies]
+	except (AttributeError, KeyError, TypeError):
+		return []
+
+
+# The jar line is unfenced markdown and a cookie name is the server's text, so a
+# name is echoed only when it is made of characters that cannot form markup, a
+# separator or a line break. That is narrower than the RFC 6265 token: the token
+# set also holds `*`, backtick, `~`, `|`, `!`, `#`, `$`, `%`, `&`, `'`, `+` and
+# `^`, several of which are live markdown. `_` stays (`_ga`, `__cf_bm`,
+# `__Host-id` are the common names) and can at worst emphasise plain name text.
+_JAR_NAME_RE = re.compile(r"[A-Za-z0-9_.\-]+\Z")
+_JAR_NAME_PLACEHOLDER = "<non-token name>"
+
+
+def _jar_line(names: List[str]) -> str:
+	"""The session report's one jar line: how many cookies are held and their NAMES, never a value.
+
+	A name outside _JAR_NAME_RE is counted, not echoed: it shows as one
+	`<non-token name>` entry (with a count when several) after the safe names.
+	"""
+	if not names:
+		return "**session cookies**: none held"
+	unique: List[str] = []
+	for name in names:
+		if name not in unique:
+			unique.append(name)
+	safe = [n for n in unique if _JAR_NAME_RE.match(n)]
+	hidden = len(unique) - len(safe)
+	shown = [n[:64] for n in safe[:JAR_NAMES_SHOWN]]
+	if len(safe) > len(shown):
+		shown.append("+%d more" % (len(safe) - len(shown)))
+	if hidden:
+		shown.append(_JAR_NAME_PLACEHOLDER if hidden == 1 else "%s x%d" % (_JAR_NAME_PLACEHOLDER, hidden))
+	return "**session cookies**: %d held (%s)" % (len(names), ", ".join(shown))
+
+
+def _set_cookie_display(set_cookies: Any, max_answer_chars: int) -> List[str]:
+	"""The report rows for the Set-Cookie lines of a call: ([lines], dropped) -> printable rows within the section budget.
+
+	At most SET_COOKIE_SHOWN_LINES rows of SET_COOKIE_SHOWN_LINE_CHARS, within
+	SET_COOKIE_SECTION_CHARS and a third of max_answer_chars; whatever does not
+	fit is one closing row that says how many were left out.
+	"""
+	if not set_cookies:
+		return []
+	lines, dropped = set_cookies
+	total = len(lines) + dropped
+	if not total:
+		return []
+	budget = SET_COOKIE_SECTION_CHARS
+	if max_answer_chars > 0:
+		budget = min(budget, max_answer_chars // 3)
+	rows: List[str] = []
+	used = 0
+	for line in lines[:SET_COOKIE_SHOWN_LINES]:
+		text = _printable(line)
+		if len(text) > SET_COOKIE_SHOWN_LINE_CHARS:
+			text = text[:SET_COOKIE_SHOWN_LINE_CHARS] + " ...[+%d chars]" % (len(text) - SET_COOKIE_SHOWN_LINE_CHARS)
+		row = "  set-cookie: " + text
+		if used + len(row) + 1 > budget:
+			break
+		rows.append(row)
+		used += len(row) + 1
+	hidden = total - len(rows)
+	if hidden:
+		rows.append("  (%d more set-cookie line%s not shown)" % (hidden, "" if hidden == 1 else "s"))
+	return rows
+
+
+class _FetchSession:
+	"""One session: its host set, idle clock, ONE _ChSession (and so one cookie jar) and the lock that serialises its calls.
+
+	The _ChSession is not thread-safe and the server runs several workers, so a
+	call takes `lock` without waiting (a second concurrent call is refused as
+	busy rather than holding a worker) and holds it until the call is over, in
+	a finally. `closed` is set by session_close or the reaper; whoever finds the
+	lock free closes the underlying session (_session_finalize).
+	"""
+
+	def __init__(self, sid: str, hosts: frozenset, idle: int, now: float):
+		self.sid = sid
+		self.hosts = hosts
+		self.idle = idle
+		self.expires = now + idle
+		self.guard = _HopGuard(hosts)
+		self.session = _create_session(None, 30, False, 0, guard=self.guard)
+		self.tape = _attach_tape(self.session)
+		self.lock = threading.Lock()
+		self.closed = False
+
+
+_SESSIONS: Dict[str, _FetchSession] = {}
+_SESSIONS_LOCK = threading.Lock()
+
+
+def _session_finalize(sess: _FetchSession) -> None:
+	"""Close a closed session's connections and drop what it holds if no call holds it; otherwise its owner's release does.
+
+	"Drop" is the cookie jar's list and the Set-Cookie tape, emptied in place
+	(the jar class is generated and has no clear(); its `_cookies` list is what
+	_jar_names already reads). The session object itself is unreachable once it
+	has left _SESSIONS.
+	"""
+	if sess.closed and sess.lock.acquire(False):
+		try:
+			_close_session(sess.session)
+			if sess.tape is not None:
+				sess.tape.clear()
+			try:
+				del sess.session.cookies._cookies[:]
+			except (AttributeError, TypeError):
+				pass
+		finally:
+			sess.lock.release()
+
+
+def _sessions_reap_locked(now: float) -> None:
+	"""Drop every expired session that no call is using. The caller holds _SESSIONS_LOCK."""
+	for sid in [s for s, v in _SESSIONS.items() if v.expires <= now and not v.lock.locked()]:
+		sess = _SESSIONS.pop(sid)
+		sess.closed = True
+		_session_finalize(sess)
+		log.debug("session reaped: live=%d", len(_SESSIONS))
+
+
+def _sessions_live() -> int:
+	with _SESSIONS_LOCK:
+		_sessions_reap_locked(_session_clock())
+		return len(_SESSIONS)
+
+
+def _normalise_session_host(value: Any) -> str:
+	"""One exact host name of a session_open call, normalised; ValueError when it is not one."""
+	shown = repr(value)[:40]
+	if not isinstance(value, str) or not value:
+		raise ValueError("hosts: %s is not a host name" % shown)
+	host = value
+	if not host.isascii():
+		try:
+			# The canonical encoder, not the codec: it refuses U+00DF, U+03C2,
+			# U+200C and U+200D, as the URL side (_ch_split_url) does, so a host
+			# in the set and the same host in a URL cannot name different hosts.
+			host = _ch_idna_encode(host).decode("ascii")
+		except UnicodeError:
+			raise ValueError("hosts: %s is not a host name" % shown) from None
+	host = host.lower()
+	try:
+		return str(ipaddress.ip_address(host))
+	except ValueError:
+		pass
+	labels = host.split(".")
+	if len(host) > 253 or not all(re.match(r"[a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9_])?\Z", label) for label in labels):
+		raise ValueError("hosts: %s is not a host name (give exact host names, no scheme, port or path)" % shown)
+	return host
+
+
+def handle_session_open(params: dict, project_root: str, cache_root: Optional[str] = None) -> dict:
+	hosts_raw = params.get("hosts")
+	if not isinstance(hosts_raw, list) or not hosts_raw:
+		return {"error": "hosts is required: a list of 1 to %d exact host names" % SESSION_MAX_HOSTS}
+	if len(hosts_raw) > SESSION_MAX_HOSTS:
+		return {"error": "hosts: at most %d host names per session" % SESSION_MAX_HOSTS}
+	try:
+		hosts = frozenset(_normalise_session_host(h) for h in hosts_raw)
+	except ValueError as exc:
+		return {"error": str(exc)}
+	idle = params.get("idle_timeout")
+	if idle is None:
+		idle = SESSION_IDLE_MAX_SEC
+	elif isinstance(idle, bool) or not isinstance(idle, int) or not 1 <= idle <= SESSION_IDLE_MAX_SEC:
+		return {"error": "idle_timeout must be an integer number of seconds from 1 to %d" % SESSION_IDLE_MAX_SEC}
+	with _SESSIONS_LOCK:
+		now = _session_clock()
+		_sessions_reap_locked(now)
+		if len(_SESSIONS) >= SESSION_MAX_LIVE:
+			return {"error": (
+				"session limit: %d sessions are live; close one with session_close or wait "
+				"for its idle timeout" % SESSION_MAX_LIVE)}
+		sid = secrets.token_urlsafe(32)
+		_SESSIONS[sid] = _FetchSession(sid, hosts, idle, now)
+		live = len(_SESSIONS)
+	log.debug("session opened: hosts=%d live=%d", len(hosts), live)
+	return {"__raw_text__": (
+		f"session: {sid}\n"
+		f"hosts: {', '.join(sorted(hosts))}\n"
+		f"idle_timeout: {idle} s (refreshed by every use)\n"
+		f"live sessions: {live} of {SESSION_MAX_LIVE}\n"
+		"Pass session=<the id above> to fetch. Only these hosts can be reached through it; "
+		"its cookies are kept for the session and dropped by session_close.\n"
+	)}
+
+
+def handle_session_close(params: dict, project_root: str, cache_root: Optional[str] = None) -> dict:
+	sid = params.get("session")
+	if not isinstance(sid, str) or not sid:
+		return {"error": "session is required: the id session_open returned"}
+	with _SESSIONS_LOCK:
+		_sessions_reap_locked(_session_clock())
+		sess = _SESSIONS.pop(sid, None)
+		live = len(_SESSIONS)
+	if sess is None:
+		return {"error": _SESSION_UNKNOWN}
+	sess.closed = True
+	_session_finalize(sess)
+	log.debug("session closed: live=%d", live)
+	return {"__raw_text__": f"session closed; its cookie jar is dropped. live sessions: {live} of {SESSION_MAX_LIVE}\n"}
+
+
+_SESSION_UNKNOWN = "unknown or expired session: open one with session_open"
+_SESSION_BUSY = (
+	"session is busy with another call (a cancelled call may still be finishing); "
+	"wait for it to finish and call again")
+
+
+def _session_acquire(sid: Any) -> Tuple[Optional[_FetchSession], Optional[str]]:
+	"""(session, None) with the session's lock held, or (None, the refusal). Never waits for the lock."""
+	if not isinstance(sid, str) or not sid:
+		return None, "session must be the id session_open returned"
+	with _SESSIONS_LOCK:
+		_sessions_reap_locked(_session_clock())
+		sess = _SESSIONS.get(sid)
+		if sess is None:
+			return None, _SESSION_UNKNOWN
+		if not sess.lock.acquire(False):
+			return None, _SESSION_BUSY
+	return sess, None
+
+
+def _session_release(sess: _FetchSession) -> None:
+	"""End a call on *sess*: the idle clock restarts from now, the lock is released, a closed session is closed."""
+	sess.expires = _session_clock() + sess.idle
+	sess.lock.release()
+	_session_finalize(sess)
+
+
+def _session_host_refusal(sess: _FetchSession, url: str) -> Optional[str]:
+	"""The refusal when *url*'s host is outside the session's set (nothing is resolved or sent), else None."""
+	try:
+		host = _ch_split_url(url)[1]
+	except ChromeClientError:
+		return None
+	if _host_key(host) in sess.hosts:
+		return None
+	return (
+		"session: host %s is not in this session's host set (%s); nothing was sent"
+		% (_printable(host)[:80], ", ".join(sorted(sess.hosts)))
+	)
 
 
 # The brotli decoder, generated from Scripts/_mcp_brotli.py: a ctypes binding
@@ -7245,11 +7731,14 @@ def _resolve_cache_root(cache_root: Optional[str]) -> str:
 # without a ceiling this grows for as long as the project lives.
 CACHE_MAX_BYTES = 64 * 1024 * 1024
 
-# Never persisted, never reported. Writing session credentials into a file
-# inside the project tree is a leak that buys a fetcher nothing: the session
-# keeps its own cookie jar for the redirect chain and is thrown away after the
-# call. (A flattened set-cookie line would be misleading as well -- joined with
-# ", " it cannot be re-parsed, because Expires dates contain commas.)
+# Never persisted, and no longer in the headers dict at all. Writing session
+# credentials into a file buys a fetcher nothing, so the cache entry and the
+# cached replay never carry one. (A flattened set-cookie line would be
+# misleading as well -- joined with ", " it cannot be re-parsed, because Expires
+# dates contain commas.) Since R-0114 a FRESH verified answer does list the raw
+# Set-Cookie lines of the call, one by one, in its report: _SetCookieTape copies
+# them off the jar's ingest, outside this dict, and _set_cookie_display renders
+# them. A plain call's jar still dies with the call; a session's lives on.
 _DROP_HEADERS = frozenset({"set-cookie", "set-cookie2"})
 
 # Request headers that do not change the response body. Everything else goes
@@ -7670,7 +8159,15 @@ ACCEPTED_FETCH_PARAMS = frozenset({
 	"url", "method", "output", "timeout", "max_answer_chars", "offset",
 	"cache_ttl", "profile", "headers", "max_bytes", "allow_private",
 	"raw", "show_headers", "save_to", "overwrite",
+	"body", "cookies", "session",
 })
+
+# The session functions take their own, much shorter tables (R-0114); fetch and
+# its aliases (get, wget, curl) take ACCEPTED_FETCH_PARAMS.
+ACCEPTED_SESSION_PARAMS = {
+	"session_open": frozenset({"hosts", "idle_timeout", "max_answer_chars"}),
+	"session_close": frozenset({"session", "max_answer_chars"}),
+}
 
 # max_chars is the name two siblings alias away (mcp-tshark.py, mcp-wiki.py);
 # accepting it keeps a caller who guesses the old name from getting an error.
@@ -7682,6 +8179,8 @@ PARAM_ALIASES = {
 	"impersonate": "profile",
 	"response_headers": "show_headers",
 	"save": "save_to",
+	"data": "body",
+	"session_id": "session",
 }
 
 OUTPUT_MODES = ("markdown", "markdown_full", "text", "text_full", "html")
@@ -7821,8 +8320,17 @@ def _format_response(
 	attempts: Optional[List[str]] = None,
 	transport: Optional[str] = None,
 	cert_verified: Optional[bool] = None,
+	set_cookies: Any = None,
+	jar_names: Optional[List[str]] = None,
+	hint: bool = True,
 ) -> dict:
 	"""Convert, optionally save, then page the body into the tool's reply.
+
+	*set_cookies* ([lines], dropped) is the Set-Cookie lines the call received
+	(fresh verified answers only; a cached answer carries none) and *jar_names*
+	the names the session's jar holds (None outside a session). *hint* False
+	drops the chrome opt-in hint, for a call the opt-in cannot serve (a POST or
+	a session).
 
 	*view* carries the presentation decisions made once in handle_fetch (output
 	mode, budget, offset, raw, show_headers, save_to, overwrite, project_root),
@@ -7858,6 +8366,7 @@ def _format_response(
 			return {"error": str(exc)}
 
 	lower = {k.lower(): v for k, v in resp_headers.items()}
+	cookie_rows = _set_cookie_display(set_cookies, max_answer_chars)
 
 	if view["raw"]:
 		# raw: the body and nothing else — no report to parse back out. With
@@ -7869,6 +8378,7 @@ def _format_response(
 		if view["show_headers"]:
 			head = (f"HTTP {status}\n"
 			        + "".join(f"{k}: {lower[k]}\n" for k in sorted(lower))
+			        + "".join(row.strip() + "\n" for row in cookie_rows)
 			        + "\n")
 		return _paged_reply(head, content, view["offset"], max_answer_chars)
 
@@ -7890,20 +8400,29 @@ def _format_response(
 	# Text only, nothing is re-issued: the opt-in to the Chrome fingerprint stays
 	# the caller's decision, because that path does not verify the certificate.
 	hint_tag = ""
-	if not cached and profile is None and status in RETRY_STATUSES:
+	if not cached and profile is None and hint and status in RETRY_STATUSES:
 		hint_tag = f"\n{_CHROME_OPT_IN_HINT}"
 	retries_tag = ""
 	if attempts and len(attempts) > 1:
 		retries_tag = f"\n**retries**: {' → '.join(attempts)}"
 	saved_tag = f"\n**saved**: {saved}" if saved else ""
+	jar_tag = f"\n{_jar_line(jar_names)}" if jar_names is not None else ""
+	cookie_block = ""
+	if cookie_rows:
+		total = len(set_cookies[0]) + set_cookies[1]
+		cookie_block = (
+			f"## Set-Cookie ({total}, every hop of this call)\n\n"
+			"```\n" + "\n".join(cookie_rows) + "\n```\n\n"
+		)
 
 	head = (
 		f"# webfetch — `{final_url}`{cache_tag}\n\n"
-		f"**status**: {status}{transport_tag}{hint_tag}{retries_tag}{saved_tag}\n"
+		f"**status**: {status}{transport_tag}{hint_tag}{retries_tag}{saved_tag}{jar_tag}\n"
 		f"**output**: {output}\n\n"
 		f"## Response headers ({title})\n\n"
 		f"```\n" + "\n".join(shown) + "\n```\n\n"
-		f"## Body ({output})\n\n"
+		+ cookie_block
+		+ f"## Body ({output})\n\n"
 	)
 	return _paged_reply(head, content, view["offset"], max_answer_chars)
 
@@ -7936,18 +8455,22 @@ def _paged_reply(head: str, content: str, offset: int, max_answer_chars: int) ->
 	return {"__raw_text__": head + window + tail + "\n"}
 
 
-def _issue(session, method: str, url: str, headers: dict, timeout: int, on_headers=None):
+def _issue(session, method: str, url: str, headers: dict, timeout: int, on_headers=None, body: Optional[bytes] = None):
 	"""One request over *session*; the per-request timeout overrides the session's.
 
 	GET is a navigation and hands *on_headers* to the session, which calls it
 	with (status, headers, final_url) before any body byte is read. HEAD uses
 	the captured cors-HEAD profile, so it names the target's own origin as the
 	Referer: a cors request with no initiator is not something Chrome sends.
+	POST is the captured cors POST (no Origin and no Referer for a same-origin
+	call, as the canonical client sends it) carrying *body*.
 	"""
 	if method == "HEAD":
 		origin = _ch_origin_of(url)
 		referer = _ch_origin_text(origin) + "/" if origin else None
 		return session.head(url, headers=headers, referer=referer, timeout=timeout)
+	if method == "POST":
+		return session.post(url, data=body if body is not None else b"", headers=headers, timeout=timeout, on_headers=on_headers)
 	return session.get(url, headers=headers, timeout=timeout, on_headers=on_headers)
 
 
@@ -7976,22 +8499,42 @@ def _refuse_non_textual(status: int, headers, url: str) -> None:
 def _fetch_once(
 	profile: Optional[str], method: str, url: str, headers: dict,
 	timeout: int, max_bytes: int, allow_private: bool = False,
+	body: Optional[bytes] = None, sess: Optional[_FetchSession] = None,
 ) -> dict:
-	"""Fetch once on a fresh session. Returns a dict with status/headers/body or error.
+	"""Fetch once on a fresh session (or, with *sess*, on that session's own). Returns a dict with status/headers/body or error.
 
 	`transport` and `cert_verified` are the session's own label for the
 	whole redirect chain (its WEAKEST hop); this host adds no logic of its
-	own to them.
+	own to them. *body* is a POST's bytes. A POST gets a _HopGuard (the 307
+	body rule); a *sess* is the caller's locked session, kept open for its next
+	call: its guard is reset for this call and its tape emptied. The Set-Cookie
+	lines the call received come back as `set_cookies`, ([lines], dropped).
 	"""
-	try:
-		session = _create_session(profile, timeout, allow_private, max_bytes)
-	except ValueError as exc:
-		# An unknown profile: the one-line refusal names the verified default.
-		return {"error": str(exc), "profile": str(profile)}
+	guard = None
+	own = sess is None
+	if sess is not None:
+		session = sess.session
+		# The wire and decode ceiling is per call; the session object outlives it.
+		session.max_bytes = max_bytes
+		guard = sess.guard
+		guard.begin_call(allow_private, body is not None)
+		tape = sess.tape
+		if tape is not None:
+			tape.clear()
+	else:
+		if method == "POST":
+			guard = _HopGuard(None)
+			guard.begin_call(allow_private, True)
+		try:
+			session = _create_session(profile, timeout, allow_private, max_bytes, guard=guard)
+		except ValueError as exc:
+			# An unknown profile: the one-line refusal names the verified default.
+			return {"error": str(exc), "profile": str(profile)}
+		tape = _attach_tape(session)
 	profile_name = session.transport
 	try:
 		try:
-			resp = _issue(session, method, url, headers, timeout, on_headers=_refuse_non_textual)
+			resp = _issue(session, method, url, headers, timeout, on_headers=_refuse_non_textual, body=body)
 		except _NonTextualBody as exc:
 			return {"error": str(exc), "profile": profile_name}
 		except ChromeBodyTooLarge as exc:
@@ -8013,9 +8556,9 @@ def _fetch_once(
 		final_url = str(getattr(resp, "url", url) or url)
 		resp_headers = _clean_headers(getattr(resp, "headers", {}) or {})
 
-		body = ""
+		text_body = ""
 		size = -1
-		if method == "GET" and status != 304:
+		if method in ("GET", "POST") and status != 304:
 			# Checked before .content, which would raise it as a bare
 			# ChromeClientError: still-encoded bytes are never the body.
 			if resp.decode_error is not None:
@@ -8026,22 +8569,39 @@ def _fetch_once(
 			# bs4+markdownify pass will see, and what the cache check reads.
 			raw = resp.content
 			size = len(raw)
-			body = resp.text or ""
+			text_body = resp.text or ""
 		return {
 			"status": status,
 			"final_url": final_url,
 			"headers": resp_headers,
-			"body": body,
+			"body": text_body,
 			"size": size,
 			"profile": profile_name,
 			"transport": resp.transport,
 			"cert_verified": resp.cert_verified,
+			# Shown in the report of this call only; never cached (see _DROP_HEADERS).
+			"set_cookies": (list(tape.lines), tape.dropped) if tape is not None else None,
 		}
 	finally:
-		_close_session(session)
+		if own:
+			_close_session(session)
 
 
 def handle_fetch(params: dict, project_root: str, cache_root: Optional[str] = None) -> dict:
+	"""fetch: with `session`, on that session under its lock (taken without waiting, released in a finally, whatever the call does)."""
+	session_id = params.get("session")
+	if session_id is None:
+		return _handle_fetch(params, project_root, cache_root, None)
+	sess, refusal = _session_acquire(session_id)
+	if sess is None:
+		return {"error": refusal}
+	try:
+		return _handle_fetch(params, project_root, cache_root, sess)
+	finally:
+		_session_release(sess)
+
+
+def _handle_fetch(params: dict, project_root: str, cache_root: Optional[str], sess: Optional[_FetchSession]) -> dict:
 	# Two roots, two jobs: save_to is contained by project_root, the disk cache
 	# IS cache_root (--cache-root), by default the XDG cache directory.
 	cache_root = cache_root or _default_cache_root()
@@ -8052,8 +8612,18 @@ def handle_fetch(params: dict, project_root: str, cache_root: Optional[str] = No
 		return {"error": f"url must start with http:// or https:// (got {url[:40]!r})"}
 
 	method = (params.get("method") or "GET").upper()
-	if method not in ("GET", "HEAD"):
-		return {"error": f"method {method} not supported yet (GET, HEAD only)"}
+	if method not in ("GET", "HEAD", "POST"):
+		return {"error": f"method {method} not supported (GET, HEAD, POST only)"}
+	# A body belongs to POST alone, and a POST is an unsafe request a model
+	# composed: it is checked (type, 64 KiB cap) before anything is resolved.
+	if params.get("body") is not None and method != "POST":
+		return {"error": f"body is only sent with method POST (got {method}); set method=POST"}
+	body: Optional[bytes] = None
+	if method == "POST":
+		try:
+			body = _encode_body(params["body"]) if params.get("body") is not None else b""
+		except ValueError as exc:
+			return {"error": str(exc)}
 
 	raw = _bool_param(params.get("raw"))
 	# raw means "do not process it, just pour it out", so the default CONVERSION
@@ -8073,6 +8643,15 @@ def handle_fetch(params: dict, project_root: str, cache_root: Optional[str] = No
 	max_bytes = max(0, _int_param(params.get("max_bytes"), DEFAULT_MAX_BYTES))
 	allow_private = _bool_param(params.get("allow_private"))
 	profile = params.get("profile") or None
+	# The Chrome path does not verify certificates (R-0047): a POST body and a
+	# session's cookies are exactly what must not cross an unauthenticated
+	# connection, and nothing here escalates to it.
+	if profile == "chrome" and method == "POST":
+		return {"error": "method POST is not available with profile=chrome (its certificate is NOT verified, R-0047); omit profile for the verified default"}
+	if profile == "chrome" and sess is not None:
+		return {"error": "a session uses the verified transport only; profile=chrome is refused with a session (its certificate is NOT verified, R-0047)"}
+	if profile is not None and profile != "chrome" and sess is not None:
+		return {"error": _PROFILE_REFUSAL}
 	save_to = (params.get("save_to") or "").strip()
 	overwrite = _bool_param(params.get("overwrite"))
 	show_headers = _bool_param(params.get("show_headers"))
@@ -8098,6 +8677,19 @@ def handle_fetch(params: dict, project_root: str, cache_root: Optional[str] = No
 		_ch_check_caller_headers(extra_headers)
 	except ChromeClientError as exc:
 		return {"error": str(exc)}
+	# `cookies` rides the same road as a caller Cookie header (the canonical
+	# client sends the jar's cookies first, then these crumbs, and drops them on
+	# the first cross-origin hop); it only has to be a well-formed cookie list.
+	try:
+		crumbs = _cookie_crumbs(params.get("cookies"))
+	except ValueError as exc:
+		return {"error": str(exc)}
+	if crumbs:
+		extra_headers = _merge_cookie_header(extra_headers, crumbs)
+		try:
+			_ch_check_caller_headers(extra_headers)
+		except ChromeClientError as exc:
+			return {"error": str(exc)}
 
 	view = {
 		"output": output,
@@ -8124,12 +8716,28 @@ def handle_fetch(params: dict, project_root: str, cache_root: Optional[str] = No
 	# caller's side, so checking afterwards meant one allow_private=true call
 	# seeded an entry that every later allow_private=false call would serve
 	# happily for the rest of the TTL.
+	# A session may only talk to its own hosts: refused before the host is even
+	# resolved, so a name outside the set costs no lookup and no request.
+	if sess is not None:
+		outside = _session_host_refusal(sess, url)
+		if outside:
+			return {"error": outside}
 	blocked = _check_host_allowed(url, allow_private)
 	if blocked:
 		return {"error": blocked}
 
-	key = _cache_key(url, method, extra_headers, allow_private)
-	entry = _cache_load(cache_root, key) if ttl > 0 else None
+	# A POST and a session call neither read nor write the cache and are not
+	# retried: a replayed POST repeats a side effect, and a cached or retried
+	# session answer would skip or repeat the cookie exchange it exists for.
+	# A GET that carries credentials -- the cookies param (merged into the Cookie
+	# header above) or a caller Cookie / Authorization header -- gets an
+	# authenticated body: it is neither stored for the TTL nor served from a
+	# stored entry. It is still retried like any GET.
+	carries_credentials = any(k.lower() in _CREDENTIAL_HEADERS for k in extra_headers)
+	replayable = method != "POST" and sess is None
+	use_cache = replayable and not carries_credentials
+	key = _cache_key(url, method, extra_headers, allow_private) if use_cache else ""
+	entry = _cache_load(cache_root, key) if (use_cache and ttl > 0) else None
 	# The guard above vets the REQUESTED host only; a stored body may come from a
 	# redirect hop into loopback or metadata space that only allow_private=true
 	# could reach. The key already separates the two modes; an entry whose own
@@ -8197,8 +8805,16 @@ def handle_fetch(params: dict, project_root: str, cache_root: Optional[str] = No
 	# concurrent callers from retrying in lockstep.
 	attempts: List[str] = []
 	result: dict = {}
-	for i in range(3):
-		result = _fetch_once(profile, method, url, req_headers, timeout, max_bytes, allow_private)
+	max_attempts = 3 if replayable else 1
+	# body / sess are passed only when there is one: a plain GET or HEAD keeps
+	# calling _fetch_once with exactly the seven arguments it always had.
+	extra: Dict[str, Any] = {}
+	if body is not None:
+		extra["body"] = body
+	if sess is not None:
+		extra["sess"] = sess
+	for i in range(max_attempts):
+		result = _fetch_once(profile, method, url, req_headers, timeout, max_bytes, allow_private, **extra)
 		attempts.append(result.get("transport") or result.get("profile") or str(profile))
 		if "error" in result:
 			# The session's and on_headers' refusals may quote a redirect
@@ -8206,7 +8822,7 @@ def handle_fetch(params: dict, project_root: str, cache_root: Optional[str] = No
 			return {"error": _printable(result["error"])}
 		if result["status"] not in RETRY_STATUSES:
 			break
-		if i + 1 < 3:
+		if i + 1 < max_attempts:
 			log.debug("status %s, retrying over %s", result["status"], attempts[-1])
 			time.sleep(0.5 * (i + 1) + random.uniform(0, 0.5))
 
@@ -8239,7 +8855,7 @@ def handle_fetch(params: dict, project_root: str, cache_root: Optional[str] = No
 	# sent no conditional header (or hold no entry to revalidate): the branch
 	# above would not have run, and storing that empty body under status 304
 	# would make every within-TTL call serve an empty document.
-	if ttl > 0 and 200 <= status < 400 and status != 304:
+	if use_cache and ttl > 0 and 200 <= status < 400 and status != 304:
 		_cache_save(cache_root, key, {
 			"url": url,
 			"method": method,
@@ -8261,6 +8877,9 @@ def handle_fetch(params: dict, project_root: str, cache_root: Optional[str] = No
 		status, result["final_url"], result["headers"], result["body"],
 		view, profile=profile, cached="", attempts=attempts,
 		transport=result.get("transport"), cert_verified=result.get("cert_verified"),
+		set_cookies=result.get("set_cookies"),
+		jar_names=_jar_names(sess.session.cookies) if sess is not None else None,
+		hint=replayable,
 	)
 
 
@@ -8270,13 +8889,15 @@ def handle_fetch(params: dict, project_root: str, cache_root: Optional[str] = No
 
 HANDLERS: Dict[str, Callable[[dict, str, Optional[str]], dict]] = {
 	"fetch": handle_fetch,
+	"session_open": handle_session_open,
+	"session_close": handle_session_close,
 	# aliases
 	"get":   handle_fetch,
 	"wget":  handle_fetch,
 	"curl":  handle_fetch,
 }
 
-_PRIMARY_FUNCTIONS = {"fetch"}
+_PRIMARY_FUNCTIONS = {"fetch", "session_open", "session_close"}
 
 
 # EXCLUSIONS HERE ARE PER BLOCK, NOT PER SERVER. This file takes
@@ -8525,6 +9146,8 @@ def handle_webfetch_call(arguments: dict, project_root: str, cache_root: Optiona
 			f"{_decoder_status('br', _BR_STATE, _br_attempts, _br_exists)}\n"
 			f"{_decoder_status('zstd', _ZSTD_STATE, _zstd_attempts, _zstd_exists)}\n"
 			f"Cache dir: {_cache_dir(cache_root)}\n"
+			f"Sessions: {_sessions_live()} live (at most {SESSION_MAX_LIVE}; idle timeout at most "
+			f"{SESSION_IDLE_MAX_SEC} s, restarted by each use; fetch takes session=<id>)\n"
 			f"Available functions:\n{funcs}"
 		)}
 
@@ -8552,12 +9175,13 @@ def handle_webfetch_call(arguments: dict, project_root: str, cache_root: Optiona
 	# Reject unknown params up-front. Silently dropping one means the handler
 	# runs with a surprising default — an ignored max_bytes or offset reads as
 	# the server disobeying rather than as a typo.
-	unknown = sorted(set(params) - ACCEPTED_FETCH_PARAMS)
+	accepted = ACCEPTED_SESSION_PARAMS.get(function, ACCEPTED_FETCH_PARAMS)
+	unknown = sorted(set(params) - accepted)
 	if unknown:
 		return {"error": (
 			f"Unknown params for '{function}': {', '.join(unknown)}."
-			f" Accepted: {', '.join(sorted(ACCEPTED_FETCH_PARAMS))}."
-			+ _did_you_mean(unknown, ACCEPTED_FETCH_PARAMS, PARAM_ALIASES)
+			f" Accepted: {', '.join(sorted(accepted))}."
+			+ _did_you_mean(unknown, accepted, PARAM_ALIASES)
 		)}
 
 	# Assigned, not returned, so the cap below covers the raised paths too. When
@@ -8606,7 +9230,9 @@ WEBFETCH_CALL_TOOL = {
 		"browser-shaped. No proxy support. It is not a browser: it runs no "
 		"JavaScript, so a client-rendered page yields its shell.\n\n"
 		"Single dispatcher — set `function` to route:\n\n"
-		"  fetch    Fetch a URL (GET/HEAD), return body as markdown/html/text\n\n"
+		"  fetch          Fetch a URL (GET/HEAD/POST), return body as markdown/html/text\n"
+		"  session_open   Open a cookie-jar session bound to exact host names; returns its id\n"
+		"  session_close  Close a session and drop its jar\n\n"
 		"Returns server status when called without `function`.\n\n"
 		"Output modes: `markdown` (default — main-content extraction: nav/header/"
 		"footer/aside dropped, <main>/<article>/[role=main] preferred), "
@@ -8640,10 +9266,36 @@ WEBFETCH_CALL_TOOL = {
 		"names it), keyed on method + "
 		"url + allow_private + request-affecting headers. Default TTL 900s; `cache_ttl=0` bypasses. A "
 		"stale entry is revalidated with If-None-Match/If-Modified-Since and refreshed "
-		"in place on a 304.\n\n"
-		"On 403/429/503 the fetch is retried up to 3 times on the same transport; "
-		"the report lists what was tried.\n\n"
-		"fetch parameters: url (required), method (GET/HEAD, default GET), output "
+		"in place on a 304. A POST and a session call never read or write it.\n\n"
+		"On 403/429/503 a GET/HEAD fetch is retried up to 3 times on the same "
+		"transport; the report lists what was tried. A POST and a session call are "
+		"never retried.\n\n"
+		"POST and sessions (multi-step logins): `method=POST` with `body` — a str "
+		"sent as given (set the Content-Type through `headers`; the default is "
+		"application/x-www-form-urlencoded;charset=UTF-8) or a dict of str to str "
+		"sent urlencoded; at most 64 KiB, and a body with GET/HEAD is refused. "
+		"`session_open` takes `hosts` (1-8 exact host names; subdomains do NOT "
+		"count, any port) and optional `idle_timeout` (s, 1-600, default 600), and "
+		"returns a session id; pass it as `session` to fetch and every call on it "
+		"shares ONE cookie jar. A session can only reach its listed hosts: a hop to "
+		"any other host, a redirect included, fails the call before anything is "
+		"sent to it. Live sessions: at most 4; one expires after its idle timeout "
+		"without use; one call at a time runs on a session (a concurrent call is "
+		"refused as busy). POST and session calls use the verified transport only: "
+		"profile=chrome is refused with either, https->http redirects are refused, "
+		"nothing is cached or retried, and a 307/308 redirect to another origin "
+		"that would re-send the POST body fails the call (a 301/302/303 becomes a "
+		"bodiless GET as usual). `allow_private` must still be passed on the call "
+		"that needs it. Cookies are visible: every Set-Cookie line the call "
+		"received, on every hop, is listed in the report under Set-Cookie (a "
+		"cached answer lists none; a profile=chrome answer never lists them), and "
+		"a session report adds a line naming the cookies the jar holds (names "
+		"only). `cookies` (dict of name to value) is sent as Cookie crumbs for that "
+		"call after the jar's own, and dropped on a cross-origin hop. Values are "
+		"never written to the log.\n\n"
+		"fetch parameters: url (required), method (GET/HEAD/POST, default GET), "
+		"body (str or dict of str to str, POST only; alias data), cookies (dict "
+		"name to value), session (id from session_open; alias session_id), output "
 		"(default markdown), timeout (s, default 30, clamped to 1-300), "
 		"max_answer_chars (default 24000; "
 		"alias max_chars), offset (line offset for paging), cache_ttl (s, default 900), "
@@ -8742,9 +9394,13 @@ class McpServer:
 		# the reader may not share the pool with it.
 		#
 		# Handlers are safe to run concurrently: handle_fetch builds a fresh
-		# session per call (_create_session), the module holds no cookie jar,
-		# no connection pool and no `global` written after startup with one
-		# exception: the decoders' lazy _BR_STATE/_ZSTD_STATE, each published by
+		# session per call (_create_session), the module holds no connection
+		# pool and no `global` written after startup with two exceptions. The
+		# first is the session registry (_SESSIONS, R-0114): opened sessions
+		# live in it under _SESSIONS_LOCK, and a call on one holds that
+		# session's own lock, taken without waiting, until it is over, because
+		# a _ChSession is not thread-safe. The second is the decoders' lazy
+		# _BR_STATE/_ZSTD_STATE, each published by
 		# a single dict store of the finished result, so two threads racing the
 		# first load at worst both load and one store wins -- safe under the
 		# pool. The disk cache is keyed per URL and landed with os.replace.
