@@ -175,6 +175,12 @@ def group_b(suite, ts, root):
             problems.append("%s: not the status: %r" % (what, reply))
     suite.record("B", "function-missing-refused-empty-call-is-the-status",
                  problems)
+    problems = []
+    for value in (7, True, [], {}):
+        reply = ts.handle_tshark_call({"function": value}, root)
+        if "function must be a string" not in str(reply.get("error")):
+            problems.append("function=%r: %r" % (value, reply))
+    suite.record("B", "function-nonstring-refused", problems)
 
 
 def group_e(suite, ts, originals, before, pyc_before):

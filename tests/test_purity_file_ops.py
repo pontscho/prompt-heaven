@@ -713,6 +713,17 @@ def group_a(suite, drv):
         if res.get("isError"):
             problems.append("%s was flagged: %r" % (what, res))
     suite.record("A", "function-missing-refused-empty-call-is-the-status", problems)
+    # A non-string function is a flagged refusal, not a crash or the status.
+    problems = []
+    for value in (7, True, [], {}):
+        resp = drv.cli.rpc("tools/call", {"name": "purity_call",
+                                          "arguments": {"function": value}})
+        res = resp.get("result") or {}
+        txt = ((res.get("content") or [{}])[0]).get("text", "")
+        if res.get("isError") is not True or "function must be a string" not in txt:
+            problems.append("function=%r: isError=%r %r"
+                            % (value, res.get("isError"), txt[:160]))
+    suite.record("A", "function-nonstring-refused", problems)
 
 
 # ---------------------------------------------------------------------------

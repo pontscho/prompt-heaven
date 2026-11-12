@@ -8811,10 +8811,12 @@ def _missing_function_refusal(arguments, params, names, envelope_keys=("function
 
 
 def handle_search_call(arguments: dict) -> dict:
-    function = arguments.get("function") or arguments.get("f") or ""
-    if not isinstance(function, str):
-        return {"error": f"'function' must be a string; got {type(function).__name__}."}
-    function = function.strip()
+    function = arguments.get("function")
+    if function in (None, ""):
+        function = arguments.get("f")
+    if function is not None and not isinstance(function, str):
+        return {"error": f"function must be a string; got {type(function).__name__}."}
+    function = (function or "").strip()
     raw_params = arguments.get("params") or arguments.get("p") or {}
     try:
         params = _resolve_aliases(_ensure_dict(raw_params))

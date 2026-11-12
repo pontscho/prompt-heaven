@@ -8497,7 +8497,12 @@ def _missing_function_refusal(arguments, params, names, envelope_keys=("function
 
 def handle_webfetch_call(arguments: dict, project_root: str, cache_root: Optional[str] = None) -> dict:
 	cache_root = cache_root or _default_cache_root()
-	function = (arguments.get("function") or arguments.get("f") or "").strip()
+	function = arguments.get("function")
+	if function in (None, ""):
+		function = arguments.get("f")
+	if function is not None and not isinstance(function, str):
+		return {"error": "function must be a string"}
+	function = (function or "").strip()
 	raw_params = arguments.get("params") or arguments.get("p") or {}
 	try:
 		params = _resolve_aliases(_ensure_dict(raw_params))

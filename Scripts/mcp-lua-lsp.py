@@ -2028,6 +2028,8 @@ def _missing_function_refusal(arguments, params, names, envelope_keys=("function
 async def handle_luals_call(args: dict, server: Optional["McpServer"] = None) -> str:
     """Universal dispatcher: routes to one of 13 luals handlers."""
     function = args.get("function", "")
+    if function is not None and not isinstance(function, str):
+        return _ErrorText(json.dumps({"error": "function must be a string"}, ensure_ascii=False))
     params = args.get("params") or {}
 
     def _serialize(fn: str, data: Any) -> str:

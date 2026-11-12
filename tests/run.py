@@ -317,7 +317,7 @@ def run_smoke(opts):
 #     Adding or retiring a server would trip a typed count for no defect.
 SUITES = [
     ("inspect_validate", run_inspect_validate,
-     "mcp-inspect VALIDATION family", 314),
+     "mcp-inspect VALIDATION family", 315),
     ("mcp_first_guard", run_mcp_first_guard,
      "mcp-first-guard PreToolUse Bash hook", 381),
     # The egress work added five rows (M EG1-EG4: --egress-port /
@@ -392,12 +392,12 @@ SUITES = [
      "per match at its start line, in-process and worker identical), and a "
      "function-less call carrying params refused while the empty call stays "
      "the status",
-     318),
+     319),
     ("mcp_git_params", run_mcp_git_params,
      "mcp-git named params -> git argv, offline; a real unexposed subcommand "
      "refused with no near-miss pointer, a key no git option can be spelled "
      "from refused, a `git grep` exit 1 with no output a plain no-match "
-     "answer; a function-less call carrying params refused", 318),
+     "answer; a function-less call carrying params refused", 319),
     ("name_existence", run_name_existence,
      "corpus + server text <-> live MCP inventory name existence", None),
     ("spawn_stdin", run_spawn_stdin,
@@ -413,7 +413,7 @@ SUITES = [
      "the frontmatter aliases synonym field, "
      "the frozen-record advisory carve-out, "
      "the dead [[slug]] wikilink gate, roadmap pages as frozen records, "
-     "a function-less call carrying params refused", 172),
+     "a function-less call carrying params refused", 173),
     ("wiki_index", run_wiki_index,
      "INDEX.md rendering and the page-type constants: the server's "
      "render_index never listing a roadmap-item and counting them in one "
@@ -685,7 +685,7 @@ SUITES = [
      "fix rows (cache keyed on allow_private, 0700/0600 modes, printable URL "
      "and header echoes), one uv stdio row); "
      "every refusal and the hmac.compare_digest tag gate, the generator block "
-     "contract, and the AES-256-GCM decrypt floor", 847),
+     "contract, and the AES-256-GCM decrypt floor", 848),
     # TYPED, not None, although it is one-plus-one cases per server: here a
     # server appearing WITHOUT a declared row is the defect, so a count that
     # moves when the roster moves is the alarm working rather than noise.  That
@@ -766,7 +766,7 @@ SUITES = [
      "answers on all four of its paths, each with a control proving the "
      "fixture took it, and is advertised wherever the function list is; a "
      "function-less call carrying params is refused while an explicit "
-     "`status` keeps its params", 15),
+     "`status` keeps its params", 16),
     # TYPED: 5 rules x 9 hosts + 1 judged-keys + 5 control + 2 hygiene. A
     # host that learns to refuse an unknown parameter without a row here IS
     # the defect, so a count that moves when that roster moves is the alarm
@@ -812,7 +812,7 @@ SUITES = [
      "with block and stop notices outside the cap, -32602 params, the "
      "grep.app schema check, pacing before the warm-up, the call deadline, "
      "a busy endpoint keeping results, _log_value at the log sites and the "
-     "run() catch-all answering -32603 live", 82),
+     "run() catch-all answering -32603 live", 83),
     ("webfetch_roots", run_webfetch_roots,
      "mcp-webfetch's two roots (R-0054): --cache-root names the cache "
      "directory itself, default $XDG_CACHE_HOME/web-fetch (absolute only) "
@@ -1090,7 +1090,7 @@ SUITES = [
      "token POST deadline, the stale-temp sweep and a trust store that ignores "
      "SSL_CERT_FILE, and the init subcommand: a client_secret json to the "
      "0600 config, installed type only, host table, symlink and size, no "
-     "overwrite without --force, no secret printed, no partial file)", 232),
+     "overwrite without --force, no secret printed, no partial file)", 233),
     # TYPED: a fixed case table, written RED first (every row but group S failed
     # on the missing server). Group S tests the stub hub itself.
     ("messagebox", run_messagebox,
@@ -1158,7 +1158,7 @@ SUITES = [
      "stubbed: a JSON list and a comma-separated string build the same -e "
      "argv, a non-str / non-list value is a ValueError refusal and an error "
      "reply, never an AttributeError; and a function-less call carrying "
-     "params is refused while the empty call stays the status", 11),
+     "params is refused while the empty call stays the status", 12),
     # TYPED: a fixed case table (A 7, B 3, C 7, D 5, E 14, F 5, H 16, G 2), so
     # a count that moves is the alarm.
     ("fetch", run_fetch,

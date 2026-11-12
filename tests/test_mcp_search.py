@@ -263,6 +263,15 @@ def group_a(suite, mod):
     problems += expect(world.calls == [], "a refused call searched: %r" % world.calls)
     suite.record("A", "function-missing-refused-empty-is-status", problems)
 
+    # A non-string function (7, true, [], {}) is a refusal, not the status and
+    # not a search.
+    problems = []
+    for value in (7, True, [], {}):
+        err, text = call(mod, {"function": value})
+        problems += flag(err, True) + expect("function must be a string" in text, "function=%r: got %r" % (value, text))
+    problems += expect(world.calls == [], "a refused call searched: %r" % world.calls)
+    suite.record("A", "function-nonstring-refused", problems)
+
 
 # ---------------------------------------------------------------------------
 # B -- params

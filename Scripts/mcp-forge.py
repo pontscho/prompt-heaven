@@ -1946,7 +1946,12 @@ def handle_forge_call(arguments: dict,
                       project_root: str,
                       cfg_path: str) -> dict:
 	"""Route a forge_call invocation to the appropriate handler."""
-	function = (arguments.get("function") or arguments.get("f") or "").strip()
+	function = arguments.get("function")
+	if function in (None, ""):
+		function = arguments.get("f")
+	if function is not None and not isinstance(function, str):
+		return {"error": "function must be a string"}
+	function = (function or "").strip()
 	# `status` is the spelling a caller reaches for when the answer it wants is
 	# the empty call's -- server status plus the loaded YAML summary. Folded to ""
 	# HERE, before anything reads `function`, so it takes every one of the empty

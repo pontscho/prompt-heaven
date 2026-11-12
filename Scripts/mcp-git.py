@@ -1544,7 +1544,12 @@ def _missing_function_refusal(arguments, params, names, envelope_keys=("function
 
 
 def handle_git_call(arguments: dict, project_root: str, strict: bool = False) -> dict:
-    function = (arguments.get("function") or arguments.get("f") or "").strip()
+    function = arguments.get("function")
+    if function in (None, ""):
+        function = arguments.get("f")
+    if function is not None and not isinstance(function, str):
+        return {"error": "function must be a string"}
+    function = (function or "").strip()
     raw_params = arguments.get("params") or arguments.get("p") or {}
     try:
         params = _ensure_dict(raw_params)

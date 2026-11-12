@@ -1305,6 +1305,8 @@ def _missing_function_refusal(arguments, params, names, envelope_keys=("function
 async def handle_lldb_call(mgr: SessionManager, args: dict) -> ToolResult:
     """Dispatcher: call any LLDB tool by name. Used by the AI via the lldb-mcp skill."""
     function = args.get("function", "")
+    if function is not None and not isinstance(function, str):
+        return {"error": "function must be a string"}
     raw_params = args.get("params") or {}
     try:
         params = _ensure_dict(raw_params)

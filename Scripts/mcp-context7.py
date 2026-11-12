@@ -800,6 +800,8 @@ def _missing_function_refusal(arguments, params, names, envelope_keys=("function
 async def handle_context7_call(args: dict) -> Union[str, dict]:
     """Dispatcher: call any Context7 tool by name."""
     function = args.get("function", "")
+    if function is not None and not isinstance(function, str):
+        return {"error": "function must be a string"}
     raw_params = args.get("params") or {}
     try:
         params = _ensure_dict(raw_params)

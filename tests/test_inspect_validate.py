@@ -1025,6 +1025,19 @@ def run(opts=None):
         suite.record("O", "function-missing-refused-empty-call-is-the-status",
                      problems)
 
+        # A non-string function is a flagged refusal, not a crash and not the
+        # status reply.
+        problems = []
+        for value in (7, True, [], {}):
+            resp = cli.rpc("tools/call", {"name": cli.tool,
+                                          "arguments": {"function": value}})
+            res = resp.get("result") or {}
+            txt = ((res.get("content") or [{}])[0]).get("text", "")
+            if res.get("isError") is not True or "function must be a string" not in txt:
+                problems.append("function=%r: isError=%r %r"
+                                % (value, res.get("isError"), txt[:160]))
+        suite.record("O", "function-nonstring-refused", problems)
+
         # ============ Q: the param gate, over live JSON-RPC ============
         # A misspelled key used to be dropped without a word, and every one of
         # these handlers has a no-filter default that is a plausible answer:

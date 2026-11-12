@@ -1216,6 +1216,20 @@ def _run_d(suite, fx):
     _guard(suite, GRP_D, "D10 function-missing-or-nested-refused",
            function_missing_or_nested)
 
+    def function_nonstring():
+        """D11: a function that is not a string (7, true, [], and the {} that
+        _pick folds into absent) is an invalid_params refusal, never the
+        status banner."""
+        mod = _mod()
+        problems = []
+        for value in (7, True, [], {}):
+            res = mod.handle_gd_call({"function": value})
+            got = _in(res)
+            if got is None or got[0] != "invalid_params" or "function must be a string" not in got[1]:
+                problems.append("function=%r: %r" % (value, res))
+        return problems, []
+    _guard(suite, GRP_D, "D11 function-nonstring-refused", function_nonstring)
+
 
 # ---------------------------------------------------------------------------
 # E: validation before the token

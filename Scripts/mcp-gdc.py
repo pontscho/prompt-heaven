@@ -2166,7 +2166,12 @@ def _missing_function_refusal(arguments, params, names, envelope_keys=("function
 
 async def handle_gdc_call(mgr: GdcManager, args: dict) -> Any:
     """Dispatcher: call any GDC tool by name via the gdc-mcp skill."""
-    function = args.get("function") or args.get("f") or ""
+    function = args.get("function")
+    if function in (None, ""):
+        function = args.get("f")
+    if function is not None and not isinstance(function, str):
+        return {"error": "function must be a string"}
+    function = function or ""
     raw_params = args.get("params") or args.get("p") or {}
     try:
         params = _ensure_dict(raw_params)

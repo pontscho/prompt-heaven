@@ -817,6 +817,33 @@ def missing_function_checks(srv, cfg, checks):
             "isError=%r; envelope=%s" % (is_error, json.dumps(resp)[:200])))
 
 
+# A `function` that is not a string is a refusal, not a crash and not a status
+# banner. `[]` and `{}` are the falsy cases a bare `or ""` would fold into the
+# banner; 7 and True are the truthy ones that would reach `.strip()`.
+NONSTRING_TOKEN = "function must be a string"
+NONSTRING_VALUES = (7, True, [], {})
+
+
+def nonstring_function_checks(srv, cfg, checks):
+    """A non-string top-level `function` is isError True, "function must be a string".
+
+    mcp-proxy has no function layer (MISSING_EXEMPT) and is out of scope. The
+    reply is read as a tool-result envelope: a JSON-RPC -32603 from the run()
+    catch-all (is_error None) fails the row, because it is the safety net and
+    not a refusal.
+    """
+    if cfg["file"] in MISSING_EXEMPT:
+        return
+    for offset, value in enumerate(NONSTRING_VALUES):
+        is_error, text, resp = _dispatch_call(srv, 50 + offset, cfg["tool"],
+                                              {"function": value})
+        checks.append(check(
+            "non-string function %s -> isError True + function must be a string"
+            % json.dumps(value),
+            is_error is True and NONSTRING_TOKEN in text,
+            "isError=%r; text=%r; resp=%s" % (is_error, text[:200], json.dumps(resp)[:200])))
+
+
 def near_miss_checks(srv, cfg, checks):
     """A name one typo away from a real one must be answered with that name.
 
@@ -1799,6 +1826,9 @@ def _run_server_checks(cfg):
         #      is refused; only the truly empty call keeps the banner (the
         #      shared `_missing_function_refusal` block).
         missing_function_checks(srv, cfg, checks)
+
+        # 8b''. a non-string function is a refusal on every dispatcher.
+        nonstring_function_checks(srv, cfg, checks)
 
         # 8c. gdc-only: `open_pages` is a real alias of list_pages, and the
         #     unknown-function reply offers no uncallable name.

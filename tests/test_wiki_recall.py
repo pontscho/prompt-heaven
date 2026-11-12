@@ -6169,6 +6169,15 @@ def run(opts=None):
                              _d("kept", "the empty call and a ceiling-only params")],
                      text="")
 
+        problems = []
+        for ns_value in (7, True, [], {}):
+            ns_res = sdrv.mod.handle_wiki_call({"function": ns_value}, sdrv.root, WIKI_REL)
+            if "function must be a string" not in str(ns_res.get("error")):
+                problems.append("function=%r: %r" % (ns_value, ns_res))
+        suite.record("N", "function-nonstring-refused", problems,
+                     detail=[_d("call", "function 7 / true / [] / {} is a refusal, never the liveness reply")],
+                     text="")
+
         # `path` a SECOND time, and on a FILTER rather than on a lookup.  Both
         # search and list take a path_prefix, and the FIRST clause of the rule
         # they filter by is an exact match on the docs-relative path -- so a

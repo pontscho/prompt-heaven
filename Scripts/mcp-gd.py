@@ -4546,6 +4546,10 @@ def handle_gd_call(arguments: dict) -> dict:
     """Route one gd_call. Every failure is returned as a refusal dict. The
     order is fixed: function, unknown parameters, parameter values -- and only
     then the token read and the socket, inside the handler."""
+    # _pick folds an empty object into "absent"; a non-string function is a
+    # refusal, so the one value it would swallow is judged first.
+    if arguments.get("function") == {} or arguments.get("f") == {}:
+        return _tool_refusal("invalid_params", "function must be a string")
     try:
         function = _pick(arguments, "function", "f")
         raw_params = _pick(arguments, "params", "p")

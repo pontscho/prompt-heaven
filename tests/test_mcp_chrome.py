@@ -8381,6 +8381,14 @@ def wf_status_row(suite, wf, root):
         return problems, ["a function-less call carrying params / p / a stray key is refused before any fetch; the empty call and a ceiling-only params stay the status reply"]
     run_row(suite, GO, "webfetch-function-missing-refused-empty-call-is-the-status", function_missing, src + "; ADR 0030 addendum")
 
+    def function_nonstring():
+        problems = []
+        for value in (7, True, [], {}):
+            got = wf.handle_webfetch_call({"function": value}, root, root)
+            problems += problem_if("function must be a string" not in str(got.get("error")), "function=%r: %s" % (value, short(got)))
+        return problems, ["a non-string function (7, true, [], {}) is refused before any fetch, never an AttributeError and never the status reply"]
+    run_row(suite, GO, "webfetch-function-nonstring-refused", function_nonstring, src + "; ADR 0030 addendum")
+
 
 def wf_hardening_rows(suite, wf, root, vp):
     """Security review 20261001-082224 fix pass: F1 (cache vs allow_private), F4 (description), F39 (cache modes), F41 (printable URL echoes)."""

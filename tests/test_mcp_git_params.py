@@ -947,6 +947,20 @@ def run(opts=None):
                              "nothing spawned; empty call and ceiling-only stay the listing"],
                      brief="%s | function-missing-refused"
                            % (H.FAIL if problems else H.PASS))
+        # A non-string function is a refusal, never an AttributeError or the
+        # allowlist listing, and nothing is spawned.
+        before = len(drv.stub.calls)
+        problems = []
+        for value in (7, True, [], {}):
+            res = drv.mod.handle_git_call({"function": value}, H.REPO_ROOT)
+            if "function must be a string" not in str(res.get("error")):
+                problems.append("function=%r: %r" % (value, res))
+        if len(drv.stub.calls) != before:
+            problems.append("a refused call spawned git")
+        suite.record("H", "function-nonstring-refused", problems,
+                     detail=["function 7 / true / [] / {}: refused, nothing spawned"],
+                     brief="%s | function-nonstring-refused"
+                           % (H.FAIL if problems else H.PASS))
         check(suite, drv, "H", "unknown-function-refused", "push",
               {"remote": "origin"}, error="not on the read-only whitelist")
         check(suite, drv, "H", "branch-positional-refused", "branch",

@@ -7120,7 +7120,12 @@ async def handle_purity_call(arguments: dict, project_root: str, strict: bool = 
     handlers are awaited directly; sync file handlers run in the default thread
     executor so long file ops never block the event loop.
     """
-    function = (arguments.get("function") or arguments.get("f") or "").strip()
+    function = arguments.get("function")
+    if function in (None, ""):
+        function = arguments.get("f")
+    if function is not None and not isinstance(function, str):
+        return {"error": "function must be a string"}
+    function = (function or "").strip()
     canonical_func = _canonical_function(function)
     raw_params = arguments.get("params") or arguments.get("p") or {}
 

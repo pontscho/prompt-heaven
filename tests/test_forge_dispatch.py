@@ -170,6 +170,15 @@ def group_a(suite, mod, ws):
                  detail=["CONTROL: function=status folds to the empty call whatever",
                          "params it carries; max_answer_chars alone is neutral"])
 
+    problems = []
+    for value in (7, True, [], {}):
+        reply = mod.handle_forge_call({"function": value}, root, CFG)
+        if "function must be a string" not in reply_text(reply):
+            problems.append("function=%r: %s" % (value, reply_text(reply)[:160]))
+    suite.record("A", "function-nonstring-is-refused", problems,
+                 detail=["function 7 / true / [] / {} is an error-shaped refusal,",
+                         "never an AttributeError and never the status banner"])
+
 
 # ---------------------------------------------------------------------------
 # Group B -- the alias is advertised wherever the function list is

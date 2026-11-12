@@ -2115,6 +2115,8 @@ def _missing_function_refusal(arguments, params, names, envelope_keys=("function
 async def handle_clangd_call(args: dict, server: Optional["McpServer"] = None) -> str:
     """Universal dispatcher: routes to one of 13 clangd handlers."""
     function = args.get("function", "")
+    if function is not None and not isinstance(function, str):
+        return _ErrorText(json.dumps({"error": "function must be a string"}, ensure_ascii=False))
     raw_params = args.get("params") or {}
     try:
         params = _resolve_aliases(raw_params)
