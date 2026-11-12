@@ -914,7 +914,7 @@ def _zstd_decompress(data, max_output):
 # the VERIFIED stdlib transport this script starts on. It replaced the two
 # third-party impersonation packages. Taken whole, like the regions above.
 # Refresh: python3 Scripts/amalgamate.py -- do not edit inside the region.
-# BEGIN GENERATED: _mcp_chrome.py :: ChromeClientError, ChromeTls12Error, ChromeBodyTooLarge, _chrome_profile, CHROME_PROFILE, CH_MAX_RECORD_BYTES, CH_MAX_HANDSHAKE_BYTES, CH_MAX_FRAME_BYTES, CH_MAX_HEADER_LIST_BYTES, CH_MAX_HEADER_BLOCK_BYTES, CH_HPACK_TABLE_BYTES, CH_MAX_HPACK_INT, CH_MAX_HPACK_INT_CONTINUATIONS, CH_MAX_H2_CONTROL_FRAMES, CH_MAX_H2_EMPTY_FRAMES, CH_MAX_H2_CONTINUATION_FRAMES, CH_MAX_H1_HEAD_BYTES, CH_MAX_H1_HEADERS, CH_MAX_H1_CHUNK_LINE_BYTES, CH_MAX_BODY_BYTES, CH_DEFAULT_DECODE_CAP, CH_MAX_CONTENT_CODINGS, CH_MAX_REDIRECTS, CH_MAX_COOKIES_PER_DOMAIN, CH_MAX_COOKIES, CH_MAX_COOKIE_BYTES, _CH_X25519_P, _CH_X25519_A24, _ch_x25519_cswap, _ch_x25519, _ch_x25519_keypair, _CH_P256_P, _CH_P256_B, _CH_P256_N, _CH_P256_GX, _CH_P256_GY, _ch_p256_double, _ch_p256_add, _ch_p256_mul, _ch_p256_keypair, _ch_p256_shared, _ChMlKem768, _ch_aes_tables, _CH_AES_TABLES, _ChAesGcm, _ChChaCha20Poly1305, _ch_hkdf_extract, _ch_hkdf_expand, _ch_hkdf_expand_label, _ch_derive_secret, CH_MAX_PLAINTEXT_BYTES, _ChReader, _ChRecordReader, _ChHandshakeReader, _ChRecordCipher, _CH_KEY_SHARE_BYTES, _ch_vec, _ch_draw, _ch_idna_encode, _ch_sni_name, _ch_grease, _ch_permutation, _ch_key_share_entry, _ch_hello_extensions, _ch_hello_wire, _ch_client_hello, _CH_ALERT_NAMES, _ch_alert_name, _CH_HRR_RANDOM, _CH_TLS13_SUITES, _CH_SERVER_SHARE_BYTES, _CH_EE_FORBIDDEN, _ch_parse_server_hello, _ch_key_share_new, _ch_key_share_secret, _ch_traffic_cipher, CH_MAX_KEY_UPDATES, _ChTls, _ChTlsStream, _ch_huffman_table, _CH_HUFFMAN, _ch_huffman_decode_table, _CH_HUFFMAN_DECODE, _ch_hpack_static, _CH_HPACK_STATIC, _ch_hpack_int, _ch_huffman_encode, _ch_huffman_size, _ch_hpack_string, _ch_cookie_crumbs, _ChHpackEncoder, _ch_hpack_decode_int, _ch_huffman_decode, _ch_hpack_decode_string, _ChHpackDecoder, _CH_BAD_PORTS, _ch_split_url, _CH_TCHAR_SYMBOLS, _CH_FINGERPRINT_NAMES, _CH_FINGERPRINT_PREFIXES, _CH_FRAMING_NAMES, _CH_FRAMING_PREFIXES, _ch_header_pairs, _ch_check_caller_headers, _ch_origin_of, _ch_origin_text, _CH_PUBLIC_SUFFIXES, _ch_is_ip_host, _ch_is_public_suffix, _ch_site_of, _ch_sec_fetch_site, _ch_referer_for, _ch_profile_headers, _CH_H2_ERROR_NAMES, _ch_h2_frame, _ChH2Connection, _ChH1Connection, _ChHeaders, _ch_leading_digits, _ch_cookie_date, _ChCookieJar, _ChResponse, _ch_zlib_decode, _ch_decode_body, _CH_TRANSLATION_PREFIXES, _ch_embedded_ipv4, _ch_address_refused, _ch_public_only_policy, _ch_open_socket, _CH_REDIRECT_CODES, _CH_SITE_RANK, _ch_transport_error, _ch_unvetted_policy, _ChDeadlineSocket, _ChFallbackConnection, _ChSession, _ch_session_new
+# BEGIN GENERATED: _mcp_chrome.py :: ChromeClientError, ChromeTls12Error, ChromeBodyTooLarge, _chrome_profile, CHROME_PROFILE, CH_MAX_RECORD_BYTES, CH_MAX_HANDSHAKE_BYTES, CH_MAX_FRAME_BYTES, CH_MAX_HEADER_LIST_BYTES, CH_MAX_HEADER_BLOCK_BYTES, CH_HPACK_TABLE_BYTES, CH_MAX_HPACK_INT, CH_MAX_HPACK_INT_CONTINUATIONS, CH_MAX_H2_CONTROL_FRAMES, CH_MAX_H2_EMPTY_FRAMES, CH_MAX_H2_CONTINUATION_FRAMES, CH_MAX_H1_HEAD_BYTES, CH_MAX_H1_HEADERS, CH_MAX_H1_CHUNK_LINE_BYTES, CH_MAX_BODY_BYTES, CH_DEFAULT_DECODE_CAP, CH_MAX_CONTENT_CODINGS, CH_MAX_REDIRECTS, CH_MAX_COOKIES_PER_DOMAIN, CH_MAX_COOKIES, CH_MAX_COOKIE_BYTES, _CH_X25519_P, _CH_X25519_A24, _ch_x25519_cswap, _ch_x25519, _ch_x25519_keypair, _CH_P256_P, _CH_P256_B, _CH_P256_N, _CH_P256_GX, _CH_P256_GY, _CH_P384_P, _CH_P384_B, _CH_P384_N, _CH_P384_GX, _CH_P384_GY, _ch_ec_double, _ch_ec_add, _ch_ec_mul, _ch_p256_keypair, _ch_p256_shared, _ch_p384_keypair, _ch_p384_shared, _ChMlKem768, _ch_aes_tables, _CH_AES_TABLES, _ChAesGcm, _ChChaCha20Poly1305, _ch_hkdf_extract, _ch_hkdf_expand, _ch_hkdf_expand_label, _ch_derive_secret, CH_MAX_PLAINTEXT_BYTES, _ChReader, _ChRecordReader, _ChHandshakeReader, _ChRecordCipher, _CH_KEY_SHARE_BYTES, _ch_vec, _ch_draw, _ch_idna_encode, _ch_sni_name, _ch_grease, _ch_permutation, _ch_key_share_entry, _ch_hello_extensions, _ch_hello_wire, _ch_client_hello, _CH_ALERT_NAMES, _ch_alert_name, _CH_HRR_RANDOM, _CH_TLS13_SUITES, _CH_SERVER_SHARE_BYTES, _CH_EE_FORBIDDEN, _ch_parse_server_hello, _ch_key_share_new, _ch_key_share_secret, _ch_traffic_cipher, CH_MAX_KEY_UPDATES, _ChTls, _ChTlsStream, _ch_huffman_table, _CH_HUFFMAN, _ch_huffman_decode_table, _CH_HUFFMAN_DECODE, _ch_hpack_static, _CH_HPACK_STATIC, _ch_hpack_int, _ch_huffman_encode, _ch_huffman_size, _ch_hpack_string, _ch_cookie_crumbs, _ChHpackEncoder, _ch_hpack_decode_int, _ch_huffman_decode, _ch_hpack_decode_string, _ChHpackDecoder, _CH_BAD_PORTS, _ch_split_url, _CH_TCHAR_SYMBOLS, _CH_FINGERPRINT_NAMES, _CH_FINGERPRINT_PREFIXES, _CH_FRAMING_NAMES, _CH_FRAMING_PREFIXES, _ch_header_pairs, _ch_check_caller_headers, _ch_origin_of, _ch_origin_text, _CH_PUBLIC_SUFFIXES, _ch_is_ip_host, _ch_is_public_suffix, _ch_site_of, _ch_sec_fetch_site, _ch_referer_for, _ch_profile_headers, _CH_H2_ERROR_NAMES, _ch_h2_frame, _ChH2Connection, _ChH1Connection, _ChHeaders, _ch_leading_digits, _ch_cookie_date, _ChCookieJar, _ChResponse, _ch_zlib_decode, _ch_decode_body, _CH_TRANSLATION_PREFIXES, _ch_embedded_ipv4, _ch_address_refused, _ch_public_only_policy, _ch_open_socket, _CH_REDIRECT_CODES, _CH_SITE_RANK, _ch_transport_error, _ch_unvetted_policy, _ChDeadlineSocket, _ChFallbackConnection, _ChSession, _ch_session_new
 class ChromeClientError(ConnectionError):
 	"""A refused or failed exchange on the Chrome client path.
 
@@ -1069,9 +1069,11 @@ def _chrome_profile():
 	p["h1_order"] = ("Host", "Connection", "Cache-Control", "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform", "Upgrade-Insecure-Requests", "User-Agent", "Accept", "Sec-Fetch-Site", "Sec-Fetch-Mode", "Sec-Fetch-User", "Sec-Fetch-Dest", "Referer", "Accept-Encoding", "Accept-Language", "Cookie")
 	# h1-tls/ (20/20) and h1-plain/ (16/16), every request on the connection: the Connection header value.
 	p["h1_connection"] = "keep-alive"
-	# HelloRetryRequest groups we answer: P-256 only (0x0017, the one group offered without a share). hrr/
-	# (20/20): after an HRR for 0x0017 the CH2 key_share holds ONE entry, 0x0017 (65-byte key, no GREASE share).
-	p["hrr_groups"] = (0x0017,)
+	# HelloRetryRequest groups we answer: the two NIST curves Chrome offers in supported_groups without a share,
+	# P-256 (0x0017) and P-384 (0x0018). hrr/ (20/20): after an HRR for 0x0017 the CH2 key_share holds ONE entry,
+	# 0x0017 (65-byte key, no GREASE share). hrr-p384/ (7/7, a loopback capture with --hrr-group 0x0018 under Chrome
+	# 157.0.8103.51, whose CH1 and CH2 JA4 equal the 154 ones): the same shape, ONE entry, 0x0018 (97-byte key).
+	p["hrr_groups"] = (0x0017, 0x0018)
 	# hrr/ (20/20): a compat ChangeCipherSpec record (type 20, 1 byte) precedes CH2 every time.
 	p["hrr_compat_ccs"] = True
 	return p
@@ -1238,13 +1240,28 @@ _CH_P256_GX = 0x6B17D1F2E12C4247F8BCE6E563A440F277037D812DEB33A0F4A13945D898C296
 _CH_P256_GY = 0x4FE342E2FE1A7F9B8EE7EB4A7C0F9E162BCE33576B315ECECBB6406837BF51F5
 
 
-def _ch_p256_double(pt):
-	"""2*pt in Jacobian coordinates (X, Y, Z); Z == 0 is the point at infinity.
+_CH_P384_P = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFFFF0000000000000000FFFFFFFF
 
-	The a = -3 doubling (EFD dbl-2001-b): delta = Z^2, gamma = Y^2,
-	beta = X*gamma, alpha = 3*(X - delta)*(X + delta).
+
+_CH_P384_B = 0xB3312FA7E23EE7E4988E056BE3F82D19181D9C6EFE8141120314088F5013875AC656398D8A2ED19D2A85C8EDD3EC2AEF
+
+
+_CH_P384_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFC7634D81F4372DDF581A0DB248B0A77AECEC196ACCC52973
+
+
+_CH_P384_GX = 0xAA87CA22BE8B05378EB1C71EF320AD746E1D3B628BA79B9859F741E082542A385502F25DBF55296C3A545E3872760AB7
+
+
+_CH_P384_GY = 0x3617DE4A96262C6F5D9E98BF9292DC29F8F41DBD289A147CE9DA3113B5F0B8C00A60B1CE1D7E819D7A431D7C90EA0E5F
+
+
+def _ch_ec_double(pt, p):
+	"""2*pt in Jacobian coordinates (X, Y, Z) over GF(p); Z == 0 is the point at infinity.
+
+	Shared by P-256 and P-384: both are y^2 = x^3 - 3x + b, so the same a = -3
+	doubling (EFD dbl-2001-b) serves both: delta = Z^2, gamma = Y^2,
+	beta = X*gamma, alpha = 3*(X - delta)*(X + delta). Only the prime differs.
 	"""
-	p = _CH_P256_P
 	x, y, z = pt
 	if z == 0 or y == 0:
 		return (1, 1, 0)
@@ -1258,13 +1275,13 @@ def _ch_p256_double(pt):
 	return (x3, y3, z3)
 
 
-def _ch_p256_add(p1, p2):
-	"""p1 + p2 in Jacobian coordinates (EFD add-2007-bl shape, complete by cases).
+def _ch_ec_add(p1, p2, p):
+	"""p1 + p2 in Jacobian coordinates over GF(p) (EFD add-2007-bl shape, complete by cases).
 
 	Handles the cases the formula does not: either input at infinity, p1 == p2
-	(falls through to doubling) and p1 == -p2 (infinity).
+	(falls through to doubling) and p1 == -p2 (infinity). The formula never
+	reads the curve coefficients, so it serves P-256 and P-384 alike.
 	"""
-	p = _CH_P256_P
 	x1, y1, z1 = p1
 	x2, y2, z2 = p2
 	if z1 == 0:
@@ -1281,7 +1298,7 @@ def _ch_p256_add(p1, p2):
 	r = (s2 - s1) % p
 	if h == 0:
 		if r == 0:
-			return _ch_p256_double(p1)
+			return _ch_ec_double(p1, p)
 		return (1, 1, 0)
 	hh = h * h % p
 	hhh = h * hh % p
@@ -1292,23 +1309,23 @@ def _ch_p256_add(p1, p2):
 	return (x3, y3, z3)
 
 
-def _ch_p256_mul(k, x, y):
-	"""k * (x, y) -> affine (x, y), or None for the point at infinity.
+def _ch_ec_mul(k, x, y, p, bits):
+	"""k * (x, y) over GF(p) -> affine (x, y), or None for the point at infinity.
 
-	A fixed 4-bit window over a 16-entry table (0*P .. 15*P) in Jacobian
-	coordinates, one inversion at the end. NOT constant-time: the table lookup
-	and the infinity branches depend on the scalar (declared in the module
-	docstring; the keys are ephemeral per connection).
+	`bits` is the curve's bit size (256 or 384; a multiple of 4). A fixed 4-bit
+	window over a 16-entry table (0*P .. 15*P) in Jacobian coordinates, one
+	inversion at the end. NOT constant-time: the table lookup and the infinity
+	branches depend on the scalar (declared in the module docstring; the keys
+	are ephemeral per connection).
 	"""
-	p = _CH_P256_P
 	base = (x, y, 1)
 	table = [(1, 1, 0), base]
 	for i in range(2, 16):
-		table.append(_ch_p256_add(table[i - 1], base))
+		table.append(_ch_ec_add(table[i - 1], base, p))
 	acc = (1, 1, 0)
-	for shift in range(252, -4, -4):
-		acc = _ch_p256_double(_ch_p256_double(_ch_p256_double(_ch_p256_double(acc))))
-		acc = _ch_p256_add(acc, table[(k >> shift) & 0xF])
+	for shift in range(bits - 4, -4, -4):
+		acc = _ch_ec_double(_ch_ec_double(_ch_ec_double(_ch_ec_double(acc, p), p), p), p)
+		acc = _ch_ec_add(acc, table[(k >> shift) & 0xF], p)
 	ax, ay, az = acc
 	if az == 0:
 		return None
@@ -1331,7 +1348,7 @@ def _ch_p256_keypair(rand=None):
 	for _ in range(64):
 		d = int.from_bytes(bytes(rand(32)), "big")
 		if 1 <= d < n:
-			pt = _ch_p256_mul(d, _CH_P256_GX, _CH_P256_GY)
+			pt = _ch_ec_mul(d, _CH_P256_GX, _CH_P256_GY, _CH_P256_P, 256)
 			return d, b"\x04" + pt[0].to_bytes(32, "big") + pt[1].to_bytes(32, "big")
 	raise ChromeClientError("tls: P-256 key generation failed")
 
@@ -1359,10 +1376,57 @@ def _ch_p256_shared(priv_int, peer_pub_bytes):
 		raise ChromeClientError("tls: invalid P-256 key share")
 	if (y * y - (x * x * x - 3 * x + _CH_P256_B)) % p != 0:
 		raise ChromeClientError("tls: invalid P-256 key share")
-	pt = _ch_p256_mul(priv_int, x, y)
+	pt = _ch_ec_mul(priv_int, x, y, p, 256)
 	if pt is None:
 		raise ChromeClientError("tls: invalid P-256 key share")
 	return pt[0].to_bytes(32, "big")
+
+
+def _ch_p384_keypair(rand=None):
+	"""A fresh P-384 ECDH key pair: (private scalar int, 97-byte uncompressed public point).
+
+	The same shape as _ch_p256_keypair with 48-byte draws: `rand(n) -> bytes`
+	defaults to os.urandom, the scalar is drawn by rejection sampling into
+	[1, n - 1] (FIPS 186-5 A.2.2 shape) and a source that fails 64 draws in a
+	row is refused rather than looped on forever.
+	"""
+	if rand is None:
+		rand = os.urandom
+	n = _CH_P384_N
+	for _ in range(64):
+		d = int.from_bytes(bytes(rand(48)), "big")
+		if 1 <= d < n:
+			pt = _ch_ec_mul(d, _CH_P384_GX, _CH_P384_GY, _CH_P384_P, 384)
+			return d, b"\x04" + pt[0].to_bytes(48, "big") + pt[1].to_bytes(48, "big")
+	raise ChromeClientError("tls: P-384 key generation failed")
+
+
+def _ch_p384_shared(priv_int, peer_pub_bytes):
+	"""The P-384 ECDH shared secret: the 48-byte big-endian x of priv * peer.
+
+	Validated exactly like _ch_p256_shared (SP 800-56A 5.6.2.3.4; cofactor 1):
+	uncompressed 0x04 form of exactly 97 bytes, both coordinates < p, on
+	y^2 = x^3 - 3x + b, and a product at infinity refused. Any failure is
+	ChromeClientError("tls: invalid P-384 key share"); a private scalar outside
+	[1, n - 1] is ChromeClientError("tls: invalid P-384 private key"). Not
+	constant-time (declared in the module docstring).
+	"""
+	p = _CH_P384_P
+	if not 1 <= priv_int < _CH_P384_N:
+		raise ChromeClientError("tls: invalid P-384 private key")
+	data = bytes(peer_pub_bytes)
+	if len(data) != 97 or data[0] != 4:
+		raise ChromeClientError("tls: invalid P-384 key share")
+	x = int.from_bytes(data[1:49], "big")
+	y = int.from_bytes(data[49:97], "big")
+	if x >= p or y >= p:
+		raise ChromeClientError("tls: invalid P-384 key share")
+	if (y * y - (x * x * x - 3 * x + _CH_P384_B)) % p != 0:
+		raise ChromeClientError("tls: invalid P-384 key share")
+	pt = _ch_ec_mul(priv_int, x, y, p, 384)
+	if pt is None:
+		raise ChromeClientError("tls: invalid P-384 key share")
+	return pt[0].to_bytes(48, "big")
 
 
 class _ChMlKem768:
@@ -2875,7 +2939,7 @@ _CH_HRR_RANDOM = hashlib.sha256(b"HelloRetryRequest").digest()
 _CH_TLS13_SUITES = {0x1301: (hashlib.sha256, 16, _ChAesGcm), 0x1302: (hashlib.sha384, 32, _ChAesGcm), 0x1303: (hashlib.sha256, 32, _ChChaCha20Poly1305)}
 
 
-_CH_SERVER_SHARE_BYTES = {0x11EC: 1120, 0x001D: 32, 0x0017: 65}
+_CH_SERVER_SHARE_BYTES = {0x11EC: 1120, 0x001D: 32, 0x0017: 65, 0x0018: 97}
 
 
 _CH_EE_FORBIDDEN = (5, 11, 13, 18, 23, 27, 35, 41, 43, 44, 45, 51, 65281)
@@ -2925,6 +2989,7 @@ def _ch_key_share_new(group, rand):
 	by a 32-byte X25519 public key of its OWN (not the standalone X25519
 	share's), private state (kem, dk, x25519 scalar). 0x001D X25519: 32 bytes,
 	the scalar. 0x0017 P-256: the 65-byte uncompressed point, the scalar int.
+	0x0018 P-384: the 97-byte uncompressed point, the scalar int.
 	Every random byte comes from `rand`. Any other group is
 	ChromeClientError("tls: internal_error: no key generation for group ...").
 	"""
@@ -2939,6 +3004,9 @@ def _ch_key_share_new(group, rand):
 	if group == 0x0017:
 		d, pub = _ch_p256_keypair(rand)
 		return pub, d
+	if group == 0x0018:
+		d, pub = _ch_p384_keypair(rand)
+		return pub, d
 	raise ChromeClientError("tls: internal_error: no key generation for group 0x%04x" % group)
 
 
@@ -2950,7 +3018,7 @@ def _ch_key_share_secret(group, private, server_share):
 	(draft-ietf-tls-ecdhe-mlkem; the order the R-0017 PoC completed live
 	handshakes with). The share length is checked against
 	_CH_SERVER_SHARE_BYTES first, and every failure of the primitives -- an
-	all-zero X25519 result, an off-curve P-256 point -- is re-raised as
+	all-zero X25519 result, an off-curve P-256 or P-384 point -- is re-raised as
 	ChromeClientError("tls: illegal_parameter: ..."), the alert RFC 8446
 	section 4.2.8 assigns to an invalid share.
 	"""
@@ -2964,6 +3032,8 @@ def _ch_key_share_secret(group, private, server_share):
 			return kem.decaps(dk, share[:1088]) + _ch_x25519(xpriv, share[1088:])
 		if group == 0x001D:
 			return _ch_x25519(private, share)
+		if group == 0x0018:
+			return _ch_p384_shared(private, share)
 		return _ch_p256_shared(private, share)
 	except ChromeClientError as exc:
 		text = str(exc)
@@ -3018,10 +3088,10 @@ class _ChTls:
 	sent one for, of exactly _CH_SERVER_SHARE_BYTES. HelloRetryRequest
 	(the random is _CH_HRR_RANDOM): the same version and cipher checks; a
 	group we already sent a share for, or one not in our supported_groups
-	(a GREASE value included), is illegal_parameter; secp384r1 is "tls:
-	HelloRetryRequest selected secp384r1 (not implemented)" (P-256 only,
-	FLAG-2), preceded by a WARNING on the stdlib `chrome-client` logger that
-	names the host and roadmap R-0048; a second one is "tls: second HelloRetryRequest"; the transcript
+	(a GREASE value included), is illegal_parameter; secp256r1 and secp384r1
+	are answered (R-0048 closed the P-384 half of FLAG-2), any other offered
+	group is "tls: handshake_failure: HelloRetryRequest selected group ...
+	(not implemented)"; a second one is "tls: second HelloRetryRequest"; the transcript
 	restarts as message_hash(Hash(CH1)) || HRR (section 4.4.1), a compat
 	ChangeCipherSpec precedes CH2 (profile["hrr_compat_ccs"], hrr/ 20/20)
 	and the ServerHello that follows must repeat the HRR's cipher. Server
@@ -3400,7 +3470,7 @@ class _ChTls:
 		return b""
 
 	def _on_hrr(self, sh, msg):
-		"""HelloRetryRequest: validate, restart the transcript, answer with CCS + CH2 for P-256."""
+		"""HelloRetryRequest: validate, restart the transcript, answer with CCS + CH2 for P-256 or P-384."""
 		if self.hrr:
 			raise ChromeClientError("tls: second HelloRetryRequest")
 		self._check_hello(sh, "HelloRetryRequest")
@@ -3417,9 +3487,6 @@ class _ChTls:
 		if group not in self._offer["groups"]:
 			raise ChromeClientError("tls: illegal_parameter: HelloRetryRequest selected group 0x%04x we did not offer" % group)
 		if group not in self._profile["hrr_groups"]:
-			if group == 0x0018:
-				logging.getLogger("chrome-client").warning("tls: a real server (%s) sent a HelloRetryRequest selecting secp384r1 (P-384), which is not implemented -- see roadmap R-0048", self._host)
-				raise ChromeClientError("tls: HelloRetryRequest selected secp384r1 (not implemented)")
 			raise ChromeClientError("tls: handshake_failure: HelloRetryRequest selected group 0x%04x (not implemented)" % group)
 		cookie = None
 		if 44 in sh["ext"]:
@@ -7319,7 +7386,7 @@ def _ch_session_new(decoders=None, connect_policy=None, timeout=30, max_bytes=0,
 		verified). Anything else is ChromeClientError("transport: ...").
 	"""
 	return _ChSession(decoders, connect_policy, timeout, max_bytes, log, tls12_fallback, allow_downgrade, rand, ssl_context_factory, transport)
-# END GENERATED: 9a0d4980bb96
+# END GENERATED: 3bf7ce4111a8
 
 _DECODERS = {"br": _brotli_decompress, "zstd": _zstd_decompress}
 

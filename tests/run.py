@@ -639,7 +639,7 @@ SUITES = [
     # shortfall FAILs, because a wall-clock rate flaps under load.
     ("mcp_chrome", run_mcp_chrome,
      "the stdlib Chrome client's crypto and TLS 1.3 layers (Gates G3, G4, G5): "
-     "X25519 (RFC 7748), P-256 ECDH (RFC 5903), AES-GCM (Wycheproof), "
+     "X25519 (RFC 7748), P-256 and P-384 ECDH (RFC 5903), AES-GCM (Wycheproof), "
      "ChaCha20-Poly1305 (RFC 8439), HKDF (RFC 5869) and the RFC 8448 key "
      "schedule as pasted vectors, ML-KEM-768 cross-checked with OpenSSL both "
      "ways; the ClientHello judged by chrome_capture's parser and diff against "
@@ -688,7 +688,7 @@ SUITES = [
      "and visible Set-Cookie, the host set, the 307 body rule, concurrency, "
      "no secret in logs or errors), one uv stdio row); "
      "every refusal and the hmac.compare_digest tag gate, the generator block "
-     "contract, and the AES-256-GCM decrypt floor", 883),
+     "contract, and the AES-256-GCM decrypt floor", 902),
     # TYPED, not None, although it is one-plus-one cases per server: here a
     # server appearing WITHOUT a declared row is the defect, so a count that
     # moves when the roster moves is the alarm working rather than noise.  That

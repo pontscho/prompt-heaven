@@ -11,7 +11,7 @@ three hosts' copies (mcp-search.py's is driven by tests/test_mcp_search.py).
 
 THE ORACLE IS NOT THE MODULE. Every expected value in group A is a published
 vector pasted here as hex, each citing where it was copied from: RFC 7748
-(X25519, sections 5.2 and 6.1), RFC 5903 section 8.1 (P-256 ECDH), the C2SP
+(X25519, sections 5.2 and 6.1), RFC 5903 sections 8.1 and 8.2 (P-256 and P-384 ECDH), the C2SP
 Wycheproof `aes_gcm_test.json` (AES-GCM, by tcId), RFC 8439 (ChaCha20 2.4.2,
 Poly1305 key generation 2.6.2, AEAD 2.8.2 and A.5), RFC 5869 appendix A.1-A.3
 (HKDF-SHA256) and RFC 8448 section 3 (the TLS 1.3 key schedule of the simple
@@ -80,12 +80,12 @@ carrying the measured value and a load caveat, because a wall-clock rate flaps
 under concurrent load and FAIL is reserved for rules that cannot flap
 (docs/subsystems/tests.md); a tenfold shortfall is an algorithmic regression no
 load explains. The profile-age row is INFO forever (ADR 0019). The Python ssl server
-restricted with set_ecdh_curve("prime256v1") is INFO when that call does not
-restrict the TLS 1.3 groups on the local OpenSSL (no HRR happens); the
-`s_server -groups P-256` row proves the HRR path then.
+restricted with set_ecdh_curve("prime256v1") or ("secp384r1") is INFO when that
+call does not restrict the TLS 1.3 groups on the local OpenSSL (no HRR
+happens); the `s_server -groups P-256` / `P-384` rows prove the HRR path then.
 
 Groups:
-  A. CRYPTO KATs:  X25519, P-256, AES-GCM (Wycheproof), ChaCha20-Poly1305, HKDF,
+  A. CRYPTO KATs:  X25519, P-256, P-384, AES-GCM (Wycheproof), ChaCha20-Poly1305, HKDF,
                    the RFC 8448 key schedule, ML-KEM-768 round trip + OpenSSL
   B. CLIENTHELLO:  20 deterministic seeds: 17 non-GREASE extensions, GREASE
                    positions, a varying permutation, ECH payload buckets, the
@@ -99,9 +99,10 @@ Groups:
                    Finished and tag, alerts, KeyUpdate and its bound, tickets,
                    unknown post-handshake types, short key shares, sequence
                    exhaustion) and the openssl s_server matrix
-  H. HRR:          P-256 completion per suite over the message_hash
-                   transcript, CH2 on the wire and against set 9, every
-                   refused HelloRetryRequest, a P-256-only ssl server
+  H. HRR:          P-256 and P-384 completion per suite over the message_hash
+                   transcript, CH2 on the wire and against set 9 and the
+                   hrr-p384 capture, every refused HelloRetryRequest, a
+                   P-256-only and a P-384-only ssl server
   D. HPACK:        the derived Huffman code vs RFC 7541 Appendix B; C.2-C.6
                    decode (with and without Huffman), C.4 encode; every
                    committed h2 HEADERS block decoded (vs chrome_capture) and
@@ -303,7 +304,7 @@ TLS_CA = H.repo_path("tests", "files", "tls", "test-ca.pem")
 GA = "A. CRYPTO KATs: published vectors, each cited"
 GB = "B. CLIENTHELLO: 20 seeds vs the Chrome 154 captures, judged by chrome_capture's parser"
 GC = "C. TLS 1.3: MemoryBIO + loopback ssl servers, the RFC 8448 trace, a scripted peer, openssl s_server"
-GH = "H. HELLORETRYREQUEST: P-256 completion, CH2 vs set 9, every refusal"
+GH = "H. HELLORETRYREQUEST: P-256 and P-384 completion, CH2 vs set 9 and the P-384 capture, every refusal"
 GD = "D. HPACK + HEADER PROFILES: RFC 7541 vectors, every committed HEADERS block, caller-header rules"
 GE = "E. HTTP/2: a test-side RFC 9113 responder; first flight vs the captures, every ceiling at N and N+1"
 GF = "F. HTTP/1.1: over TLS (ALPN http/1.1) and cleartext, every ceiling, heads vs sets 5/6, injection refused"
@@ -384,6 +385,15 @@ P256_R = "C6EF9C5D 78AE012A 011164AC B397CE20 88685D8F 06BF9BE0 B283AB46 476BEE5
 P256_GRX = "D12DFB52 89C8D4F8 1208B702 70398C34 2296970A 0BCCB74C 736FC755 4494BF63"
 P256_GRY = "56FBF3CA 366CC23E 8157854C 13C58D6A AC23F046 ADA30F83 53E74F33 039872AB"
 P256_GIRX = "D6840F6B 42F6EDAF D13116E0 E1256520 2FEF8E9E CE7DCE03 812464D0 4B9442DE"
+
+# RFC 5903 section 8.2, 384-Bit Random ECP Group (P-384), copied from the RFC text.
+P384_I = "099F3C70 34D4A2C6 99884D73 A375A67F 7624EF7C 6B3C0F16 0647B674 14DCE655 E35B5380 41E649EE 3FAEF896 783AB194"
+P384_GIX = "667842D7 D180AC2C DE6F74F3 7551F557 55C7645C 20EF73E3 1634FE72 B4C55EE6 DE3AC808 ACB4BDB4 C88732AE E95F41AA"
+P384_GIY = "9482ED1F C0EEB9CA FC498462 5CCFC23F 65032149 E0E144AD A0241815 35A0F38E EB9FCFF3 C2C947DA E69B4C63 4573A81C"
+P384_R = "41CB0779 B4BDB85D 47846725 FBEC3C94 30FAB46C C8DC5060 855CC9BD A0AA2942 E0308312 916B8ED2 960E4BD5 5A7448FC"
+P384_GRX = "E558DBEF 53EECDE3 D3FCCFC1 AEA08A89 A987475D 12FD950D 83CFA417 32BC509D 0D1AC43A 0336DEF9 6FDA41D0 774A3571"
+P384_GRY = "DCFBEC7A ACF31964 72169E83 8430367F 66EEBE3C 6E70C416 DD5F0C68 759DD1FF F83FA401 42209DFF 5EAAD96D B9E6386C"
+P384_GIRX = "11187331 C279962D 93D60424 3FD592CB 9D0A926F 422E4718 7521287E 7156C5C4 D6031355 69B9E9D0 9CF5D4A2 70F59746"
 
 # C2SP Wycheproof testvectors_v1/aes_gcm_test.json (source google-wycheproof
 # 0.9rc5), result "valid", ivSize 96, tagSize 128:
@@ -828,6 +838,13 @@ def group_kats(suite, mod, openssl, ws):
     kat(suite, "rfc5903-8.1-responder-public", lambda: mod._ch_p256_keypair(lambda n: r_bytes[:n]), (int.from_bytes(r_bytes, "big"), gr), "RFC 5903 section 8.1, g^r = (grx, gry) via _ch_p256_keypair(rand)")
     kat(suite, "rfc5903-8.1-shared-both-ways", lambda: (mod._ch_p256_shared(int.from_bytes(i_bytes, "big"), gr), mod._ch_p256_shared(int.from_bytes(r_bytes, "big"), gi)), (h(P256_GIRX), h(P256_GIRX)), "RFC 5903 section 8.1, the shared secret girx from both sides")
 
+    i384, r384 = h(P384_I), h(P384_R)
+    gi384 = b"\x04" + h(P384_GIX) + h(P384_GIY)
+    gr384 = b"\x04" + h(P384_GRX) + h(P384_GRY)
+    kat(suite, "rfc5903-8.2-initiator-public", lambda: mod._ch_p384_keypair(lambda n: i384[:n]), (int.from_bytes(i384, "big"), gi384), "RFC 5903 section 8.2, g^i = (gix, giy) via _ch_p384_keypair(rand)")
+    kat(suite, "rfc5903-8.2-responder-public", lambda: mod._ch_p384_keypair(lambda n: r384[:n]), (int.from_bytes(r384, "big"), gr384), "RFC 5903 section 8.2, g^r = (grx, gry) via _ch_p384_keypair(rand)")
+    kat(suite, "rfc5903-8.2-shared-both-ways", lambda: (mod._ch_p384_shared(int.from_bytes(i384, "big"), gr384), mod._ch_p384_shared(int.from_bytes(r384, "big"), gi384)), (h(P384_GIRX), h(P384_GIRX)), "RFC 5903 section 8.2, the shared secret girx from both sides")
+
     for tc, key, iv, aad, msg, ct, tag in GCM_VALID:
         aead = outcome(lambda: mod._ChAesGcm(h(key)))
         if aead[0] == "exc":
@@ -1218,6 +1235,9 @@ class ScriptedPeer:
         if self.group == 0x0017:
             d, pub = mod._ch_p256_keypair()
             return pub, mod._ch_p256_shared(d, client)
+        if self.group == 0x0018:
+            d, pub = mod._ch_p384_keypair()
+            return pub, mod._ch_p384_shared(d, client)
         priv, pub = mod._ch_x25519_keypair()
         return pub, mod._ch_x25519(priv, client)
 
@@ -1999,7 +2019,7 @@ def peer_rows(suite, mod):
         return problems, ["CertificateRequest (13) and an unassigned type 99 after the handshake"]
     run_row(suite, GC, "peer-unknown-post-handshake-type", unknown_post, src)
 
-    for group, gname, pre_hrr in ((0x001D, "x25519", False), (0x11EC, "x25519mlkem768", False), (0x0017, "p256-after-hrr", True)):
+    for group, gname, pre_hrr in ((0x001D, "x25519", False), (0x11EC, "x25519mlkem768", False), (0x0017, "p256-after-hrr", True), (0x0018, "p384-after-hrr", True)):
         def short_share(group=group, pre_hrr=pre_hrr):
             peer = ScriptedPeer(mod, 0x1301, 0x001D if pre_hrr else group)
             if pre_hrr:
@@ -2041,33 +2061,35 @@ def group_tls(suite, mod, cc, openssl):
     reason = why if found is None else "%s is OpenSSL %d.%d; the X25519MLKEM768 matrix needs >= 3.5" % (found[0], found[1][0], found[1][1])
     matrix = [(g, gid, s, False) for g, gid in (("X25519MLKEM768", 0x11EC), ("X25519", 0x001D)) for s in TLS13_SUITES]
     matrix.append(("P-256", 0x0017, 0x1301, True))
+    matrix.append(("P-384", 0x0018, 0x1301, True))
     for gname, gid, s, want_hrr in matrix:
         cid = "openssl-s_server-%s-%s" % (gname, suite_tag(s))
         if not ok:
             skip(suite, GC, cid, reason)
             continue
         run_row(suite, GC, cid, lambda: s_server_row(mod, found[0], gname, s, gid, want_hrr),
-                "%s s_server -tls1_3 -groups %s -ciphersuites %s -alpn h2 -www%s" % (found[0], gname, suite_tag(s), " (P-256 was offered without a share: HRR)" if want_hrr else ""))
+                "%s s_server -tls1_3 -groups %s -ciphersuites %s -alpn h2 -www%s" % (found[0], gname, suite_tag(s), " (%s was offered without a share: HRR)" % gname if want_hrr else ""))
 
 
 # --- H. HelloRetryRequest --------------------------------------------------------------
 
 def group_hrr(suite, mod, cc, facts, ws):
     src = "scripted TLS 1.3 peer; RFC 8446 section 4.1.4"
-    for s in TLS13_SUITES:
-        def complete(s=s):
-            peer = ScriptedPeer(mod, s)
-            peer.send_hrr(0x0017)
-            problems = peer.handshake()
-            tls = peer.tls
-            problems += problem_if(not tls.hrr or tls.group != 0x0017 or tls.cipher != s, "state hrr=%s group=%r cipher=%r" % (tls.hrr, tls.group, tls.cipher))
-            return problems + peer.exchange(), ["HRR(0x0017) -> CCS + CH2; P-256 ServerHello; the Finished verifies over message_hash(Hash(CH1)) || HRR || CH2 || ..."]
-        run_row(suite, GH, "hrr-p256-completes-%s" % suite_tag(s), complete, src)
+    for gid, gtag, gname in ((0x0017, "p256", "P-256"), (0x0018, "p384", "P-384")):
+        for s in TLS13_SUITES:
+            def complete(s=s, gid=gid, gname=gname):
+                peer = ScriptedPeer(mod, s)
+                peer.send_hrr(gid)
+                problems = peer.handshake()
+                tls = peer.tls
+                problems += problem_if(not tls.hrr or tls.group != gid or tls.cipher != s, "state hrr=%s group=%r cipher=%r" % (tls.hrr, tls.group, tls.cipher))
+                return problems + peer.exchange(), ["HRR(0x%04x) -> CCS + CH2; %s ServerHello; the Finished verifies over message_hash(Hash(CH1)) || HRR || CH2 || ..." % (gid, gname)]
+            run_row(suite, GH, "hrr-%s-completes-%s" % (gtag, suite_tag(s)), complete, src)
 
-    def wire():
+    def wire(gid=0x0017, klen=65):
         cookie = b"\x01" * 28
         peer = ScriptedPeer(mod)
-        out = peer.send_hrr(0x0017, cookie)
+        out = peer.send_hrr(gid, cookie)
         recs = split_records(out)
         ch1, ch2 = peer.ch1, peer.ch2
         _sid1, _shares1, exts1 = peer_parse_ch(ch1)
@@ -2075,13 +2097,15 @@ def group_hrr(suite, mod, cc, facts, ws):
         problems = problem_if(len(recs) != 2 or recs[0] != (20, b"\x01") or recs[1][0] != 22, "records %r, wanted CCS then ONE handshake record" % [(t, len(b)) for t, b in recs])
         problems += problem_if(out[6:9] != b"\x16\x03\x03", "the CH2 record version is %s, the captures show 0303" % out[7:9].hex())
         problems += problem_if(ch1[4:hello_prefix_len(ch1)] != ch2[4:hello_prefix_len(ch2)], "random, session id, cipher list or compression differ from CH1")
-        problems += problem_if(sorted(shares2) != [0x0017] or len(shares2.get(0x0017, b"")) != 65, "CH2 key_share %r" % dict((g, len(k)) for g, k in shares2.items()))
+        problems += problem_if(sorted(shares2) != [gid] or len(shares2.get(gid, b"")) != klen, "CH2 key_share %r" % dict((g, len(k)) for g, k in shares2.items()))
         problems += problem_if(dict(exts2).get(44) != vec(2, cookie), "the cookie is not echoed byte for byte")
         problems += problem_if([t for t, _b in exts2 if t != 44] != [t for t, _b in exts1], "the extension order differs from CH1's")
         problems += problem_if([(t, b) for t, b in exts2 if t not in (44, 51)] != [(t, b) for t, b in exts1 if t != 51], "an extension other than key_share / cookie changed")
         delta = facts["ch2_delta"]
+        if delta is not None:
+            delta = (delta[0] - (klen - 65), delta[1])
         problems += problem_if(delta is None or len(ch2) != len(ch1) - delta[0] + delta[1] + len(cookie), "CH2 is %d bytes; README: CH1 (%d) - %r + %r + cookie (%d)" % (len(ch2), len(ch1), delta and delta[0], delta and delta[1], len(cookie)))
-        return problems, ["tests/files/chrome/154/README.md set 9: CCS first, same random/session id/ciphers/GREASE/order, one 65-byte P-256 share, cookie echoed; length rule %r" % (delta,)]
+        return problems, ["tests/files/chrome/154/README.md set 9: CCS first, same random/session id/ciphers/GREASE/order, one %d-byte share, cookie echoed; length rule %r (the README's P-256 figure less %d for the longer key)" % (klen, delta, klen - 65)]
     run_row(suite, GH, "hrr-ch2-on-the-wire", wire, src)
 
     def against_set_9():
@@ -2103,6 +2127,37 @@ def group_hrr(suite, mod, cc, facts, ws):
         return problems, detail + ["CH2 JA4 %r; %d fixture cookies reused" % (sorted(ja4s), len(cookies))]
     run_row(suite, GH, "hrr-ch2-diff-vs-set-9", against_set_9, "chrome_capture diff tests/files/chrome/154/hrr/ (CH1 and CH2 features) vs 20 built CH1/CH2 pairs")
 
+    run_row(suite, GH, "hrr-ch2-p384-on-the-wire", lambda: wire(0x0018, 97), src + "; the key_share is ONE 97-byte P-384 point (SEC 1 uncompressed), every other rule as for P-256")
+
+    def against_p384_capture():
+        ref = os.path.join(FIXTURES, "hrr-p384")
+        cookies, ja4s, deltas = [], set(), set()
+        for name in sorted(n for n in os.listdir(ref) if n.endswith(".json")):
+            with open(os.path.join(ref, name), encoding="utf-8") as fh:
+                rec = json.load(fh)
+            cookies.append(bytes.fromhex(rec["hrr"]["cookie_hex"]))
+            ja4s.add(rec["hrr"]["fingerprints_2"]["ja4"])
+            # CH1 is one record (its payload length is the handshake length); client_hello_2_hex is the handshake message itself.
+            deltas.add(sum(rec["client_hello_record_lengths"]) - len(rec["hrr"]["client_hello_2_hex"]) // 2 + 6 + len(cookies[-1]))
+            problems_fixture = problem_if(rec["hrr"]["key_share_groups_2"] != ["0018"] or rec["hrr"]["group"] != "0018", "fixture %s: group %r key_share_groups_2 %r" % (name, rec["hrr"]["group"], rec["hrr"]["key_share_groups_2"]))
+            if problems_fixture:
+                return problems_fixture, []
+        records, built_ja4s, built_deltas = [], set(), set()
+        for seed in range(CH_SEEDS):
+            rand = seeded_rand(2000 + seed)
+            cookie = cookies[seed % len(cookies)]
+            rec1, hs1, meta1 = mod._ch_client_hello(CAPTURE_HOST, {0x11EC: rand(1216), 0x001D: rand(32)}, None, rand)
+            hrr = {"group": 0x0018, "cookie": cookie, "ch1_meta": meta1}
+            rec2, hs2, _meta2 = mod._ch_client_hello(CAPTURE_HOST, {0x0018: b"\x04" + rand(96)}, None, rand, hrr)
+            built_ja4s.add(cc.fingerprints(cc.parse_client_hello(hs2[4:]))["ja4"])
+            built_deltas.add(len(hs1) - len(hs2) + 6 + len(cookie))
+            records.append({"client_hello_hex": rec1.hex(), "hrr": {"client_hello_2_hex": rec2.hex()}})
+        problems, detail = diff_problems(cc, ref, write_candidates(ws, "hrr-p384", records))
+        problems += problem_if(built_ja4s != ja4s, "CH2 JA4 %r built, %r captured" % (sorted(built_ja4s), sorted(ja4s)))
+        problems += problem_if(built_deltas != deltas or len(deltas) != 1, "CH1 - CH2 + 6 + cookie: %r built, %r captured" % (sorted(built_deltas), sorted(deltas)))
+        return problems, detail + ["CH2 JA4 %r; CH1 - CH2 + 6 + cookie = %r (captured and built); %d fixture cookies reused" % (sorted(ja4s), sorted(deltas), len(cookies))]
+    run_row(suite, GH, "hrr-ch2-p384-diff-vs-capture", against_p384_capture, "chrome_capture diff tests/files/chrome/154/hrr-p384/ (live loopback capture, --hrr-group 0x0018; README) vs 20 built CH1/CH2 pairs")
+
     def refused(group, message, extra=None):
         def fn():
             peer = ScriptedPeer(mod)
@@ -2112,9 +2167,16 @@ def group_hrr(suite, mod, cc, facts, ws):
             problems = refusal(lambda: peer.tls.feed(peer.hrr_record(g)), mod.ChromeClientError, text, peer.tls)
             return problems, ["HRR selecting 0x%04x" % g + (extra or "")]
         return fn
-    run_row(suite, GH, "hrr-secp384r1-flag-2", refused(0x0018, "tls: HelloRetryRequest selected secp384r1 (not implemented)"), src + "; P-256 only (FLAG-2)")
+    def p384_accepted():
+        peer = ScriptedPeer(mod)
+        out = peer.tls.feed(peer.hrr_record(0x0018))
+        _sid, shares, _exts = peer_parse_ch(records_handshake(out))
+        problems = problem_if(peer.tls.failed or not peer.tls.hrr, "an HRR selecting secp384r1 was not answered: failed=%s hrr=%s" % (peer.tls.failed, peer.tls.hrr))
+        problems += problem_if(sorted(shares) != [0x0018] or len(shares.get(0x0018, b"")) != 97, "CH2 key_share %r" % dict((g, len(k)) for g, k in shares.items()))
+        return problems, ["HRR selecting 0x0018 -> CCS + CH2 with one 97-byte share (was: tls: HelloRetryRequest selected secp384r1 (not implemented), FLAG-2)"]
+    run_row(suite, GH, "hrr-secp384r1-accepted", p384_accepted, src + "; R-0048: P-384 is answered like P-256")
 
-    def p384_warning():
+    def p384_no_warning():
         records = []
         handler = logging.Handler()
         handler.emit = records.append
@@ -2124,16 +2186,13 @@ def group_hrr(suite, mod, cc, facts, ws):
         logger.propagate = False
         try:
             peer = ScriptedPeer(mod)
-            problems = refusal(lambda: peer.tls.feed(peer.hrr_record(0x0018)), mod.ChromeClientError, "tls: HelloRetryRequest selected secp384r1 (not implemented)", peer.tls)
+            peer.tls.feed(peer.hrr_record(0x0018))
         finally:
             logger.removeHandler(handler)
             logger.propagate = propagate
-        warnings = [r for r in records if r.levelno == logging.WARNING]
-        text = warnings[0].getMessage() if len(warnings) == 1 else ""
-        problems += problem_if(len(warnings) != 1, "%d WARNING record(s) on 'chrome-client', wanted 1" % len(warnings))
-        problems += problem_if(not all(s in text for s in ("secp384r1", "P-384", "R-0048", peer.tls._host)), "warning %r does not name secp384r1, P-384, R-0048 and the host" % text)
-        return problems, ["WARNING %r, then the unchanged refusal" % text]
-    run_row(suite, GH, "hrr-secp384r1-logs-a-warning-naming-r-0048", p384_warning, src + "; roadmap R-0048: a real P-384 HRR must be noticed")
+        problems = problem_if(bool(records), "%d record(s) on 'chrome-client' for an answered P-384 HRR: %r" % (len(records), [r.getMessage() for r in records][:2]))
+        return problems, ["no log record: the R-0048 WARNING existed only to notice a refusal"]
+    run_row(suite, GH, "hrr-secp384r1-logs-no-warning", p384_no_warning, src + "; the R-0048 warning is gone with the refusal")
     run_row(suite, GH, "hrr-already-shared-x25519", refused(0x001D, "tls: illegal_parameter: HelloRetryRequest selected group 0x%04x we already sent a key share for"), src)
     run_row(suite, GH, "hrr-already-shared-x25519mlkem768", refused(0x11EC, "tls: illegal_parameter: HelloRetryRequest selected group 0x%04x we already sent a key share for"), src)
     run_row(suite, GH, "hrr-not-offered-0x0019", refused(0x0019, "tls: illegal_parameter: HelloRetryRequest selected group 0x%04x we did not offer"), src)
@@ -2151,22 +2210,23 @@ def group_hrr(suite, mod, cc, facts, ws):
         return refusal(lambda: peer.tls.feed(peer.hrr_record(0x0017)), mod.ChromeClientError, "tls: second HelloRetryRequest", peer.tls), ["a second HRR after CH2"]
     run_row(suite, GH, "hrr-second-refused", second, src)
 
-    def p256_server():
-        tls, problems, detail = loopback(mod, "prime256v1")
-        if problems:
+    for curve, gtag, gid, gname in (("prime256v1", "p256", 0x0017, "P-256"), ("secp384r1", "p384", 0x0018, "P-384")):
+        def curve_server(curve=curve, gid=gid, gname=gname):
+            tls, problems, detail = loopback(mod, curve)
+            if problems:
+                return problems, detail
+            if not tls.hrr or tls.group != gid:
+                return None, detail + ["set_ecdh_curve('%s') did not restrict the TLS 1.3 groups here (group 0x%04x, no HRR); the openssl s_server %s row covers the HRR" % (curve, tls.group or 0, gname)]
             return problems, detail
-        if not tls.hrr or tls.group != 0x0017:
-            return None, detail + ["set_ecdh_curve('prime256v1') did not restrict the TLS 1.3 groups here (group 0x%04x, no HRR); the openssl s_server P-256 row covers the HRR" % (tls.group or 0)]
-        return problems, detail
-    cid = "hrr-loopback-ssl-server-p256-only"
-    src = "a Python ssl server restricted with set_ecdh_curve('prime256v1'); INFO when that does not restrict TLS 1.3 groups (plan: UNVERIFIED)"
-    got = outcome(p256_server)
-    if got[0] == "exc":
-        suite.record(GH, cid, ["raised %s(%r)" % (type(got[1]).__name__, str(got[1])[:200])], detail=[src])
-    elif got[1][0] is None:
-        suite.record(GH, cid, (), status=H.INFO, detail=[src] + got[1][1], brief="INFO | %s (no HRR from this ssl build)" % cid)
-    else:
-        suite.record(GH, cid, got[1][0], detail=[src] + got[1][1])
+        cid = "hrr-loopback-ssl-server-%s-only" % gtag
+        src = "a Python ssl server restricted with set_ecdh_curve('%s'); INFO when that does not restrict TLS 1.3 groups (plan: UNVERIFIED)" % curve
+        got = outcome(curve_server)
+        if got[0] == "exc":
+            suite.record(GH, cid, ["raised %s(%r)" % (type(got[1]).__name__, str(got[1])[:200])], detail=[src])
+        elif got[1][0] is None:
+            suite.record(GH, cid, (), status=H.INFO, detail=[src] + got[1][1], brief="INFO | %s (no HRR from this ssl build)" % cid)
+        else:
+            suite.record(GH, cid, got[1][0], detail=[src] + got[1][1])
 
 
 # --- D. HPACK, header profiles, caller-header rules ---------------------------------------
@@ -9383,6 +9443,23 @@ def group_negative(suite, mod, source_tree):
                      detail=["RFC 5903 8.1 g^r altered; SP 800-56A 5.6.2.3.4 validation"])
     suite.record(GN, "p256-private-zero-refused", expect_refusal(outcome(lambda: mod._ch_p256_shared(0, b"\x04" + gx + gy)), CE, "tls: invalid P-256 private key"))
 
+    i384_int = int.from_bytes(h(P384_I), "big")
+    gx384, gy384 = h(P384_GRX), h(P384_GRY)
+    y_plus384 = (int.from_bytes(gy384, "big") + 1).to_bytes(48, "big")
+    p384_bytes = (2 ** 384 - 2 ** 128 - 2 ** 96 + 2 ** 32 - 1).to_bytes(48, "big")  # RFC 5903 section 3.2, written from the formula
+    p384_rows = (
+        ("off-curve-y-plus-one", b"\x04" + gx384 + y_plus384, "tls: invalid P-384 key share"),
+        ("all-zero-point", b"\x04" + bytes(96), "tls: invalid P-384 key share"),
+        ("compressed-form", b"\x02" + gx384, "tls: invalid P-384 key share"),
+        ("96-byte-share", gx384 + gy384, "tls: invalid P-384 key share"),
+        ("x-equal-to-p", b"\x04" + p384_bytes + gy384, "tls: invalid P-384 key share"),
+        ("p256-sized-share", b"\x04" + gx + gy, "tls: invalid P-384 key share"),
+    )
+    for cid, share, message in p384_rows:
+        suite.record(GN, "p384-%s-refused" % cid, expect_refusal(outcome(lambda: mod._ch_p384_shared(i384_int, share)), CE, message),
+                     detail=["RFC 5903 8.2 g^r altered; SP 800-56A 5.6.2.3.4 validation"])
+    suite.record(GN, "p384-private-zero-refused", expect_refusal(outcome(lambda: mod._ch_p384_shared(0, b"\x04" + gx384 + gy384)), CE, "tls: invalid P-384 private key"))
+
     kem = mod._ChMlKem768()
     ek, dk = kem.keygen_internal(bytes(32), bytes(range(32)))
     ct, _ss = kem.encaps_internal(ek, bytes(range(32)))
@@ -9583,6 +9660,23 @@ def group_throughput(suite, mod):
     suite.record(GL, "p256-keygen-plus-shared", (), status=H.INFO,
                  detail=["keygen %.1f ms + shared %.1f ms = %.1f ms per HRR-to-P-256 handshake (mean of %d)" % (t_p_kg * 1e3, t_p_sh * 1e3, (t_p_kg + t_p_sh) * 1e3, n)],
                  brief="INFO | p256-keygen-plus-shared %.1f ms" % ((t_p_kg + t_p_sh) * 1e3))
+
+    def p384_timing():
+        t0 = time.perf_counter()
+        keys = [mod._ch_p384_keypair() for _ in range(n)]
+        t_kg = (time.perf_counter() - t0) / n
+        t0 = time.perf_counter()
+        for i in range(n):
+            mod._ch_p384_shared(keys[i][0], keys[(i + 1) % n][1])
+        return t_kg, (time.perf_counter() - t0) / n
+    got = outcome(p384_timing)
+    if got[0] == "exc":
+        suite.record(GL, "p384-keygen-plus-shared", ["raised %s(%r)" % (type(got[1]).__name__, str(got[1])[:200])])
+    else:
+        t_p_kg, t_p_sh = got[1]
+        suite.record(GL, "p384-keygen-plus-shared", (), status=H.INFO,
+                     detail=["keygen %.1f ms + shared %.1f ms = %.1f ms per HRR-to-P-384 handshake (mean of %d)" % (t_p_kg * 1e3, t_p_sh * 1e3, (t_p_kg + t_p_sh) * 1e3, n)],
+                     brief="INFO | p384-keygen-plus-shared %.1f ms" % ((t_p_kg + t_p_sh) * 1e3))
 
     pinned = mod.CHROME_PROFILE.get("pinned_on")
     try:

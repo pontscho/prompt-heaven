@@ -82,6 +82,7 @@ position in the raw set.
 | `ip-literal/` | 7, navigation to `https://127.0.0.1:<port>/` | ip-literal | 20 | #004 ... #080 of 80 | default |
 | `cookie/` | 8, navigations after the server set a cookie | cookie | 20 | #004 ... #080 of 80 | `--set-cookie tc=1` |
 | `hrr/` | 9, CH1 answered with a HelloRetryRequest | hrr | 20 | #001 ... #020 of 30 | `--hrr-group 0x0017` |
+| `hrr-p384/` | 9b, CH1 answered with a HelloRetryRequest for P-384 (R-0048); **Chrome 157.0.8103.51, not 154** (see "HelloRetryRequest for P-384" below) | hrr | 7 | #001 ... #008 of 8 (#006 was reset before CH2) | `--hrr-group 0x0018` |
 
 Two runs were discarded whole and are not in any count above: set 1a's first
 server (port 48532), whose first successful connection went to a different CDP
@@ -273,6 +274,40 @@ key share) with a 28-byte cookie. Chrome then sends:
 - the cookie echoed byte for byte (`cookie_echoed` true on 20/20);
 - the ECH GREASE extension byte-identical to CH1's on `hrr-001.json`; the
   same-ECH-length-as-CH1 property over all 20 was not re-checked.
+
+### HelloRetryRequest for P-384 (set 9b, 7 of 8 connections, R-0048)
+
+Captured 2026-11-12 with the Google Chrome installed on the capture machine,
+**157.0.8103.51** (macOS, `--headless=new`, one fresh user-data-dir per run, four
+runs against `https://localhost:<port>/` on loopback), NOT Chrome 154: no 154
+was available there. `export` recorded `--chrome-version 157.0.8103.51`. Server:
+`chrome_capture.py serve --hrr-group 0x0018 --alpn h2,http/1.1 --count 8`, so an
+HRR selecting `0x0018` (secp384r1, offered in supported_groups without a key
+share) with the same 28-byte cookie as set 9. Seven connections reached CH2; #006
+was reset first and is not exported. The certificate was never reached (the
+handshake ends at CH2), so the interstitial question does not arise.
+
+What Chrome 157 sent, 7 of 7:
+
+- a ChangeCipherSpec record BEFORE CH2 (`ccs_before_client_hello_2` true);
+- CH2 in one record with `key_share` holding ONE entry, `0x0018` with a 97-byte
+  key (`key_share_groups_2` `["0018"]`), `supported_groups` unchanged
+  (GREASE, 0x11EC, 0x001D, 0x0017, 0x0018), no GREASE share;
+- the cookie echoed byte for byte (`cookie_echoed` true), extension 44 at a
+  permuted position, the other extensions in CH1's order;
+- CH1 handshake length 1944/1976/2008 (the ECH payload length varies per
+  connection), CH2 818/850/882 respectively: CH2 = CH1 - 1160 + 6 + cookie length, i.e. the set 9 rule
+  with the 32 extra key bytes of P-384 (1192 - 32);
+- JA4 of CH1 `t13d1517h2_8daaf6152771_cb7bf5808d99` and of CH2
+  `t13d1518h2_8daaf6152771_6ba8dc3d6269`, the 154 values of the table above.
+
+What is NOT established: that Chrome 154 itself sends this. The suite's row
+`hrr-ch2-p384-diff-vs-capture` builds 20 CH1/CH2 pairs from the 154 profile and
+`chrome_capture diff`s them against this directory with no FIXED difference
+(including `ext.51764`), so 157 and 154 are indistinguishable on every feature
+the diff judges, but a 154 recapture of `--hrr-group 0x0018` would close the gap
+and nothing else in the tree needs it. The files are exported with
+`chrome_capture.py export --label hrr`; nothing was regenerated from the client.
 
 ## Consistency checks run for R-0051
 
