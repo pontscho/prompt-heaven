@@ -1228,7 +1228,9 @@ second ClientHello, the h2 preface and HEADERS blocks, the HTTP/1.1 request
 head), a JA3/JA4 parser, an HPACK decoder, a `diff` between two capture sets and
 an `export` that refuses any non-loopback identifier before it writes a fixture
 `Scripts/chrome_capture.py:main`. The committed captures it exported are the
-Chrome 154 profile's only source of truth — see [[tests]] for the fixtures and
+Chrome 154 profile's only source of truth (one set, the P-384 HelloRetryRequest
+capture `tests/files/chrome/154/hrr-p384/`, came from Chrome 157.0.8103.51 and
+its README says so) — see [[tests]] for the fixtures and
 [[chrome-profile-refresh]] for refreshing them when Chrome moves.
 
 The Bing results are parsed by a stdlib `html.parser` tree

@@ -455,7 +455,9 @@ and `gzip` CLIs, with bombs, truncated input and an over-window zstd frame
 added and a refresh leaves it alone (`chrome_capture`); `chrome/154/` is the
 growing set — one reduced JSON fixture
 per connection, one subdirectory per capture set, exported from a real Chrome on
-loopback — which is the only place `mcp_chrome` learns what Chrome sends, and is
+loopback (every set from Chrome 154 except `hrr-p384/`, the P-384
+HelloRetryRequest set, which came from Chrome 157.0.8103.51 and is recorded as
+such in `tests/files/chrome/154/README.md`) — which is the only place `mcp_chrome` learns what Chrome sends, and is
 refreshed from a browser as [[chrome-profile-refresh]] describes. `tls/` is not
 a measurement but test-only loopback material: a test CA whose private key is
 deliberately not committed and a localhost leaf signed by it, never to be added

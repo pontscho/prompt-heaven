@@ -807,3 +807,13 @@ Redirect hygiene above keeps the canonical client's re-send of a POST body on a 
 The canonical behaviour is unchanged and still right for the search scripts. webfetch does not inherit it: its host-side `_HopGuard` refuses a hop to another host:port while the body is still being sent, learning the redirect status from the client's `session: redirect hop=N status=S` log line, and failing closed when the status is unknown. The decision, the coupling and its pinning test row are recorded in [[0037-a-session-is-an-explicit-host-set]].
 
 A future canonical change to that log line, or to the 307/308 rule itself, now has a second consumer to re-check.
+
+## Addendum (2026-11-12): a P-384 HelloRetryRequest is answered, FLAG-2 closed (R-0048, bb3911d)
+
+Superseded by `bb3911d`: the section "HelloRetryRequest: P-256 only, and the CH2 Chrome sends" (its P-256-only answer, the `tls: HelloRetryRequest selected secp384r1 (not implemented)` refusal and "P-384 is a roadmap follow-up"), and the 2026-10-02 addendum paragraph that a P-384 HelloRetryRequest is refused after a WARNING on the `chrome-client` logger and that R-0048 stays open.
+
+The client now answers an HRR for either NIST curve Chrome offers without a share: `CHROME_PROFILE["hrr_groups"]` is `(0x0017, 0x0018)` (`Scripts/_mcp_chrome.py:_chrome_profile`). The secp384r1 refusal and its WARNING are removed; any other offered group is still `tls: handshake_failure: HelloRetryRequest selected group ... (not implemented)`, and the illegal_parameter, cipher and second-HRR rules are unchanged (`Scripts/_mcp_chrome.py:_ChTls`). The Jacobian arithmetic is generic over both a = -3 curves (`Scripts/_mcp_chrome.py:_ch_ec_mul`), and `Scripts/_mcp_chrome.py:_ch_p384_shared` validates a peer share exactly like the P-256 path.
+
+The CH2 shape was measured, not inferred: a live loopback capture of Chrome 157.0.8103.51 under `chrome_capture.py serve --hrr-group 0x0018`, committed as `tests/files/chrome/154/hrr-p384/` and recorded in that directory's README as a 157 capture, not a 154 one. On every exported connection CH2's key_share holds ONE entry, 0x0018 with a 97-byte key, no GREASE share; the cookie is echoed; a compat ChangeCipherSpec precedes CH2; and CH2 = CH1 - 1160 + 6 + cookie length (set 9's rule with P-384's 32 extra key bytes). The suite diffs 154-profile CH2s against that capture with no fixed difference, which does not prove that 154 itself sends this shape.
+
+Gates: the RFC 5903 section 8.2 P-384 known-answer vectors, invalid-share rows, and an interop row against `openssl s_server -groups P-384`. The `mcp_chrome` suite moved from 883 to 902 cases. FLAG-2 is closed and R-0048 is done.

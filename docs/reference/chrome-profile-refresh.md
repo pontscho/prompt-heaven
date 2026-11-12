@@ -16,8 +16,8 @@ sources:
   - tests/test_mcp_chrome.py:profile_problems
   - tests/files/chrome/154/README.md
 verified:
-  commit: bdbf852
-  date: 2026-10-02
+  commit: bb3911d
+  date: 2026-11-12
 links:
   - 0004-never-pin-a-browser-impersonation-version
   - 0019-only-gate-on-what-you-can-prove
@@ -66,6 +66,15 @@ pin) holds the environment, the JA4 table, the layout of the sets and the
 per-set server flags; the suite reads its numbers from there, so the README is
 part of the fixture, not commentary on it.
 
+One set under the current pin is **not** from the pinned major:
+`tests/files/chrome/154/hrr-p384/` (the P-384 HelloRetryRequest set, R-0048) was
+captured from Chrome 157.0.8103.51, because no 154 was available on the capture
+machine, and the README records it as such (its *Layout* row and its
+"HelloRetryRequest for P-384" section). Its CH1 and CH2 JA4 equal the 154 values
+and the suite's diff against 154-profile CH2s finds no fixed difference, but that
+154 itself sends this shape is not established. A refresh recaptures this set
+under the new major like every other one, which also retires the mismatch.
+
 `tests/files/chrome_capture/navigate-r0017.json` is a different fixture: the one
 historical R-0017 ClientHello the `chrome_capture` suite (`tests/test_chrome_capture.py`)
 tests the *tool* against. It does not describe the pinned profile and a refresh
@@ -84,8 +93,14 @@ Run every command from the repo root. Scratch output goes under `.claude/tmp/`.
 
    ```
    python3 -B Scripts/chrome_capture.py serve --port <p> --out .claude/tmp/<dir> --label <label> --count <n> \
-       [--alpn http/1.1 | --plain | --set-cookie tc=1 | --hrr-group 0x0017]
+       [--alpn http/1.1 | --plain | --set-cookie tc=1 | --hrr-group 0x0017 | --hrr-group 0x0018]
    ```
+
+   Two sets answer CH1 with a HelloRetryRequest, one per group the client answers
+   one for (`CHROME_PROFILE["hrr_groups"]`, P-256 and P-384): `hrr/` with
+   `--hrr-group 0x0017` and `hrr-p384/` with `--hrr-group 0x0018`. Both are
+   exported with `--label hrr`; the suite diffs CH2 against each
+   (`hrr-ch2-p384-diff-vs-capture` for the second, `tests/test_mcp_chrome.py`).
 
    `serve` binds 127.0.0.1 only and refuses any other `--host`. Without
    `--cert`/`--key` it uses the committed test leaf `tests/files/tls/localhost-cert.pem`
