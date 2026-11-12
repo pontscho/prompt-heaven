@@ -688,7 +688,7 @@ SUITES = [
      "and visible Set-Cookie, the host set, the 307 body rule, concurrency, "
      "no secret in logs or errors), one uv stdio row); "
      "every refusal and the hmac.compare_digest tag gate, the generator block "
-     "contract, and the AES-256-GCM decrypt floor", 902),
+     "contract, and the AES-256-GCM decrypt floor", 904),
     # TYPED, not None, although it is one-plus-one cases per server: here a
     # server appearing WITHOUT a declared row is the defect, so a count that
     # moves when the roster moves is the alarm working rather than noise.  That

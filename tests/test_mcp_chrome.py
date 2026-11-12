@@ -9137,6 +9137,70 @@ def wf_session_rows(suite, wf, root, lp, lp2, dp):
                 + problem_if("**session cookies**: 20 held" not in wf_text(wide), "jar line %r" % wf_lines(wide, "**session cookies**:"))), ["20 Set-Cookie lines of 600+ characters: at most 12 shown and a note for the rest, the reply under the default ceiling and under max_answer_chars=1200"]
     run_row(suite, GO, "webfetch-session-set-cookie-section-bounded-by-the-ceiling", flood, src + "; ADR 0013")
 
+    def duplicate_cookie_name():
+        problems = []
+        with WfOpen(wf, root, ["127.0.0.1"]) as s:
+            s.fetch(url + "/login", method="POST", body="u=1")
+            jar = wf._SESSIONS[s.sid].session.cookies
+            jar.ingest("https", "127.0.0.1", "/", ["a*b=1; Path=/"])
+            m = lp.mark()
+            dup = s.fetch(echo, cookies={"sid": WF_SECRET_CRUMB, "fresh": "1"})
+            hostile = s.fetch(echo, cookies={"a*b": WF_SECRET_CRUMB})
+            both = s.fetch(echo, cookies={"sid": "1", "a*b": "2"})
+            sent_refused = lp.since(m)[0]
+            m = lp.mark()
+            other_case = s.fetch(echo, cookies={"SID": "x", "fresh": "1"})
+            sent_ok = lp.since(m)[0]
+            after = s.fetch(echo)
+            errs = [wf_error(x) or "" for x in (dup, hostile, both)]
+            problems += problem_if("sid" not in errs[0] or "cookies" not in errs[0] or "fresh" in errs[0] or WF_SECRET_CRUMB in errs[0] or "\n" in errs[0], "duplicate name: %r" % errs[0][:200])
+            problems += problem_if("<non-token name>" not in errs[1] or "a*b" in errs[1] or WF_SECRET_CRUMB in errs[1], "non-token duplicate: %r" % errs[1][:200])
+            problems += problem_if("sid" not in errs[2] or "<non-token name>" not in errs[2] or "a*b" in errs[2], "two duplicates: %r" % errs[2][:200])
+            problems += problem_if(sent_refused, "%d request(s) were sent for a refused duplicate" % len(sent_refused))
+            problems += wf_report(other_case, echo, 200, WF_VERIFIED) + problem_if(len(sent_ok) != 1 or "SID=x" not in crumbs(sent_ok[0]), "a different-case name was not sent: %r" % [crumbs(q) for q in sent_ok])
+            problems += wf_report(after, echo, 200, WF_VERIFIED)
+        with WfOpen(wf, root, ["127.0.0.1"]) as fresh:
+            clean = fresh.fetch(echo, cookies={"sid": "1"})
+        return problems + wf_report(clean, echo, 200, WF_VERIFIED), ["a cookies name already in the session's jar (exact, case-sensitive) is refused before any request naming the name (a non-token name as <non-token name>), never the value; SID is not sid; the lock is released; a jar without it, and a call without a session, send as before"]
+    run_row(suite, GO, "webfetch-session-cookies-param-duplicating-a-jar-name-refused", duplicate_cookie_name, src)
+
+    def lifetime_cap():
+        now = [1000.0]
+        problems = []
+        with Swapped((wf, "_session_clock", lambda: now[0])):
+            with WfOpen(wf, root, ["127.0.0.1"]) as s:
+                opened = wf_text(s.got)
+                s.fetch(url + "/login", method="POST", body="u=1")
+                sess = wf._SESSIONS[s.sid]
+                steps = []
+                for _i in range(7):
+                    now[0] += 500
+                    steps.append(s.fetch(echo))
+                now[0] += 99
+                edge = s.fetch(echo)
+                now[0] += 2
+                dead = s.fetch(echo)
+                live = wf._sessions_live()
+                problems += [p for got in steps + [edge] for p in wf_report(got, echo, 200, WF_VERIFIED)]
+                problems += problem_if("lifetime cap: 3600 s" not in opened.split("\n"), "session_open does not state the cap: %r" % opened[:300])
+                problems += problem_if(already not in (wf_error(dead) or ""), "after 3601 s of use: %s" % short(dead))
+                problems += problem_if(live != 0, "the lifetime-expired session is still counted live: %r" % live)
+                problems += problem_if(sess.session.cookies._cookies, "the jar was not emptied: %d cookie(s)" % len(sess.session.cookies._cookies))
+            with WfOpen(wf, root, ["127.0.0.1"], idle_timeout=30) as t:
+                now[0] += 10
+                t.fetch(echo)
+                real = wf._fetch_once
+
+                def late(*a, **kw):
+                    now[0] += wf.SESSION_MAX_LIFETIME
+                    return real(*a, **kw)
+                during = t.fetch(echo, swaps=((wf, "_fetch_once", late),))
+                after = t.fetch(echo)
+                problems += wf_report(during, echo, 200, WF_VERIFIED)
+                problems += problem_if(already not in (wf_error(after) or ""), "the call after the cap passed during a call: %s" % short(after))
+        return problems + problem_if(wf._sessions_live() != 0, "left %d live" % wf._sessions_live()), ["a session refreshed by use every 500 s still ends 3600 s after session_open (3599 s served, 3601 s the unknown-or-expired refusal, jar emptied, not live); session_open states 'lifetime cap: 3600 s'; a call in flight when the cap passes completes, the next one is refused"]
+    run_row(suite, GO, "webfetch-session-absolute-lifetime-cap-independent-of-idle-refresh", lifetime_cap, src)
+
     def surface():
         status = wf_text(wf.handle_webfetch_call({}, root, root))
         unknown = wf_error(wf.handle_webfetch_call({"function": "nope", "params": {}}, root, root)) or ""

@@ -31,7 +31,8 @@ given, or a dict of str to str sent urlencoded; at most 64 KiB) and `cookies`
 (session_open, then fetch with `session=<id>`) keeps ONE cookie jar across
 calls so a multi-step login can be driven: it is bound to at most 8 exact host
 names (a hop to any other host is refused, redirects included), lives for an
-idle timeout of at most 10 minutes refreshed by each use, at most 4 are live,
+idle timeout of at most 10 minutes refreshed by each use and an absolute
+lifetime cap of 1 hour from session_open, at most 4 are live,
 and one call at a time runs on it. POST and every session call use the
 verified transport only (profile=chrome is refused), never touch the cache,
 are never retried, and never re-send a POST body to another origin on a
@@ -355,6 +356,9 @@ FETCH_BODY_MAX_BYTES = 64 * 1024
 SESSION_MAX_LIVE = 4
 SESSION_MAX_HOSTS = 8
 SESSION_IDLE_MAX_SEC = 600
+# An absolute cap from session_open, independent of the idle refresh: a busy
+# session cannot keep a credential-bearing jar alive forever.
+SESSION_MAX_LIFETIME = 3600
 
 # What one report may show of the Set-Cookie lines a call received. The tape
 # stores at most SET_COOKIE_TAPE_MAX lines of SET_COOKIE_TAPE_LINE_CHARS; the
@@ -633,7 +637,10 @@ class _FetchSession:
 		self.sid = sid
 		self.hosts = hosts
 		self.idle = idle
-		self.expires = now + idle
+		# `expires` is the idle deadline clipped to the absolute one, so the reaper
+		# and every refresh below need only this one number.
+		self.hard_expires = now + SESSION_MAX_LIFETIME
+		self.expires = min(now + idle, self.hard_expires)
 		self.guard = _HopGuard(hosts)
 		self.session = _create_session(None, 30, False, 0, guard=self.guard)
 		self.tape = _attach_tape(self.session)
@@ -736,9 +743,11 @@ def handle_session_open(params: dict, project_root: str, cache_root: Optional[st
 		f"session: {sid}\n"
 		f"hosts: {', '.join(sorted(hosts))}\n"
 		f"idle_timeout: {idle} s (refreshed by every use)\n"
+		f"lifetime cap: {SESSION_MAX_LIFETIME} s\n"
 		f"live sessions: {live} of {SESSION_MAX_LIVE}\n"
 		"Pass session=<the id above> to fetch. Only these hosts can be reached through it; "
-		"its cookies are kept for the session and dropped by session_close.\n"
+		"its cookies are kept for the session and dropped by session_close, or when the idle "
+		"timeout or the lifetime cap (counted from this call, never refreshed) runs out.\n"
 	)}
 
 
@@ -780,7 +789,7 @@ def _session_acquire(sid: Any) -> Tuple[Optional[_FetchSession], Optional[str]]:
 
 def _session_release(sess: _FetchSession) -> None:
 	"""End a call on *sess*: the idle clock restarts from now, the lock is released, a closed session is closed."""
-	sess.expires = _session_clock() + sess.idle
+	sess.expires = min(_session_clock() + sess.idle, sess.hard_expires)
 	sess.lock.release()
 	_session_finalize(sess)
 
@@ -8752,6 +8761,20 @@ def _handle_fetch(params: dict, project_root: str, cache_root: Optional[str], se
 	except ValueError as exc:
 		return {"error": str(exc)}
 	if crumbs:
+		# The jar already sends its own cookie of that name first; a second one of
+		# the same name in the same Cookie header is ambiguous, so refuse it here,
+		# before any host check or socket. Exact, case-sensitive.
+		if sess is not None:
+			held = set(_jar_names(sess.session.cookies))
+			dups = [n for n in params["cookies"] if n in held]
+			if dups:
+				shown = [n[:64] if _JAR_NAME_RE.match(n) else _JAR_NAME_PLACEHOLDER for n in dups[:8]]
+				more = len(dups) - len(shown)
+				return {"error": (
+					"cookies: %s already in this session's cookie jar (a duplicate name would be sent "
+					"twice); leave %s out of cookies; nothing was sent"
+					% (", ".join(shown) + (" +%d more" % more if more > 0 else ""),
+					   "it" if len(dups) == 1 else "them"))}
 		extra_headers = _merge_cookie_header(extra_headers, crumbs)
 		try:
 			_ch_check_caller_headers(extra_headers)
@@ -9214,7 +9237,7 @@ def handle_webfetch_call(arguments: dict, project_root: str, cache_root: Optiona
 			f"{_decoder_status('zstd', _ZSTD_STATE, _zstd_attempts, _zstd_exists)}\n"
 			f"Cache dir: {_cache_dir(cache_root)}\n"
 			f"Sessions: {_sessions_live()} live (at most {SESSION_MAX_LIVE}; idle timeout at most "
-			f"{SESSION_IDLE_MAX_SEC} s, restarted by each use; fetch takes session=<id>)\n"
+			f"{SESSION_IDLE_MAX_SEC} s, restarted by each use; lifetime cap {SESSION_MAX_LIFETIME} s; fetch takes session=<id>)\n"
 			f"Available functions:\n{funcs}"
 		)}
 
@@ -9347,7 +9370,9 @@ WEBFETCH_CALL_TOOL = {
 		"shares ONE cookie jar. A session can only reach its listed hosts: a hop to "
 		"any other host, a redirect included, fails the call before anything is "
 		"sent to it. Live sessions: at most 4; one expires after its idle timeout "
-		"without use; one call at a time runs on a session (a concurrent call is "
+		"without use, and in any case 3600 s after session_open (the cap is never "
+		"refreshed; a call in flight when it passes completes, the next is refused as "
+		"expired); one call at a time runs on a session (a concurrent call is "
 		"refused as busy). POST and session calls use the verified transport only: "
 		"profile=chrome is refused with either, https->http redirects are refused, "
 		"nothing is cached or retried, and a 307/308 redirect to another origin "
@@ -9358,7 +9383,9 @@ WEBFETCH_CALL_TOOL = {
 		"cached answer lists none; a profile=chrome answer never lists them), and "
 		"a session report adds a line naming the cookies the jar holds (names "
 		"only). `cookies` (dict of name to value) is sent as Cookie crumbs for that "
-		"call after the jar's own, and dropped on a cross-origin hop. Values are "
+		"call after the jar's own, and dropped on a cross-origin hop; on a session "
+		"call a `cookies` name the jar already holds (exact match) is refused before "
+		"anything is sent. Values are "
 		"never written to the log.\n\n"
 		"fetch parameters: url (required), method (GET/HEAD/POST, default GET), "
 		"body (str or dict of str to str, POST only; alias data), cookies (dict "

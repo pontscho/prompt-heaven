@@ -212,3 +212,7 @@ The rows live in the `mcp_chrome` suite ([[tests]]), which went from 848 to
 (driven through `_session_clock`), cookie continuity and visible Set-Cookie, the
 host set, the 307 body rule and the log-line pin above, concurrency, and no
 secret in logs or errors `tests/test_mcp_chrome.py`.
+
+## Addendum (2026-11-12): two of the three not-implemented items are now implemented (2026-11-12)
+
+A duplicate cookie name in a session call's cookies parameter is refused before any socket, and a session has an absolute lifetime cap, SESSION_MAX_LIFETIME = 3600 s from session_open, independent of the idle refresh (Scripts/mcp-webfetch.py). Both are host-side, like the rest of this ADR. The duplicate check compares exact, case-sensitive names against the jar's own names through the same private jar._cookies read as _jar_names, so it carries the same silent-degradation caveat if the canonical jar shape changes; a name in a caller Cookie header is not checked, and a hostile jar name is shown as <non-token name>. The lifetime cap is checked at acquire: a call already running when the cap passes completes (it may overrun by its own duration, at most the 300 s per-attempt clamp), after which expires equals hard_expires, the next call gets the ordinary expired-session refusal and the jar is emptied by the existing finalize. session_open states the cap in its reply. LRU eviction stays unimplemented. mcp_chrome went 902 -> 904 cases; the 883 in the Consequences refers to the state at the original commit.
