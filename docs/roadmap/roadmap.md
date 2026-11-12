@@ -48,6 +48,7 @@ WIP now: 0 of 3. Archive: 78 closed items (69 done, 9 dropped).
 | inbox | R-0087 | idea  | llm-router: effort learning and an effort field on the req line for the Responses kinds             | yes   |
 | inbox | R-0088 | idea  | llm-router: put the non-stream dropped_thinking count on the req line                               | yes   |
 | inbox | R-0111 | idea  | A planted entry in the runner work_root must not take the whole proxy down                          | yes   |
+| inbox | R-0114 | idea  | webfetch: POST and a session cookie jar for multi-step authenticated flows                          | yes   |
 <!-- ROADMAP:END -->
 
 # now
@@ -611,3 +612,17 @@ The mcp-sandbox work_root (deployed: ~/mcp/work/tmp) is writable by every sbx ch
 ### Log
 
 - 2026-10-12 new->unset: raised in session 2026-10-12
+
+## R-0114 · webfetch: POST and a session cookie jar for multi-step authenticated flows
+
+state: idea
+horizon: unset
+origin: peer ngs-elk-oholist, 2026-11-12 (live use)
+blocked_by: []
+tags: [mcp-webfetch, security]
+
+webfetch_call fetch is GET/HEAD only with no cookie continuity between calls, so an OAuth/OIDC login (credential POST, Set-Cookie carried across redirects) cannot be driven; reported while testing an Entra ID / oauth2-proxy flow. Opposing considerations: POST bodies and a cookie jar widen the exfiltration and CSRF surface of a model-driven fetcher, and the Chrome path is unverified TLS (see the R-0042-era cert_verified item), so any design needs an explicit opt-in session mode, a per-session jar bound to one host set, and verified transport only. Not decided.
+
+### Log
+
+- 2026-11-12 new->unset: added
