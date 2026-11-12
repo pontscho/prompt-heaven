@@ -3,13 +3,13 @@ name: scripts
 type: subsystem
 status: active
 title: Scripts & MCP Servers
-description: The standalone scripts in Scripts/ -- the MCP servers and the canonical sources their generated regions come from, the llm-router, gpu-router and mcp-proxy HTTP fronts, the requirements.yaml task utilities, the fetch.py browser-like fetcher, and the shell scripts behind restartable sessions.
+description: The standalone scripts in Scripts/ -- the MCP servers (mcp-messagebox and its spool hook among them) and the canonical sources their generated regions come from, the llm-router, gpu-router and mcp-proxy HTTP fronts, the requirements.yaml task utilities, the fetch.py browser-like fetcher, and the shell scripts behind restartable sessions.
 sources:
   - Scripts
   - Scripts/context-guard.sh
 verified:
-  commit: f43a052
-  date: 2026-10-30
+  commit: 8ace8a2
+  date: 2026-11-12
 links:
   - overview
   - mcp-proxy
@@ -143,10 +143,11 @@ the servers that learned this later (forge, jenkins, tshark, context7, lldb,
 gdc and the three legacy LSP servers) the sentence is the second generated
 block, `Scripts/_mcp_dispatch.py:_unknown_params_refusal`, read against a hand
 `ACCEPTED_PARAMS` table per function; the servers that refused first still
-write it by hand. mcp-sandbox, mcp-skill and mcp-gd refuse an unknown key from
-their first commit through the same generated block, read against their own
-tables `Scripts/mcp-sandbox.py:_RUN_PARAMS`, `Scripts/mcp-skill.py:ACCEPTED` and
-`Scripts/mcp-gd.py:ACCEPTED`. The check is a pure function of the params and the table, so
+write it by hand. mcp-sandbox, mcp-skill, mcp-gd and mcp-messagebox refuse an
+unknown key from their first commit through the same generated block, read
+against their own tables `Scripts/mcp-sandbox.py:_RUN_PARAMS`,
+`Scripts/mcp-skill.py:ACCEPTED`, `Scripts/mcp-gd.py:ACCEPTED` and
+`Scripts/mcp-messagebox.py:ACCEPTED`. The check is a pure function of the params and the table, so
 it runs before anything that can wait or fail for another reason: before forge
 reads its config `Scripts/mcp-forge.py:handle_forge_call`, before jenkins
 injects its project-scope `job_path` (so the injected key is never what is
@@ -155,9 +156,14 @@ session lock `Scripts/mcp-lldb.py:handle_lldb_call`, and before the legacy LSP
 servers' auto-init wait and backend lock
 `Scripts/mcp-lua-lsp.py:handle_luals_call`. A bare status call has no params to
 check, and a function-less call that carries params or another argument is refused
-fleet-wide as a missing top-level `function` (the third `_mcp_dispatch.py` block;
-only a truly empty call keeps the status banner, see
-[[0030-point-at-the-near-miss-never-resolve-it]]). The direct-tool
+fleet-wide as a missing top-level `function` (the third `_mcp_dispatch.py` block,
+`Scripts/_mcp_dispatch.py:_missing_function_refusal`; only a truly empty call
+keeps the status banner, see [[0030-point-at-the-near-miss-never-resolve-it]]).
+A `function` that is not a string (`7`, `true`, `[]`, `{}`) is refused with
+`function must be a string` in each host's own error shape, where it used to
+reach `.strip()` as a caught `AttributeError` or fold into the banner; the smoke
+check asserts it on every dispatcher server, the proxy having no function layer
+`Scripts/_mcp_smoke_test.py:nonstring_function_checks`. The direct-tool
 path on context7, lldb and gdc is not checked: only `<name>_call` routes through the dispatcher. The
 legacy LSP servers took `relative_path` as an alias of `path`, the spelling
 their skills document `Scripts/mcp-clangd.py:PARAM_ALIASES`; lua-lsp's
@@ -211,11 +217,12 @@ has its reply suppressed. For the LSP servers (`lsp-cancel`), the generated
 (`pg-cancel`), a `CancelRequest` carrying the captured `BackendKeyData` goes out
 on a second socket and the worker drains the error through `ReadyForQuery`
 before releasing the connection `Scripts/mcp-postgres.py:send_cancel_request`.
-For context7, jenkins, webfetch, search, skill and gd (`reply-only`), the reply is suppressed
+For context7, jenkins, webfetch, search, skill, gd and messagebox (`reply-only`), the reply is suppressed
 and the worker thread runs to its own timeout — for search, a call waiting on or
 holding an endpoint lock runs to its end, for skill, the runner HTTP call
-runs to its own deadline, and for gd, the Google call (a mutation included)
-completes at Google `tests/test_cancel.py:FLEET`. The addendum to [[0008-a-serialized-read-loop-looks-like-a-dead-server]]
+runs to its own deadline, for gd, the Google call (a mutation included)
+completes at Google, and for messagebox, a cancelled `send` still reaches the hub
+`tests/test_cancel.py:FLEET`. The addendum to [[0008-a-serialized-read-loop-looks-like-a-dead-server]]
 records the decision, and `tests/test_cancel.py` gates it ([[tests]]).
 
 The unregistered servers below were converted too, even though they never
@@ -271,10 +278,13 @@ the smoke check runs both as unregistered servers `Scripts/_mcp_smoke_test.py:SE
   caller's inline files into a fresh work directory, runs one configured
   interpreter (`python3`, `bash` or `node`) on the entry file through `sbx`'s
   restricted mode, and answers the exit status, the capped output and the files
-  left under `out/` `Scripts/mcp-sandbox.py:run_one`. Its command line is
+  left under `out/` `Scripts/mcp-sandbox.py:run_one`, each `out/` file sent as
+  UTF-8 or base64, whichever costs less in the serialised reply
+  `Scripts/mcp-sandbox.py:collect_out`. Its command line is
   `--config PATH` plus `--debug`/`--log-file`; every policy lives in that one
   strict JSON file `Scripts/mcp-sandbox.py:load_config`. An optional `network`
-  key in it gives a run egress to an allowlist of hosts, only through a per-run
+  key in it gives a run egress to an allowlist of hosts, and with
+  `network.internal` to exact private `IP:port` pairs, only through a per-run
   CONNECT proxy the runner owns `Scripts/mcp-sandbox.py:_cfg_network`
   ([[0033-egress-through-an-allowlisting-proxy]]). It speaks stdio only and
   runs as an `mcp-proxy --http` child: either the single child of a dedicated
@@ -293,12 +303,18 @@ the smoke check runs both as unregistered servers `Scripts/_mcp_smoke_test.py:SE
   through a declared hand copy of the websearch sanitizer
   `Scripts/mcp-skill.py:_web_clean`, and forwards `run` to mcp-sandbox's proxy
   over a loopback-only HTTP client `Scripts/mcp-skill.py:RunnerClient`
-  (`--runner-url`, `--runner-token-file`). ai-soul reaches it as an mcp-proxy
-  child with `relist` on. Its tiers, file hygiene, answer shape and the runner
+  (`--runner-url`, `--runner-token-file`). A `run` may also carry `inputs`,
+  files staged beside the script bundle under their own count and byte bounds
+  `Scripts/mcp-skill.py:_validate_inputs`; the `.pdf`, `.typ` and `.md` files a
+  run leaves under `out/` come back as EmbeddedResource blocks after the text
+  `Scripts/mcp-skill.py:_doc_block`, and the result's `_meta` names the skill
+  and tier that ran `Scripts/mcp-skill.py:_sanitize_run_result`. ai-soul reaches
+  it as an mcp-proxy child with `relist` on. Its tiers, file hygiene, answer shape and the runner
   client are [[mcp-skill]].
 
-One more server sits outside the table because it is new and not registered yet:
-the smoke check runs it as unregistered `Scripts/_mcp_smoke_test.py:SERVERS`.
+The servers below sit outside the table because they are new and not
+registered yet: the smoke check runs each as unregistered
+`Scripts/_mcp_smoke_test.py:SERVERS`.
 
 - `Scripts/mcp-gd.py` (`gd_call`: seven `drive_*`, seven `cal_*` and six
   `sheets_*` functions `Scripts/mcp-gd.py:FUNCTIONS`) is the Google Drive,
@@ -307,14 +323,44 @@ the smoke check runs it as unregistered `Scripts/_mcp_smoke_test.py:SERVERS`.
   `--config PATH` (a strict 0600 JSON file holding the OAuth client and the
   default-closed owner switches `Scripts/mcp-gd.py:load_config`), the local-file
   roots `--download-dir`, `--upload-root` and `--project-root`
-  `Scripts/mcp-gd.py:check_flags`, `--debug`/`--log-file`, and a `login`
-  subcommand for the installed-app OAuth flow `Scripts/mcp-gd.py:run_login`.
+  `Scripts/mcp-gd.py:check_flags`, `--debug`/`--log-file`, a `login`
+  subcommand for the installed-app OAuth flow `Scripts/mcp-gd.py:run_login`, and
+  an `init` subcommand that writes that config, every owner switch closed, from
+  the Desktop client's `client_secret_*.json`, sending nothing and printing no
+  secret `Scripts/mcp-gd.py:_init_main`.
   It is the `_mcp_oauth` source's second host beside llm-router
   ([[generated-regions]]), validates every argument before it reads a token or
   opens a socket, and flags every reply `untrusted`. Its config, token store,
   transport, envelope and declared limits are [[mcp-gd]]; the model-facing
   reference is `ClaudeCode/skills/mcp-gd/SKILL.md`. Registration on the Mac and
   the mcp-proxy child on the Linux host are owner steps.
+- `Scripts/mcp-messagebox.py` (`messagebox_call`: `info`, `list`, `send`,
+  `reply`, `ack`, `status` `Scripts/mcp-messagebox.py:FUNCTIONS`) carries
+  messages between one user's Claude Code sessions. It registers its session at
+  a hub (the ai-soul daemon's `/peers/*` routes), polls it, and writes each
+  inbound message into that session's spool directory under
+  `~/.claude/messagebox/`; it reaches the model only through its own tool
+  `Scripts/mcp-messagebox.py:handle_messagebox_call`. Its configuration is the
+  `MESSAGEBOX_*` environment of its MCP entry, with no policy flags: it always
+  starts and answers the protocol, but registers only when the hub URL, a `0600`
+  token file and an owning `cli` Claude Code session found up its parent chain
+  are all there, and otherwise fails closed with no spool and no registration
+  `Scripts/mcp-messagebox.py`. The smoke row strips every `MESSAGEBOX_*`
+  variable and sets `MESSAGEBOX_DISABLE=1`, so a test run never registers a real
+  session `Scripts/_mcp_smoke_test.py:SERVERS`. Its other half is
+  `Scripts/messagebox-hook.py`, a stdlib script run as `python3 -I` from the
+  SessionStart and Stop hooks and not an MCP server: it reads only that spool,
+  claims each message by renaming it, re-validates what it read after the
+  rename, and writes the batch to stderr in a nonce-framed block for the
+  harness's asyncRewake, with no network import; a session younger than its
+  wait bound gets that long for the spool to appear
+  `Scripts/messagebox-hook.py:await_spool`. The two judge a message by one rule
+  set (the spool's owner walk, the file and directory rules, the name and id
+  grammar, the text rule, the record shape and a strict JSON parser) because
+  both carry the canonical source `Scripts/_mcp_spool.py` whole, the hook as a
+  hand-declared host of the generator `Scripts/amalgamate.py:DECLARED_HOSTS`
+  ([[generated-regions]]). No component page or ADR covers it yet; its suites
+  are `messagebox` and `messagebox_hook` ([[tests]]).
 
 Superseded, not registered — their capabilities were folded into `purity_call`,
 which is the live route for all three: `mcp-clangd.py` (C/C++), `mcp-lua-lsp.py`
@@ -1477,7 +1523,12 @@ OpenAI/Anthropic server (typically a [[gpu-router]] llm app) relayed raw and
 never translated on `/v1/chat/completions`, `/v1/embeddings`, `/v1/rerank` and
 `/v1/messages` `Scripts/llm-router.py:RawllmAdapter`; one more row,
 `anthropic`, is reserved and refused by the loader
-`Scripts/llm-router.py:_RT_KIND_TABLE`. A route whose
+`Scripts/llm-router.py:_RT_KIND_TABLE`. The Responses kinds take opt-in route
+options -- `max_output_tokens`, `parallel_tool_calls`, and `capture_dir`, which
+keeps each route's last outgoing body `Scripts/llm-router.py:_rt_rs_capture` --
+and log a structure-only request shape and terminal event at DEBUG
+`Scripts/llm-router.py:_rt_rs_log_shape`, so an answer the output cap cut
+explains itself; the option table is in [[llm-router]]. A route whose
 `modality` is `image` is served by the OpenAI-shaped `/v1/images/generations`
 and `/v1/images/edits` endpoints instead of `/v1/messages` — on an openai
 API-key backend, an sdcpp backend or, experimentally, a codex one
@@ -1486,7 +1537,8 @@ JSON config that must be a regular file owned by the user with mode `0600`,
 opened without following a symlink
 `Scripts/llm-router.py:_rt_read_config_file`; network and process settings are
 flags, each with an optional top-level config twin that an explicit flag beats
-`Scripts/llm-router.py:_RT_LISTENER_KEYS`, and there is no inline-config flag because argv is visible in `ps`. An OAuth backend
+`Scripts/llm-router.py:_RT_LISTENER_KEYS` (a `bind` list or a repeated `--bind`
+opens several listeners in one process), and there is no inline-config flag because argv is visible in `ps`. An OAuth backend
 is signed in by the `login` subcommand (browser or device flow)
 `Scripts/llm-router.py:_rt_login`, which writes its tokens back into that same
 config. Its HTTP front is generated from `Scripts/_mcp_httpfront.py`, shared
@@ -1505,7 +1557,10 @@ are [[llm-router]]; why it routes by model and translates at the edge is
 `Scripts/gpu-router.py` (sd-router until `bde9876`) is the second HTTP server
 here that is **not an MCP server**: a stdlib-only supervisor and reverse proxy
 for the apps of a host with one GPU, run by path with `--config <file>`
-`Scripts/gpu-router.py:_sd_parser`. Its 0600 JSON config declares apps, each one
+`Scripts/gpu-router.py:_sd_parser`; as in the LLM router, its listener and
+process settings are flags with config twins that an explicit flag beats, and
+`bind` may name several addresses, each its own listener in one process
+`Scripts/gpu-router.py:_sd_cfg_bind`. Its 0600 JSON config declares apps, each one
 child process launched from an argv list and serving one or more model ids, of
 kind `sd` (stable-diffusion.cpp `sd-server`) or `llm` (an inferNO-style LLM,
 embedding and reranker engine) `Scripts/gpu-router.py:load_config`

@@ -16,7 +16,7 @@ sources:
   - tests/test_mcp_chrome.py:profile_problems
   - tests/files/chrome/154/README.md
 verified:
-  commit: bb3911d
+  commit: 8ace8a2
   date: 2026-11-12
 links:
   - 0004-never-pin-a-browser-impersonation-version
@@ -178,10 +178,12 @@ Run every command from the repo root. Scratch output goes under `.claude/tmp/`.
 7. **Regenerate the hosts:** `python3 Scripts/amalgamate.py`. `_mcp_chrome.py` is
    a whole source (`Scripts/amalgamate.py:WHOLE_SOURCES`) and no host imports it
    ([[0025-generate-do-not-import]]); its blocks live as generated regions in
-   `Scripts/mcp-webfetch.py`, in `Scripts/mcp-search.py`, and in the three declared
-   non-server hosts that carry it, `Scripts/search_duckduckgo.py`,
-   `Scripts/search_github.py` and `Scripts/fetch.py`
-   (`Scripts/amalgamate.py:DECLARED_HOSTS`). See [[generated-regions]].
+   `Scripts/mcp-webfetch.py`, in `Scripts/mcp-search.py`, and in those of the
+   declared non-server hosts (`Scripts/amalgamate.py:DECLARED_HOSTS`) that take
+   it. Which files those are is not repeated here: the `canonical-block-hosts`
+   measured region of [[generated-regions]] renders every file each
+   Chrome-client block is generated into, counted by the generator itself
+   `Scripts/amalgamate.py:census_hosts`.
 
 8. **Re-gate:** `forge_call test {targets: [mcp_chrome, generated_region, amalgamate_check]}`
    (the last one runs `python3 -B Scripts/amalgamate.py --check`; a clean tree
