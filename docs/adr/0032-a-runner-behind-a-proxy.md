@@ -13,8 +13,8 @@ sources:
   - tests/test_mcp_sandbox.py
   - tests/test_mcp_skill.py
 verified:
-  commit: c643221
-  date: 2026-10-12
+  commit: 877f54c
+  date: 2026-11-12
 links:
   - 0031-sbx-restricted-mode
   - 0027-the-proxy-relays-it-never-composes
@@ -722,3 +722,19 @@ The A9 worst-case reply bound priced every byte, out/ file bytes included, at 13
 Decision: collect_out now picks the encoding per file by the real cost of both reply copies (Scripts/mcp-sandbox.py:_encode_out_file). The utf8 cost is the file's JSON string in structuredContent plus that string dumped again in the text copy, built with the same json.dumps defaults as the server (ensure_ascii included); the base64 cost is 2 x 4 x ceil(n / 3) plus the quotes. utf8 is chosen only when the bytes decode and it is not dearer, so plain text stays utf8 (an empty file ties and stays utf8) while a control-character, quote or backslash heavy file, dense non-ASCII text and any non-UTF-8 file go base64. Because min(utf8, base64) <= base64, an out/ file costs at most 2.67 characters per source byte; _cfg_limits prices it at _OUT_BYTE_WORST = 3 (padding and per-file overhead sit in the existing 256 per file). Streams keep 13. The formula is 13 x (stdout_bytes + stderr_bytes) + 3 x max_out_bytes + max_out_files x (13 x 512 + 256) + 2 x 8192 <= 16 MiB, and at 64 KiB streams and 16 files it admits max_out_bytes up to 4982101. No default and no deployed config changed; max_out_bytes still counts source bytes.
 
 Consequence kept visible: mcp-skill decodes base64 out files for the document types (.md, .typ, .pdf), so those emit as before, but a non-document out file that now goes base64 (for example a quote-dense JSON file) is listed to the model as encoded chars with its content not shown, where it used to be shown as text. The crossover is roughly one quote in seven bytes. Tests: A9 re-derived, A11 ships its control bytes as base64, A21 (the 3 x edge and the unchanged refusal text), H27 (encoding by cost and the per-file reply bound measured on the real serialisation), H28 (the cap counts source bytes), I8 lengthened so one accented letter does not flip it; 194 -> 197 cases.
+
+## Addendum (2026-11-12): A base64 out file that is UTF-8 text is shown as text; a stray top-level key is refused; the inputs schema names ref
+
+Three mcp-skill changes that followed the runner's per-file encoding choice. The runner, the proxy, the bundle, the sanitizer and the document blocks are as before.
+
+### The 2026-11-11 consequence is reversed
+
+The 2026-11-11 addendum kept visible that a non-document out file the runner now ships as base64 (a quote-dense JSON file) reached the model as an `encoding: base64, N encoded chars (content not shown)` line. `2dda458` removes that consequence on the mcp-skill side: a base64 out file whose content is strict base64 (`validate=True`), at most `Scripts/mcp-skill.py:_B64_SHOW_MAX` encoded characters (the base64 of the 100000-character answer ceiling, so a decode never yields more text than the answer can hold) and strict UTF-8 once decoded is shown as text through the same `_web_clean` scrub as a utf8 file `Scripts/mcp-skill.py:_b64_text` `Scripts/mcp-skill.py:_sanitize_run_result`. A binary, invalid base64 or a longer body keeps the metadata line. The 2026-10-12 sentence "A base64 file gets a one-line note and its content is not shown" therefore now holds only for a base64 file that is not UTF-8 text or is over that length. The runner's choice is unchanged `Scripts/mcp-sandbox.py:_encode_out_file`. Rows `mcp_skill:M12`-`M14`; the suite went from 126 to 129 cases.
+
+### A stray top-level key is refused
+
+`3564a6c`: once the function is known, a top-level argument other than `function` and `params` is `invalid_params`. A key the function accepts is answered "<key> belongs inside params, found at top level" with the corrected call shape; any other is "unknown top-level key '<key>'" with the near-miss pointer of [[0030-point-at-the-near-miss-never-resolve-it]]; nothing is hoisted `Scripts/mcp-skill.py:_stray_top_level` `Scripts/mcp-skill.py:handle_skill_call`. Before it, a live hub turn that put `name` beside `params` was answered with a bare `name is required`. The check runs before the schema-key drop of the two 2026-10-12 addenda, which applies inside `params` only. mcp-sandbox has no such rule; it reads only `function` and `params` `Scripts/mcp-sandbox.py:handle_sandbox_call`. Rows `mcp_skill:L8`-`L10`.
+
+### The inputs schema names ref
+
+The 2026-11-09 inputs addendum keeps its behaviour, but the advertised item schema now lists an optional `ref` string, described as resolved by the household hub before this server is called, and the `inputs` description states the two item shapes, `{name, content[, encoding]}` and `{name, ref}`; there is no `oneOf` and no `required` `Scripts/mcp-skill.py:_tool_definition`. An unresolved ref is still refused naming `inputs[i]` before the bundle is read, now with the reason ("ref items are resolved by the household hub before the call; this server received an unresolved ref") `Scripts/mcp-skill.py:_validate_inputs`. Rows `mcp_skill:N13`-`N15`; with the previous section the suite went from 129 to 135 cases. The shape is on [[mcp-skill]].

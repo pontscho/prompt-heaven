@@ -9,8 +9,8 @@ sources:
   - tests/test_mcp_skill.py
   - tests/files/mcp_skill/stub_runner.py
 verified:
-  commit: b398368
-  date: 2026-11-10
+  commit: 877f54c
+  date: 2026-11-12
 links:
   - mcp-proxy
   - mcp-sandbox
@@ -140,7 +140,7 @@ own valid lines, the number ai-soul's per-tier approval budget is counted in
 A refusal is a tool result with `isError` and an `error.code` — `busy`,
 `sandbox_unavailable`, `invalid_params` or `internal` — never a JSON-RPC error
 `Scripts/mcp-skill.py:_tool_refusal` ([[0010-a-handler-failure-must-reach-iserror]]).
-A call with no `function` and nothing else (no non-empty `params`, no other key) gets an unflagged status reply; with `params` or another key but no top-level `function` it is `invalid_params` naming the cause (a `function` nested inside `params` is called out as such). Once the function is known, any top-level key other than `function` and `params` is `invalid_params` too: one the function accepts is pointed at `params` ("name belongs inside params, found at top level" plus the corrected call shape), any other is "unknown top-level key" with the near-miss pointer — refused, never hoisted `Scripts/mcp-skill.py:_stray_top_level`. The status reply: the function list,
+A `function` that is not a string is `invalid_params` "function must be a string" before anything else is read `Scripts/mcp-skill.py:handle_skill_call`. A call with no `function` and nothing else (no non-empty `params`, no other key) gets an unflagged status reply; with `params` or another key but no top-level `function` it is `invalid_params` naming the cause (a `function` nested inside `params` is called out as such). Once the function is known, any top-level key other than `function` and `params` is `invalid_params` too: one the function accepts is pointed at `params` ("name belongs inside params, found at top level" plus the corrected call shape), any other is "unknown top-level key" with the near-miss pointer — refused, never hoisted `Scripts/mcp-skill.py:_stray_top_level`. The status reply: the function list,
 per-tier counts, the description's size against the ceiling and whether a
 runner is configured — counts only, never a path, a token or skill text
 `Scripts/mcp-skill.py:_status_text`. An unknown function is refused with a
@@ -382,7 +382,8 @@ say `Scripts/mcp-skill.py:_sanitize_run_result`:
   file(s) not shown]` line for the rest. A `base64` file that strictly decodes to
   UTF-8 (the runner picks base64 for quote-heavy text by serialised cost) is
   shown as the decoded text, cleaned like a `utf8` one, when its encoded length
-  is within the base64 of the answer ceiling (`_B64_SHOW_MAX`); any other
+  is within the base64 of the answer ceiling
+  (`Scripts/mcp-skill.py:_B64_SHOW_MAX`, `Scripts/mcp-skill.py:_b64_text`); any other
   `base64` file (a binary, invalid base64, over that length) or an unknown
   encoding is one `encoding: <kind>, N encoded chars (content not shown)` line,
   never its base64 in the text part (a `.pdf`, `.typ` or `.md` additionally travels as a
@@ -552,6 +553,18 @@ rules, uniqueness and reserved names, the count and byte bounds shared with the
 bundle, the encoding rules and strict base64, content never logged, the path
 through a real proxy where the stub runner records the sha256 and size of every
 decoded file, and the runner body cap), run red first (12 of 12 failed).
+Later rows, each written red first: `L7` (a call with params but no top-level
+`function`, or with `function` nested inside `params`, is refused), `L8`-`L10`
+(a key the function accepts sent at the top level is pointed at `params` with
+the corrected call shape and never hoisted, any other top-level key is
+"unknown top-level key" with the near-miss pointer, and `function` plus
+`params` alone still works `Scripts/mcp-skill.py:_stray_top_level`), `M11`
+(the runner's `outFiles[].path` is out-relative), `M12`-`M14` (a `base64` out
+file that is UTF-8 is shown as text, a binary or invalid one keeps the metadata
+line, one over `_B64_SHOW_MAX` is not decoded), `N13`-`N15` (the schema
+advertises an optional `ref` with no `oneOf` and no `required`, an unresolved
+ref is refused with the hub-resolves sentence, a plain item is unchanged) and
+`O1`-`O7` (the run result's `_meta`).
 Its
 case count is declared once, in `tests/run.py:SUITES`, and checked against the
 run; the forge target is `mcp_skill`.

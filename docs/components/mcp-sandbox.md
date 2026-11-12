@@ -9,8 +9,8 @@ sources:
   - tests/test_mcp_sandbox.py
   - tests/files/mcp_sandbox/config.json.tmpl
 verified:
-  commit: c643221
-  date: 2026-10-12
+  commit: 877f54c
+  date: 2026-11-12
 links:
   - mcp-skill
   - mcp-proxy

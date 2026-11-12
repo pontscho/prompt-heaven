@@ -17,13 +17,14 @@ sources:
   - Scripts/_mcp_lsp.py
   - Scripts/_mcp_oauth.py
   - Scripts/_mcp_paging.py
+  - Scripts/_mcp_spool.py
   - Scripts/_mcp_websearch.py
   - Scripts/_mcp_websocket.py
   - Scripts/_mcp_zstd.py
   - tests/test_generated_region.py
 verified:
-  commit: f43a052
-  date: 2026-10-30
+  commit: 877f54c
+  date: 2026-11-12
 links:
   - scripts
   - tests
@@ -449,9 +450,14 @@ form or a stray argument. It reads only its arguments (and nothing of
 `_did_you_mean`), so a host spells it on whichever dispatch marker it already
 carries, and it returns a sentence for the host to wrap in its own error shape,
 exactly as `_unknown_params_refusal` does. A truly empty call keeps the unflagged
-status banner. Twenty servers host it -- every dispatcher but the proxy, which has
-no function layer -- so the `canonical-block-hosts` row for it lists the fleet
-minus `Scripts/mcp-proxy.py`. The unit rows are group E's `mfr-*` cases and the
+status banner. Every dispatcher hosts it but the proxy, which has no function
+layer, so the `canonical-block-hosts` row for it lists the fleet minus
+`Scripts/mcp-proxy.py` (the count is in that measured region, not here). The
+block does not judge the TYPE of `function`: each host checks that first, at its
+own call site, and refuses a non-string one (`7`, `true`, `[]`, `{}`) with
+"function must be a string" in its own error shape, so a falsy non-string never
+reaches the block as an empty function; the smoke probe for that is
+`Scripts/_mcp_smoke_test.py:nonstring_function_checks`. The unit rows are group E's `mfr-*` cases and the
 row proving every dispatcher carries and calls it is group A's
 `missing-function-refusal-in-every-dispatcher`
 `tests/test_generated_region.py:group_missing_function_block`; the live probe is

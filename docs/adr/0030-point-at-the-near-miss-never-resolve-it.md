@@ -10,8 +10,8 @@ sources:
   - Scripts/_mcp_smoke_test.py:near_miss_checks
   - tests/test_generated_region.py:group_dispatch_blocks
 verified:
-  commit: eb1dd9e
-  date: 2026-10-08
+  commit: 877f54c
+  date: 2026-11-12
 links:
   - generated-regions
   - scripts
@@ -358,3 +358,15 @@ Group E of `generated_region` drives the pure function through a truth table (th
 - **Hosts that parse params themselves** (mcp-lua-lsp passes its raw params) name the nested function only when params is already an object.
 - **The direct-tool path** on mcp-context7, mcp-lldb and mcp-gdc is still outside the dispatcher.
 - **mcp-gdc, mcp-context7 and the LSP servers have no dedicated suite row**; the smoke probe is their gate.
+
+## Addendum (2026-11-12): The function-less rule shipped; a non-string function is refused on every dispatcher
+
+The status line of the 2026-11-11 addendum ("implemented in the working tree on top of `67afa1c`") is history: the rule shipped in `95ea101`, and mcp-skill and mcp-sandbox call the block instead of the hand copies `beb78b6` had given them.
+
+### The function type is checked, at each call site
+
+The 2026-11-11 declared limit "The function type is not part of this check" is superseded by `877f54c`. A top-level `function` (or `f`) that is not a string -- `7`, `true`, `[]`, `{}` -- is refused with `function must be a string` in the host's own error shape on every dispatcher but mcp-proxy, before the empty-function test. So `[]` and `{}` are no longer folded into the status banner, and `7` and `true` no longer reach `.strip()` (a caught AttributeError on nine servers) or answer `Unknown function` (context7, lldb, gdc and the LSP servers). mcp-skill, mcp-sandbox, mcp-messagebox and mcp-gd already refused it; mcp-gd now also refuses the `{}` its argument picker used to fold into "absent" `Scripts/mcp-gd.py:handle_gd_call`. The check lives in each host, not in `Scripts/_mcp_dispatch.py:_missing_function_refusal`, whose contract (reads only its arguments, returns a sentence or an empty string) is unchanged. The gate is the smoke probe `Scripts/_mcp_smoke_test.py:nonstring_function_checks` on every server but the proxy, plus one row in each of nine per-server suites (forge dispatch, inspect, chrome, gd, git, search, purity, tshark, wiki).
+
+### Declared limit: a stray top-level key beside a known function
+
+mcp-skill alone refuses a top-level key other than `function` and `params` once the function is known (`3564a6c`, recorded in the 2026-11-12 addendum of [[0032-a-runner-behind-a-proxy]]), with this ADR's pointer and without hoisting the key `Scripts/mcp-skill.py:_stray_top_level`. Elsewhere such a key is still ignored -- mcp-sandbox, for one, reads only `function` and `params` `Scripts/mcp-sandbox.py:handle_sandbox_call` -- and the fleet has not been audited for it. The 2026-10-08 rule that a host must complain about a parameter it drops covers keys inside `params`, not beside it.
