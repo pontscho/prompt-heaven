@@ -301,7 +301,9 @@ WIRE = {
                         "they need to be declared"),
     "mcp-messagebox.py": (OUT, FULL,
                           "messagebox_call dispatcher; requests carry the text of "
-                          "outbound peer messages, replies carry inbound ones"),
+                          "outbound peer messages; replies carry no received "
+                          "message text (that reaches the model only through "
+                          "the hook)"),
     "mcp-postgres.py": (OUT, FULL,
                         "pg_call dispatcher; replies carry query rows"),
     "mcp-proxy.py":    (OUT, FULL,

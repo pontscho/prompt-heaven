@@ -47,6 +47,7 @@ links:
   - 0034-sd-router-a-supervisor-and-proxy-for-sd-server
   - mcp-gd
   - 0036-own-code-not-a-remote-server
+  - mcp-messagebox
 ---
 
 # Generated regions
@@ -68,7 +69,9 @@ domain. The LLM router
 two logging regions, the OAuth client and the stdlib HTTP front it shares with
 `Scripts/mcp-proxy.py`. The GPU app supervisor `Scripts/gpu-router.py`, the
 second HTTP server that is not an MCP server, takes the two logging regions and
-the same HTTP front ([[gpu-router]]). They are targets because the generator **names them
+the same HTTP front ([[gpu-router]]). The messagebox hook `Scripts/messagebox-hook.py`,
+the asyncRewake half of mcp-messagebox and not an MCP server, takes the spool
+source `Scripts/_mcp_spool.py` whole and nothing else ([[mcp-messagebox]]). They are targets because the generator **names them
 by hand** `Scripts/amalgamate.py:DECLARED_HOSTS` — see "A host outside the glob"
 below — not because anything about them matches the server glob.
 

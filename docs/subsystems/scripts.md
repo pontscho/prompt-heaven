@@ -49,6 +49,7 @@ links:
   - adding-an-mcp-server
   - mcp-gd
   - 0036-own-code-not-a-remote-server
+  - mcp-messagebox
 ---
 
 # Scripts & MCP Servers
@@ -356,31 +357,19 @@ registered yet: the smoke check runs each as unregistered
   the mcp-proxy child on the Linux host are owner steps.
 - `Scripts/mcp-messagebox.py` (`messagebox_call`: `info`, `list`, `send`,
   `reply`, `ack`, `status` `Scripts/mcp-messagebox.py:FUNCTIONS`) carries
-  messages between one user's Claude Code sessions. It registers its session at
-  a hub (the ai-soul daemon's `/peers/*` routes), polls it, and writes each
-  inbound message into that session's spool directory under
-  `~/.claude/messagebox/`; it reaches the model only through its own tool
-  `Scripts/mcp-messagebox.py:handle_messagebox_call`. Its configuration is the
-  `MESSAGEBOX_*` environment of its MCP entry, with no policy flags: it always
-  starts and answers the protocol, but registers only when the hub URL, a `0600`
-  token file and an owning `cli` Claude Code session found up its parent chain
-  are all there, and otherwise fails closed with no spool and no registration
-  `Scripts/mcp-messagebox.py`. The smoke row strips every `MESSAGEBOX_*`
-  variable and sets `MESSAGEBOX_DISABLE=1`, so a test run never registers a real
-  session `Scripts/_mcp_smoke_test.py:SERVERS`. Its other half is
-  `Scripts/messagebox-hook.py`, a stdlib script run as `python3 -I` from the
-  SessionStart and Stop hooks and not an MCP server: it reads only that spool,
-  claims each message by renaming it, re-validates what it read after the
-  rename, and writes the batch to stderr in a nonce-framed block for the
-  harness's asyncRewake, with no network import; a session younger than its
-  wait bound gets that long for the spool to appear
-  `Scripts/messagebox-hook.py:await_spool`. The two judge a message by one rule
-  set (the spool's owner walk, the file and directory rules, the name and id
-  grammar, the text rule, the record shape and a strict JSON parser) because
-  both carry the canonical source `Scripts/_mcp_spool.py` whole, the hook as a
-  hand-declared host of the generator `Scripts/amalgamate.py:DECLARED_HOSTS`
-  ([[generated-regions]]). No component page or ADR covers it yet; its suites
-  are `messagebox` and `messagebox_hook` ([[tests]]).
+  messages between one user's Claude Code sessions through the ai-soul hub's
+  `/peers/*` routes, writing each inbound message into a private per-session
+  spool. It is configured only by its `MESSAGEBOX_*` environment, always starts,
+  and fails closed into an inactive state `info` explains
+  `Scripts/mcp-messagebox.py:_activate`. The smoke row sets
+  `MESSAGEBOX_DISABLE=1` so a test run never registers a real session
+  `Scripts/_mcp_smoke_test.py:SERVERS`. Its other half,
+  `Scripts/messagebox-hook.py`, reads only that spool and hands the messages to
+  the model as an asyncRewake hook with no network; both carry the canonical
+  source `Scripts/_mcp_spool.py` whole, the hook as a hand-declared host
+  `Scripts/amalgamate.py:DECLARED_HOSTS`. The spool contract, the hook, the
+  security posture, the tests and the declared limits are [[mcp-messagebox]];
+  its suites are `messagebox` and `messagebox_hook` ([[tests]]).
 
 Superseded, not registered — their capabilities were folded into `purity_call`,
 which is the live route for all three when its backend flag is on (`--clangd`
