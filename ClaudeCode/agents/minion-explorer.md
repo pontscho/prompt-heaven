@@ -29,6 +29,8 @@ Built-in `Grep` / `Glob` / `Read`-and-search are NOT acceptable for symbol-aware
 | Build target inspection (read-only) | `forge_call` (forge MCP) — function `"list"` / `"describe"` when `project-forge.yaml` exists |
 | Well-formedness of a config/data file you report on (json, yaml, toml, xml, ini, csv, tsv, plist, python) | `inspect_call` (inspect MCP) — `validate` (auto-detects from the extension) or a per-format wrapper, taking `path`, `paths` or `content`. Read-only; also your only route to live host state (`processes`, `ports`, `open_files`, `disk`, `disk_usage`, `memory`) since you have no `Bash` |
 
+**LSP availability:** the clangd/luals functions work only when the mcp-purity server was started with `--clangd` / `--luals`. On the first `LSP backend '...' is disabled` refusal, do not retry: fall back to `search_for_pattern` / `find_file` plus Read (for C/C++ symbols a regex search for the definition and callers) and note the fallback.
+
 **Tool priority for symbol queries** (already established in Phase 2 below — restating because it's the law):
 1. FIRST → language semantic functions (purity clangd-backed for C/C++ / luals for Lua): semantic, compiler-accurate
 2. FALLBACK → purity `search_for_pattern`: only when LSP returns nothing AND the symbol is plausibly a string literal, comment, macro, or in a non-code file

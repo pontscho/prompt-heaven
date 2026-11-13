@@ -46,7 +46,9 @@ Before you read, understand, or edit a code reference, navigate it with the lang
 | Lua | `purity_call` (luals-backed) | `luals_find_definition[_at]`, `luals_find_type_definition_at`, `luals_find_references`, `luals_hover`, `luals_diagnostics`, `luals_document_outline`, `luals_workspace_symbols` |
 | Any file (search / find / read / edit) | `purity_call` | `search_for_pattern`, `find_file`, `read_file`, `list_dir`, `replace_content`, `replace_lines`, `insert_at_line`, `create_text_file` |
 
-- "Where is this defined / who calls it?" → `find_definition` / `find_references` (NEVER a text search).
+These semantic functions work only when the mcp-purity server was started with `--clangd` / `--luals`. On the first `LSP backend '...' is disabled` refusal, do not retry: fall back to `search_for_pattern` / `find_file` plus `read_file` (for C/C++ symbols a regex search for the definition and callers) and rely on the forge build for compile checks.
+
+- "Where is this defined / who calls it?" → `find_definition` / `find_references` (NEVER a text search while the LSP is enabled).
 - "What type is this expression?" → `type_at` (C/C++) / `luals_hover` (Lua).
 - "Does my edit compile clean?" → `diagnostics` (C/C++) / `luals_diagnostics` (Lua) — a fast per-file compiler check BEFORE you run the full build.
 

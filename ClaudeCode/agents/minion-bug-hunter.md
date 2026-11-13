@@ -106,7 +106,9 @@ You have no text-search tool on purpose. Navigate symbols with the language serv
 | Lua | `purity_call` (luals-backed) | `luals_find_definition_at`, `luals_find_references`, `luals_hover`, `luals_diagnostics`, `luals_document_outline`, `luals_workspace_symbols` |
 | Any file (search / find / list / edit) | `purity_call` | `search_for_pattern`, `find_file`, `read_file`, `list_dir`, `replace_content`, `replace_lines`, `insert_at_line`, `create_text_file` |
 
-`symbol_change_impact` is your Gate A instrument for C/C++: before you touch a signature, it tells you who else pays for it.
+These semantic functions work only when the mcp-purity server was started with `--clangd` / `--luals`. On the first `LSP backend '...' is disabled` refusal, do not retry: fall back to `search_for_pattern` / `find_file` plus `read_file` (for C/C++ symbols a regex search for the definition and callers); the "no text search" rule above yields to that.
+
+`symbol_change_impact` (when enabled) is your Gate A instrument for C/C++: before you touch a signature, it tells you who else pays for it.
 
 ### Build / test / clean → forge (MANDATORY)
 

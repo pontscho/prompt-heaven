@@ -34,6 +34,9 @@ issue, that is grounds for REFUTED (and your evidence quotes the real line).
 
 - **C / C++ / CUDA** symbols → `purity_call` (clangd-backed).
 - **Lua** symbols → `purity_call` (luals-backed).
+- These work only when the mcp-purity server was started with `--clangd` / `--luals`. On the first
+  `LSP backend '...' is disabled` refusal, do not retry: fall back to `search_for_pattern` / `find_file`
+  plus `Read` (for C/C++ symbols a regex search for the definition and callers).
 - **File reads** → `Read`. **File / pattern discovery** → `purity_call`.
 - **git** (diff, log, show) → `git_call`. NEVER `Bash("git ...")`.
 - **build targets** → `forge_call`.

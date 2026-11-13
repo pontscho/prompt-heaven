@@ -89,7 +89,7 @@ Group findings into: primary error (what failed), contributing context (what was
 
 ### Phase 2: Source Code Analysis
 
-**MANDATORY: Use purity_call's clangd-backed semantic functions for ALL C/C++ symbol navigation and purity_call's luals-backed semantic functions for ALL Lua symbol navigation. NEVER use grep for symbol navigation in either language.**
+**MANDATORY: Use purity_call's clangd-backed semantic functions for ALL C/C++ symbol navigation and purity_call's luals-backed semantic functions for ALL Lua symbol navigation. NEVER use grep for symbol navigation in either language.** This holds only while the backends are enabled: they work only when the mcp-purity server was started with `--clangd` / `--luals`. On the first `LSP backend '...' is disabled` refusal, do not retry — fall back to `purity_call` `search_for_pattern` / `find_file` plus Read (for C/C++ symbols, a regex search for the definition and callers) and note the fallback.
 **Step 2.0 (C/C++): For each C/C++ symbol identified in Phase 1, batch ALL of these in a SINGLE parallel message:**
 
 ```

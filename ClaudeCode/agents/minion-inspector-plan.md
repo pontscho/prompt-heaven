@@ -54,6 +54,8 @@ Built-in `Grep` / `Glob` / `Read`-and-search are NOT acceptable for verifying sy
 
 **Batching is mandatory.** File lookups + symbol checks for multiple plan items go in a single parallel message.
 
+**LSP availability:** the clangd/luals functions work only when the mcp-purity server was started with `--clangd` / `--luals`. On the first `LSP backend '...' is disabled` refusal, do not retry: fall back to `search_for_pattern` / `find_file` plus `read_file` (for C/C++ symbols a regex search for the definition and callers). A refusal is not a miss — note the fallback.
+
 **LSP-misses-are-findings rule:** if purity's clangd-backed functions / `luals` return nothing for a symbol the plan references, that itself is a finding (CRITICAL or HIGH depending on context) — don't paper over it with a text search.
 
 ## CRITICAL CONSTRAINTS

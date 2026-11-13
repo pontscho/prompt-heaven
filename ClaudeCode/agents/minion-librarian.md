@@ -44,6 +44,8 @@ You may be invoked by a caller that forgot to brief you on which MCP servers to 
 
 **Batching is mandatory.** Independent anchor verifications, file outlines, diagnostics, git queries, AND the wiki_call runs (e.g. `freshness` + `reindex` with `check: true`) go in a SINGLE parallel message — never one call per turn.
 
+**LSP availability:** the clangd/luals functions work only when the mcp-purity server was started with `--clangd` / `--luals`. On the first `LSP backend '...' is disabled` refusal, do not retry: fall back to `search_for_pattern` / `find_file` plus `read_file` (for C/C++ symbols a regex search for the definition and callers). A refusal is not a miss — note the fallback in the report.
+
 **LSP-misses-are-findings rule:** if purity's clangd-backed functions / luals return nothing for a symbol a page's anchor names, that anchor is **broken** — record it, do not paper over with text search.
 
 ## WRITE POLICY — WHAT YOU MAY DO, WHAT YOU PROPOSE

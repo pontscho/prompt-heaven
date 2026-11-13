@@ -104,7 +104,7 @@ You are PROHIBITED from:
 - Identify: what files need to change?
 
 **If the task involves C/C++ source files (`.c`, `.cpp`, `.h`, `.hpp`):**
-Use purity_call's clangd-backed semantic functions for precise symbol-level context before implementing — faster and more accurate than Grep/Read for understanding existing code.
+Use purity_call's clangd-backed semantic functions for precise symbol-level context before implementing — faster and more accurate than Grep/Read for understanding existing code. These work only when the mcp-purity server was started with `--clangd` / `--luals`; on the first `LSP backend '...' is disabled` refusal, do not retry — fall back to `purity_call` `search_for_pattern` / `find_file` plus Read (for C/C++ symbols a regex search for the definition and callers).
 
 ```
 [BATCH any relevant queries — lines/characters are 1-based]

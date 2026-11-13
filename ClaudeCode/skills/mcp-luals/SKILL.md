@@ -59,6 +59,16 @@ triggers:
 
 Full API reference for Lua code intelligence via lua-language-server.
 
+## Enabling
+
+The luals backend is **OFF by default**. It exists only if `mcp-purity` was launched with
+`--luals` (implied by `--luals-path`); `--clangd` / `--clangd-path` do the same for C/C++.
+The server still starts the LSP lazily, on the first semantic call. When disabled, the
+semantic functions (and the legacy `luals_*` names) are hidden from the `purity_call`
+description and a call fails with `LSP backend 'luals' is disabled; launch mcp-purity with
+--luals`. Do not retry: fall back to `search_for_pattern` / `find_file` plus `Read`.
+`clang_tidy` and all file operations are always available.
+
 ## Overview
 
 The standalone `mcp-luals` server is **no longer registered**, so there is no

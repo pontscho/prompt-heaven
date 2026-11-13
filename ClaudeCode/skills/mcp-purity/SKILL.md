@@ -19,6 +19,19 @@ description: >
 
 MCP-Purity is a file operations **and code-intelligence** MCP server. It exposes a single tool `purity_call` that dispatches file handler functions via the `function` parameter. **MCP tool name**: `mcp__mcp-purity__purity_call`
 
+## Enabling
+
+The semantic / symbol-navigation functions are **OFF by default**. The clangd backend
+(C/C++/CUDA) needs `mcp-purity` launched with `--clangd` (implied by `--clangd-path`); the
+luals backend (Lua) needs `--luals` (implied by `--luals-path`). Each LSP still starts
+lazily, on the first semantic call. When a backend is disabled, its functions
+(`find_definition`, `find_references`, `find_implementations`, `find_type_definition`,
+`type_at`, `outline`, `symbol`, `symbol_context`, `symbol_change_impact`, `inlay_hints`,
+`diagnostics`, `restart_lsp`, and the legacy `clangd_*`/`cuda_*`/`luals_*` names) are hidden
+from the tool description and a call fails with e.g. `LSP backend 'clangd' is disabled;
+launch mcp-purity with --clangd`. Do not retry: use `search_for_pattern` / `find_file` plus
+`read_file`. File operations and `clang_tidy` are always available.
+
 ## Quick Start
 
 ```json

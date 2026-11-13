@@ -43,6 +43,7 @@ You have MCP servers connected. Using built-in grep/find/sed/awk/cat when an MCP
 |---|---|---|
 | C/C++ symbols | `mcp__mcp-purity__purity_call` (clangd-backed semantic functions) | Find function signatures, types, verify file:line references, extract pattern excerpts from C/C++ code |
 | Lua symbols | `mcp__mcp-purity__purity_call` (luals-backed semantic functions) | Find definitions, types, verify file:line references, extract pattern excerpts from Lua code |
+| (LSP availability) | semantic rows above | Work only when the mcp-purity server was started with `--clangd` / `--luals`. On the first `LSP backend '...' is disabled` refusal do not retry: fall back to `search_for_pattern` / `find_file` plus Read (for C/C++ symbols a regex search for the definition and callers) |
 | File discovery | `mcp__mcp-purity__purity_call` (function: `find_file`) | Locate files by pattern |
 | Text search | `mcp__mcp-purity__purity_call` (function: `search_for_pattern`) | Search for patterns in non-C/C++/Lua files (YAML, Markdown, configs, scripts) |
 | File listing | `mcp__mcp-purity__purity_call` (function: `list_dir`) | List directory contents |

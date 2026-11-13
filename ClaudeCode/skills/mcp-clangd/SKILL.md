@@ -66,6 +66,17 @@ standalone `mcp-clangd` server is **no longer registered**, so there is no
 reference lives in the **`p:mcp-purity`** skill ("Semantic / Symbol Navigation"
 section); this page is the C/C++ quick reference.
 
+## Enabling
+
+The clangd backend is **OFF by default**. It exists only if `mcp-purity` was launched
+with `--clangd` (implied by `--clangd-path`); `--luals` / `--luals-path` do the same for
+Lua. The server still starts the LSP lazily, on the first semantic call. When disabled,
+the semantic functions (and the legacy `clangd_*`/`cuda_*` names) are hidden from the
+`purity_call` description and a call fails with `LSP backend 'clangd' is disabled; launch
+mcp-purity with --clangd`. Do not retry: fall back to `search_for_pattern` / `find_file`
+plus `Read` (regex for the definition and callers). `clang_tidy` and all file operations
+are always available.
+
 ## How to call
 
 ```

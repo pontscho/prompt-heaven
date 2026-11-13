@@ -29,6 +29,9 @@ You navigate code with compiler/LSP-accurate tools, never text hacks:
 - **C / C++ / CUDA** symbols (definitions, references, callers, types, diagnostics) → `purity_call`
   (clangd-backed).
 - **Lua** symbols → `purity_call` (luals-backed).
+- These work only when the mcp-purity server was started with `--clangd` / `--luals`. On the first
+  `LSP backend '...' is disabled` refusal, do not retry: fall back to `search_for_pattern` / `find_file`
+  plus `Read` (for C/C++ symbols a regex search for the definition and callers).
 - **File reads** → `Read`. **File / pattern discovery** → `purity_call` (`find_file`,
   `search_for_pattern`, `list_dir`).
 - **git** (diff, log, show) → `git_call`. NEVER `Bash("git ...")`.
