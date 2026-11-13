@@ -65,7 +65,7 @@ each command was migrated into a skill under `ClaudeCode/skills/` — see [[skil
 
 - **`p:` prefix** on every skill / agent, in both tool trees.
 - **MCP-server pattern**: each server exposes one dispatcher tool (`purity_call`,
-  `clangd_call`, ...) routing to handlers via a `function` parameter; Python 3.9+
+  `git_call`, ...) routing to handlers via a `function` parameter; Python 3.9+
   with asyncio + JSON-RPC 2.0 over stdio.
 - **Mandatory tool routing**: built-in Bash/Grep/Read are forbidden when an MCP
   covers the domain; enforced by agent prompts, tool descriptions, and the

@@ -30,6 +30,7 @@ links:
   - chrome-profile-refresh
   - 0037-a-session-is-an-explicit-host-set
   - 0001-purity-server-unification
+  - 0038-the-lsp-backends-are-opt-in
   - 0004-never-pin-a-browser-impersonation-version
   - 0007-a-path-spelled-deny-protects-the-spelling
   - 0008-a-serialized-read-loop-looks-like-a-dead-server
@@ -122,6 +123,25 @@ tool of its own but relays its children's tools under their own names
 HTTP instead of stdio `Scripts/mcp-proxy.py:serve_http`.
 The decision to fold `mcp-clangd` and `mcp-cuda` into `mcp-purity` behind the
 `purity_call` entry point is recorded in [[0001-purity-server-unification]].
+
+**purity's two LSP backends are opt-in.** clangd (C / C++ / CUDA) is served only
+under `--clangd` and lua-language-server only under `--luals`; `--clangd-path` /
+`--luals-path` imply their flag, and enabling stays lazy, with nothing probed or
+spawned until the first semantic call `Scripts/mcp-purity.py:main`. `clang_tidy`
+is a plain subprocess and is always on. Every semantic, legacy and init name stays
+registered, and a call to a disabled one is refused with an error naming the flag
+(`LSP backend 'clangd' is disabled; launch mcp-purity with --clangd`), after
+parameter validation and before any lock or spawn
+`Scripts/mcp-purity.py:_require_enabled`; a path that is neither C-family nor Lua
+is answered `no LSP backend handles this file type` while clangd is off
+`Scripts/mcp-purity.py:_lsp_filetype`, and a path-less call follows the single
+enabled backend `Scripts/mcp-purity.py:_select_filetype`. The tool description,
+the status reply, the `Available:` list and the near-miss pool name only what is
+enabled `Scripts/mcp-purity.py:_visible_function_names`
+`Scripts/mcp-purity.py:_purity_description`; `--list` still prints every name and
+tags the gated rows `[requires --clangd]` / `[requires --luals]`. The owner's own
+launch lines carry no flag, so those sessions have no semantic navigation by
+design. Why, and the alternatives rejected, are [[0038-the-lsp-backends-are-opt-in]].
 Adding a server — the skeleton, its generated regions, every fleet table and gate
 it must join, and how it is registered — is the step-by-step
 [[adding-an-mcp-server]].
@@ -231,7 +251,7 @@ loop became thirteen in the first place.
 
 | Script | Server | Domain |
 |--------|--------|--------|
-| `Scripts/mcp-purity.py` | mcp-purity | File ops: list, search, read, write |
+| `Scripts/mcp-purity.py` | mcp-purity | File ops: list, search, read, write; `clang_tidy`; clangd / luals semantic navigation only under `--clangd` / `--luals` |
 | `Scripts/mcp-forge.py` | mcp-forge | `project-forge.yaml` build targets |
 | `Scripts/mcp-git.py` | mcp-git | Git operations |
 | `Scripts/mcp-lldb.py` | mcp-lldb | LLDB debugger integration |
@@ -363,8 +383,9 @@ registered yet: the smoke check runs each as unregistered
   are `messagebox` and `messagebox_hook` ([[tests]]).
 
 Superseded, not registered — their capabilities were folded into `purity_call`,
-which is the live route for all three: `mcp-clangd.py` (C/C++), `mcp-lua-lsp.py`
-(Lua, via the `luals_*` functions) and `mcp-cuda.py` (CUDA). The tools
+which is the live route for all three when its backend flag is on (`--clangd`
+for C/C++ and CUDA, `--luals` for Lua; see above): `mcp-clangd.py` (C/C++),
+`mcp-lua-lsp.py` (Lua, via the `luals_*` functions) and `mcp-cuda.py` (CUDA). The tools
 `clangd_call`, `luals_call` and `cuda_call` are not registered and cannot be
 called `Scripts/_mcp_smoke_test.py`; see [[0001-purity-server-unification]].
 

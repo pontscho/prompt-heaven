@@ -13,6 +13,7 @@ links:
   - overview
   - skills
   - 0022-a-someday-maybe-is-a-roadmap-item
+  - 0038-the-lsp-backends-are-opt-in
 ---
 
 # Minion Agents
@@ -51,7 +52,7 @@ because a CI run is an outward-facing action on shared infrastructure
 | `minion-explorer.md` | Read-only multi-round codebase reconnaissance |
 | `minion-builder.md` | Build + test + fix cycles (cmake/make/forge) |
 | `minion-runner.md` | Script/command run-fix-retry loops |
-| `minion-watson.md` | Non-obvious bug/failure investigation via clangd/luals |
+| `minion-watson.md` | Non-obvious bug/failure investigation, using purity's clangd/luals semantic functions when the server is launched with `--clangd` / `--luals`; on the first `disabled` refusal it falls back to `search_for_pattern` / `find_file` plus Read without retrying `ClaudeCode/agents/minion-watson.md` ([[0038-the-lsp-backends-are-opt-in]]) |
 | `minion-inspector-plan.md` | Validate a plan against the live codebase before coding |
 | `minion-inspector-implementation.md` | Audit a completed implementation against the plan |
 | `minion-inspector-security-officer.md` | OWASP/CWE security review (plan- and code-mode) |

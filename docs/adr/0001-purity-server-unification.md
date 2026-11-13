@@ -79,3 +79,7 @@ executor wrap, scales to luals via the backend map, and preserves the
 
 The full implementation plan (requirements, captured code, step-by-step,
 testing, security) lives in the companion spec: [[spec-purity-unification]].
+
+## Addendum (2026-11-13): the LSP backends are opt-in behind --clangd and --luals (ADR 0038, 8717044)
+
+Amended by [[0038-the-lsp-backends-are-opt-in]]. The unified server still carries the clangd-family backend (C / C++ / CUDA) and lua-language-server behind the one `purity_call` entry point, but since `8717044` neither is served unless the launch line says `--clangd` / `--luals` (`--clangd-path` / `--luals-path` imply their flag). Enabling stays lazy, CUDA is part of `--clangd`, and `clang_tidy` stays always on. Every semantic, legacy `clangd_*` / `cuda_*` / `luals_*` and `*_init` name stays registered and, while its backend is off, refuses with an error naming the flag (`Scripts/mcp-purity.py:_require_enabled`); the tool description, status reply and near-miss pool show only what is enabled (`Scripts/mcp-purity.py:_visible_function_names`). The "one code-intelligence entry point" consequence above therefore holds only for a launch that enables a backend.

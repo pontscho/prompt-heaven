@@ -20,6 +20,7 @@ links:
   - 0020-the-prompt-is-its-own-block
   - 0022-a-someday-maybe-is-a-roadmap-item
   - 0033-egress-through-an-allowlisting-proxy
+  - 0038-the-lsp-backends-are-opt-in
 ---
 
 # Skills
@@ -51,7 +52,7 @@ description is what Claude matches against to auto-activate the skill.
 
 | Skill | Purpose |
 |-------|---------|
-| `p:mcp-clangd` / `p:mcp-luals` / `p:mcp-cuda` | LSP code-intelligence routing for C/C++, Lua, CUDA |
+| `p:mcp-clangd` / `p:mcp-luals` / `p:mcp-cuda` | LSP code-intelligence routing for C/C++, Lua, CUDA, through purity's semantic functions, which exist only when mcp-purity is launched with `--clangd` / `--luals` ([[0038-the-lsp-backends-are-opt-in]]) |
 | `p:mcp-purity` | File ops (search/glob/edit) routing |
 | `p:mcp-inspect` | Read-only system inspection and syntax/format validation routing for `inspect_call`, replacing `ps` / `lsof` / `df` / `stat` / `--version` one-liners and the validate-by-shell idioms `ClaudeCode/skills/mcp-inspect/SKILL.md`. Its `md_outline` function (aliases `outline`, `headers`, `toc`, `md`, `markdown`) replaces `wc -l f.md; grep -n "^#" f.md`: a `wc -l`-exact line count plus one `line level text` row per ATX header, fenced code skipped, `max_level` / `limit` / `offset` paging; Setext headers and fences nested in blockquotes or list items are not handled `Scripts/mcp-inspect.py:h_md_outline` |
 | `p:mcp-forge` | `project-forge.yaml` build orchestration |

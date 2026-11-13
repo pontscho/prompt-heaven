@@ -64,8 +64,8 @@ rationale lives in `docs/subsystems/tests.md`.
 | `mcp_first_guard` | `test_mcp_first_guard.py` | A–O |
 | `sbx_gate` | `test_sbx_gate.py` | A–Q |
 | `sbx_seccomp` | `test_sbx_seccomp.py` | A–D, H |
-| `purity_lsp` | `test_purity_lsp.py` | A–J |
-| `purity_file_ops` | `test_purity_file_ops.py` | A–S |
+| `purity_lsp` | `test_purity_lsp.py` | A–K |
+| `purity_file_ops` | `test_purity_file_ops.py` | A–V |
 | `mcp_git_params` | `test_mcp_git_params.py` | A–N |
 | `name_existence` | `test_name_existence.py` | A–I |
 | `spawn_stdin` | `test_spawn_stdin.py` | A–D |
@@ -141,7 +141,11 @@ An unknown suite name is a hard error (`exit 2`) that lists the valid names.
 `purity_lsp` is the slow one (~45 s): it drives live `clangd` and
 `lua-language-server` children through a real handshake. It SKIPs gracefully
 when those binaries are absent, so a machine without the toolchain still exits
-0. Everything else finishes in seconds.
+0. Both backends are off unless mcp-purity is launched with `--clangd` /
+`--luals`, so the suite's main child (and `purity_file_ops`'s, and the smoke
+row) pass both flags; group K launches its own children to test the flags and
+points every enabled backend at a nonexistent binary, so it spawns no language
+server and needs no toolchain. Everything else finishes in seconds.
 
 ## Exit-code contract
 
@@ -232,8 +236,8 @@ tests/
   test_inspect_validate.py   groups A-R
   test_mcp_first_guard.py    groups A-O
   test_sbx_gate.py           groups A-Q   (grant-only gate; the guard's mirror)
-  test_purity_lsp.py         groups A-J   (live clangd + lua-language-server)
-  test_purity_file_ops.py    groups A-S   (stdlib file handlers, no binary, ~2s)
+  test_purity_lsp.py         groups A-K   (live clangd + lua-language-server; K: the opt-in flags, nothing spawned)
+  test_purity_file_ops.py    groups A-V   (stdlib file handlers, no binary, ~2s)
   test_mcp_git_params.py     groups A-N   (offline, subprocess stubbed)
   test_name_existence.py     groups A-I
   test_spawn_stdin.py        groups A-D   (offline, AST only, nothing spawned)
