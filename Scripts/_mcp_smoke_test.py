@@ -105,7 +105,7 @@ _PROXY_SMOKE_CONFIG = json.dumps({"children": [
 SERVERS = [
     {"file": "mcp-forge.py",    "tool": "forge_call",    "args": ["--project-root", "/tmp"], "registered": True},
     {"file": "mcp-git.py",      "tool": "git_call",      "args": ["--project-root", "/tmp"], "registered": True},
-    {"file": "mcp-purity.py",   "tool": "purity_call",   "args": ["--project-root", "/tmp"], "registered": True},
+    {"file": "mcp-purity.py",   "tool": "purity_call",   "args": ["--project-root", "/tmp", "--clangd", "--luals"], "registered": True},
     {"file": "mcp-jenkins.py",  "tool": "jenkins_call",  "args": ["--endpoint", "http://127.0.0.1:1", "--username", "x", "--token", "y"], "registered": True},
     {"file": "mcp-tshark.py",   "tool": "tshark_call",   "args": ["--project-root", "/tmp"], "registered": True},
     {"file": "mcp-webfetch.py", "tool": "webfetch_call", "args": [], "registered": True,

@@ -1454,6 +1454,9 @@ def _window_case(suite, cid, secs, low, high, expect_label, detail=()):
 
 def group_j(suite):
     mod = H.load_module_from_path("mcp_purity_whitebox", SERVER)
+    # An in-process import has every backend OFF (main() fills the set); the
+    # restart rows below drive handle_restart_lsp, which refuses a disabled one.
+    mod._ENABLED_BACKENDS = frozenset({"clangd", "luals"})
 
     # -- J1: nothing announces -> release on the grace, not the ceiling. This
     # pins the [D93] gate that took the cold start off 60s in the first place.
@@ -1874,6 +1877,274 @@ def group_i(suite, before, digests_before, pyc_before, timings, stderr_bytes):
 
 
 # ---------------------------------------------------------------------------
+# Group K -- the backends are OFF unless the launch line says --clangd / --luals
+#
+# Every launch below is lazy-safe: a backend that is switched ON is pointed at a
+# binary path that does not exist (--clangd-path / --luals-path), so the server
+# proves it ROUTED to the backend by failing the binary check -- no clangd or
+# lua-language-server process is ever spawned by this group.
+# ---------------------------------------------------------------------------
+
+K_NOBIN_CLANGD = "/nonexistent/ph-clangd"
+K_NOBIN_LUALS = "/nonexistent/ph-lua-language-server"
+K_SEMANTIC_NAMES = ("find_definition", "find_type_definition", "find_references",
+                    "find_implementations", "type_at", "diagnostics", "outline",
+                    "symbol", "symbol_context", "inlay_hints",
+                    "symbol_change_impact")
+
+
+def _k_driver(suite, cid, flags):
+    """A Driver on `flags`, or None after recording WHY it could not start."""
+    try:
+        return Driver([sys.executable, SERVER, "--project-root", H.REPO_ROOT]
+                      + list(flags), tool="purity_call", timeout=60.0)
+    except Exception as exc:
+        check(suite, "K", cid, ["server did not start with %s: %s"
+                                % (list(flags), str(exc)[:300])])
+        return None
+
+
+def _k_names(status_text):
+    return {ln.strip() for ln in status_text.splitlines() if ln.startswith("  ")}
+
+
+def _k_description(driver):
+    try:
+        resp = driver.cli.rpc("tools/list")
+        return resp["result"]["tools"][0]["description"]
+    except Exception as exc:
+        return "DRIVER-ERROR %s: %s" % (type(exc).__name__, exc)
+
+
+def _k_expect(suite, cid, driver, function, params, must=(), must_not=(),
+              want_error=True):
+    err, text = driver.call(function, params)
+    problems = []
+    if err != want_error:
+        problems.append("isError=%s expected %s" % (err, want_error))
+    for needle in must:
+        if needle not in text:
+            problems.append("MISSING %r" % needle)
+    for needle in must_not:
+        if needle in text:
+            problems.append("UNEXPECTED %r" % needle)
+    check(suite, "K", cid, problems, text=text, detail=[text[:160]])
+    return text
+
+
+def group_k(suite):
+    # --- nothing enabled -----------------------------------------------------
+    off = _k_driver(suite, "off-launch", [])
+    if off is not None:
+        try:
+            pos = {"relative_path": C_MAIN, "line": 1, "character": 1}
+            _k_expect(suite, "off-semantic-names-the-flag", off,
+                      "find_definition", pos,
+                      must=("--clangd", "disabled"))
+            _k_expect(suite, "off-lua-path-names-luals", off, "outline",
+                      {"relative_path": L_LIB}, must=("--luals", "disabled"),
+                      must_not=("--clangd",))
+            _k_expect(suite, "off-luals-legacy-names-luals", off,
+                      "luals_find_definition", {"symbol": "tfAdd"},
+                      must=("--luals", "disabled"))
+            _k_expect(suite, "off-clangd-cuda-legacy-name-clangd", off,
+                      "clangd_diagnostics", {"relative_path": C_MAIN},
+                      must=("--clangd", "disabled"))
+            _k_expect(suite, "off-cuda-legacy-names-clangd", off,
+                      "cuda_diagnostics", {"relative_path": C_MAIN},
+                      must=("--clangd", "disabled"))
+            _k_expect(suite, "off-restart-lsp-refused-both-flags", off,
+                      "restart_lsp", {}, must=("--clangd", "--luals"))
+            _k_expect(suite, "off-restart-lsp-luals-names-luals", off,
+                      "restart_lsp", {"backend": "luals"},
+                      must=("--luals", "disabled"), must_not=("--clangd",))
+            problems = []
+            for fn, flag in (("clangd_init", "--clangd"), ("cuda_init", "--clangd"),
+                             ("luals_init", "--luals")):
+                err, text = off.call(fn, {})
+                if not err or flag not in text:
+                    problems.append("%s: isError=%s text=%r" % (fn, err, text[:100]))
+            check(suite, "K", "off-init-noops-refused", problems)
+            _k_expect(suite, "off-pathless-names-both-flags", off,
+                      "find_definition", {"symbol": "tfAdd"},
+                      must=("--clangd", "--luals"))
+            text = _k_expect(suite, "off-py-path-no-backend", off, "outline",
+                             {"relative_path": "Scripts/mcp-purity.py"},
+                             must=("no LSP backend handles this file type",),
+                             must_not=("--clangd",))
+            _k_expect(suite, "off-unknown-param-precedes-refusal", off,
+                      "outline", {"relative_path": C_MAIN, "bogus_param": 1},
+                      must=("Unknown params",), must_not=("disabled",))
+            _k_expect(suite, "off-clang-tidy-unchanged", off, "clang_tidy", {},
+                      must=("clang_tidy requires 'path'",),
+                      must_not=("disabled", "--clangd"))
+            _, status = off.call("", {})
+            names = _k_names(status)
+            leaked = sorted(n for n in names
+                            if n in K_SEMANTIC_NAMES or n == "restart_lsp"
+                            or n.startswith(("clangd_", "cuda_", "luals_")))
+            check(suite, "K", "off-status-omits-semantic-names",
+                  ([] if not leaked else ["listed while off: %s" % leaked])
+                  + ([] if {"read_file", "clang_tidy"} <= names
+                     else ["file ops / clang_tidy missing: %d name(s)" % len(names)]),
+                  text=status)
+            _, text = off.call("tf_no_such_function", {})
+            check(suite, "K", "off-unknown-function-lists-only-enabled",
+                  ["Unknown function not reported"] if not unknown_function(text)
+                  else [("pool leaks %r" % n) for n in K_SEMANTIC_NAMES
+                        if (", %s," % n) in text or (" %s," % n) in text],
+                  text=text)
+            _, text = off.call("find_definitoin", {})
+            check(suite, "K", "off-did-you-mean-pool-hides-semantic",
+                  [] if ("'find_definition'" not in text and unknown_function(text))
+                  else ["suggested a disabled name: %r" % text[-120:]],
+                  text=text)
+            desc = _k_description(off)
+            leaks = [n for n in ("find_definition", "clangd and luals LSPs",
+                                 "clangd_*/cuda_*/luals_*",
+                                 "Semantic (clangd-backed)", "SEMANTIC CODE")
+                     if n in desc]
+            check(suite, "K", "off-description-omits-semantic",
+                  ([("description still says %r" % n) for n in leaks])
+                  + ([] if "clang_tidy" in desc and "find_file" in desc
+                     else ["clang_tidy / file ops missing from description"]),
+                  detail=["%d chars" % len(desc)])
+        finally:
+            off.close()
+
+    # --- luals only (binary path nonexistent: routed, never spawned) --------
+    lo = _k_driver(suite, "luals-launch", ["--luals", "--luals-path", K_NOBIN_LUALS])
+    if lo is not None:
+        try:
+            _k_expect(suite, "luals-pathless-routes-to-luals", lo,
+                      "find_definition", {"symbol": "tfAdd"},
+                      must=("'luals'", "init failed"),
+                      must_not=("disabled", "--clangd"))
+            _k_expect(suite, "luals-c-path-names-clangd-flag", lo, "outline",
+                      {"relative_path": C_MAIN}, must=("--clangd", "disabled"))
+            _k_expect(suite, "luals-py-path-no-backend", lo, "outline",
+                      {"relative_path": "Scripts/mcp-purity.py"},
+                      must=("no LSP backend handles this file type",))
+            err, text = lo.call("restart_lsp", {})
+            check(suite, "K", "luals-restart-defaults-to-luals",
+                  [] if ("'luals'" in text and "--clangd" not in text
+                         and "disabled" not in text)
+                  else ["restart_lsp did not target luals: %r" % text[:160]],
+                  text=text)
+            _, status = lo.call("", {})
+            names = _k_names(status)
+            want = {"find_definition", "luals_hover", "luals_init", "restart_lsp"}
+            bad = sorted(n for n in names if n.startswith(("clangd_", "cuda_")))
+            check(suite, "K", "luals-status-lists-luals-only",
+                  ([("missing %s" % n) for n in sorted(want - names)]
+                   + ([("lists %s" % bad)] if bad else [])), text=status)
+            desc = _k_description(lo)
+            check(suite, "K", "luals-description-luals-only",
+                  ([] if ("luals" in desc and "find_definition" in desc)
+                   else ["luals fragment missing"])
+                  + ([] if "clangd-backed" not in desc and "clangd_*" not in desc
+                     else ["clangd text present"]), detail=["%d chars" % len(desc)])
+        finally:
+            lo.close()
+
+    # --- --clangd-path implies --clangd --------------------------------------
+    cp = _k_driver(suite, "clangd-path-launch", ["--clangd-path", K_NOBIN_CLANGD])
+    if cp is not None:
+        try:
+            _k_expect(suite, "clangd-path-implies-clangd", cp, "diagnostics",
+                      {"relative_path": C_MAIN},
+                      must=("'clangd'", "init failed"), must_not=("disabled",))
+            _k_expect(suite, "clangd-path-keeps-luals-off", cp, "outline",
+                      {"relative_path": L_LIB}, must=("--luals", "disabled"))
+            _, status = cp.call("", {})
+            names = _k_names(status)
+            check(suite, "K", "clangd-status-lists-clangd-only",
+                  ([] if {"find_definition", "clangd_init", "cuda_init",
+                          "restart_lsp"} <= names else ["clangd names missing"])
+                  + ([] if not any(n.startswith("luals_") for n in names)
+                     else ["luals_* listed"]), text=status)
+        finally:
+            cp.close()
+    lp = _k_driver(suite, "luals-path-launch", ["--luals-path", K_NOBIN_LUALS])
+    if lp is not None:
+        try:
+            _k_expect(suite, "luals-path-implies-luals", lp, "outline",
+                      {"relative_path": L_LIB},
+                      must=("'luals'", "init failed"), must_not=("disabled",))
+        finally:
+            lp.close()
+
+    # --- both on: the full inventory, the full description -------------------
+    mod = H.load_module_from_path("mcp_purity_flags", SERVER)
+    both = _k_driver(suite, "both-launch",
+                     ["--clangd", "--luals", "--clangd-path", K_NOBIN_CLANGD,
+                      "--luals-path", K_NOBIN_LUALS])
+    if both is not None:
+        try:
+            _, status = both.call("", {})
+            names = _k_names(status)
+            check(suite, "K", "both-status-lists-everything",
+                  [("missing %s" % n) for n in sorted(set(mod.HANDLERS) - names)],
+                  detail=["%d names" % len(names)])
+            desc = _k_description(both)
+            check(suite, "K", "both-description-is-the-full-constant",
+                  [] if desc == mod.PURITY_CALL_TOOL["description"]
+                  else ["description differs from PURITY_CALL_TOOL (%d vs %d)"
+                        % (len(desc), len(mod.PURITY_CALL_TOOL["description"]))])
+        finally:
+            both.close()
+
+    # --- in-process: nothing is spawned while off ----------------------------
+    mod._ENABLED_BACKENDS = frozenset()
+    calls = [("find_definition", {"relative_path": C_MAIN, "line": 1,
+                                  "character": 1}),
+             ("outline", {"relative_path": L_LIB}),
+             ("luals_hover", {"relative_path": L_LIB, "line": 1,
+                              "character": 1}),
+             ("symbol", {"query": "tfAdd"}),
+             ("restart_lsp", {}), ("restart_lsp", {"backend": "luals"}),
+             ("clangd_init", {}), ("luals_init", {})]
+    refused = []
+    for fn, prm in calls:
+        out = asyncio.run(mod.handle_purity_call(
+            {"function": fn, "params": prm}, H.REPO_ROOT, False))
+        if "disabled" not in str(out.get("error", "")) \
+                and "--clangd" not in str(out.get("error", "")):
+            refused.append("%s -> %r" % (fn, str(out)[:80]))
+    check(suite, "K", "off-inprocess-every-call-refused", refused)
+    check(suite, "K", "off-inprocess-no-backend-spawned",
+          [] if (not mod._backends and not mod._backend_init_tasks)
+          else ["_backends=%r _backend_init_tasks=%r"
+                % (sorted(mod._backends), sorted(mod._backend_init_tasks))])
+
+    # --- --list and the module docstring -------------------------------------
+    import subprocess
+    listing = subprocess.run([sys.executable, "-B", SERVER, "--list"],
+                             capture_output=True, text=True, timeout=30).stdout
+    rows = {ln.split()[0]: ln for ln in listing.splitlines()
+            if ln.startswith("  ") and ln.split()}
+    problems = []
+    for name, flag in (("luals_hover", "requires --luals"),
+                       ("clangd_init", "requires --clangd"),
+                       ("cuda_hover", "requires --clangd"),
+                       ("find_definition", "requires --clangd")):
+        if flag not in rows.get(name, ""):
+            problems.append("%s row lacks %r" % (name, flag))
+    for name in ("clang_tidy", "read_file"):
+        if "requires" in rows.get(name, "requires"):
+            problems.append("%s row must not carry a flag note" % name)
+    check(suite, "K", "list-annotates-disabled-by-default", problems,
+          detail=["%d rows" % len(rows)])
+    with open(SERVER, encoding="utf-8") as fh:
+        doc = fh.read().split('"""', 2)[1]
+    check(suite, "K", "docstring-usage-shows-every-flag",
+          [("usage lacks %s" % f) for f in ("[--clangd]", "[--luals]",
+                                            "--clangd-path", "--luals-path",
+                                            "--clang-tidy-path")
+           if f not in doc])
+
+
+# ---------------------------------------------------------------------------
 
 def run(opts=None):
     """Drive the real server, record every case, return the Suite."""
@@ -1898,7 +2169,10 @@ def run(opts=None):
     timings = {}
     stderr_bytes = 0
 
-    driver = Driver([sys.executable, SERVER, "--project-root", H.REPO_ROOT],
+    # The backends are OFF unless the launch line says so; the live groups need
+    # both. Group K covers the off / one-on launches on their own.
+    driver = Driver([sys.executable, SERVER, "--project-root", H.REPO_ROOT,
+                     "--clangd", "--luals"],
                     tool="purity_call")
     try:
         group_a(suite, driver)
@@ -1933,6 +2207,7 @@ def run(opts=None):
         # hygiene assertions (no repo writes, no .pyc) cover the in-process
         # import of the server module too.
         group_j(suite)
+        group_k(suite)
         stderr_bytes = len(driver.stderr_text)
     finally:
         driver.close()

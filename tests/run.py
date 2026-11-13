@@ -362,7 +362,8 @@ SUITES = [
      "strict rlimits, live restricted Seatbelt, gate grammar, security "
      "review round 1, egress endpoint flags", 134),
     ("purity_lsp", run_purity_lsp,
-     "purity_call semantic navigation: clangd + luals absorption", 155),
+     "purity_call semantic navigation: clangd + luals absorption, and the "
+     "backends OFF unless the launch line says --clangd / --luals (group K)", 187),
     ("purity_file_ops", run_purity_file_ops,
      "purity_call file handlers: the .claude/tmp ignore exemption, the "
      "inheritance rule that keeps it narrow, the param contract, and the "

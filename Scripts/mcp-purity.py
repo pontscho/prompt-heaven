@@ -15,8 +15,24 @@ Usage:
                         [--strict]
                         [--debug]
                         [--log-file <path>]   # implies --debug
+                        [--clangd]            # enable the clangd backend (C/C++/CUDA)
+                        [--luals]             # enable the lua-language-server backend
+                        [--clangd-path <abs>] # implies --clangd
+                        [--luals-path <abs>]  # implies --luals
+                        [--clang-tidy-path <abs>]
+                        [--list]              # print the function inventory and exit
 
   --project-root  Required. Sandbox root for file operations.
+  --clangd        The LSP backends are OFF unless the launch line switches them
+  --luals         on. A semantic call to a disabled backend is refused with an
+                  error naming the flag; the function names it would have used
+                  are hidden from the status reply and the tool description.
+                  Enabling is lazy (nothing spawns until the first semantic
+                  call). CUDA is part of --clangd. clang_tidy is a plain
+                  subprocess and is always available.
+  --clangd-path   Absolute path to the clangd / lua-language-server / clang-tidy
+  --luals-path    binary (hard mitigation for an untrusted PATH, CWE-426).
+  --clang-tidy-path  The first two imply their backend flag.
   --strict        Hard-sandbox: reject ANY path that escapes --project-root
                   (reads included) and reject absolute paths outright.
                   Without --strict (default): destructive ops (create/replace/
@@ -5175,6 +5191,50 @@ _LUALS_FILETYPES = {"lua"}
 _clangd_binary_override: Optional[str] = None
 _luals_binary_override: Optional[str] = None
 
+# The LSP backends are OFF unless the launch line switches them on (--clangd,
+# --luals; --clangd-path / --luals-path imply their flag).  Filled by main();
+# empty here so an in-process import starts with everything off.  CUDA is part
+# of the clangd family and has no flag of its own.  Enabling only makes the
+# backend ELIGIBLE: nothing is probed or spawned until a semantic call needs it.
+_ENABLED_BACKENDS: frozenset = frozenset()
+_BACKEND_FLAGS: Dict[str, str] = {"clangd": "--clangd", "luals": "--luals"}
+# Filetype sentinels _ensure_backend understands (never real languageIds).
+_NO_LSP_FILETYPE = ""         # a path no enabled backend serves
+_ANY_LSP_FILETYPE = "*"       # a path-less call while NO backend is enabled
+_CPP_SUFFIXES = frozenset({
+    ".c", ".cc", ".cpp", ".cxx", ".c++", ".cp", ".h", ".hh", ".hpp", ".hxx",
+    ".h++", ".inl", ".ipp", ".tpp", ".ixx", ".cppm", ".m", ".mm", ".cu", ".cuh",
+})
+
+
+def _require_enabled(backend_type: str) -> None:
+    """Refuse a backend the launch line did not switch on, naming the flag."""
+    if backend_type not in _ENABLED_BACKENDS:
+        flag = _BACKEND_FLAGS.get(backend_type, "--" + backend_type)
+        raise RuntimeError(
+            f"LSP backend '{backend_type}' is disabled; launch mcp-purity with {flag}")
+
+
+def _require_any_enabled() -> None:
+    if not _ENABLED_BACKENDS:
+        raise RuntimeError(
+            "LSP backends are disabled; launch mcp-purity with --clangd and/or --luals")
+
+
+def _lsp_filetype(abs_path: str) -> str:
+    """The filetype to route *abs_path* by.
+
+    Like _detect_language, except that a path _detect_language can only file
+    under the 'cpp' fallback (.py, .md, no suffix) is unrouted while clangd is
+    off: there is no backend for it, and naming --clangd would be misleading.
+    With clangd on the fallback is unchanged.
+    """
+    lang = _detect_language(abs_path)
+    if (lang == "cpp" and "clangd" not in _ENABLED_BACKENDS
+            and pathlib.Path(abs_path).suffix.lower() not in _CPP_SUFFIXES):
+        return _NO_LSP_FILETYPE
+    return lang
+
 
 # ---------------------------------------------------------------------------
 # Per-backend serialization (concurrent dispatch, serial LSP sessions)
@@ -5426,14 +5486,19 @@ def _select_filetype(params: dict, abs_path: str) -> str:
     1. Explicit ``_backend`` hint injected by the dispatcher (luals_* prefix).
     2. Language detected from *abs_path* when a path is available.
     3. Fall back to "cpp" (preserves existing clangd behaviour for callers
-       that provide no path and no prefix hint).
+       that provide no path and no prefix hint) -- unless clangd is off: then
+       the single enabled backend, or the "no backend at all" sentinel.
     """
     hint = params.get("_backend")
     if hint:
         return hint
     if abs_path:
-        return _detect_language(abs_path)
-    return "cpp"
+        return _lsp_filetype(abs_path)
+    if "clangd" in _ENABLED_BACKENDS:
+        return "cpp"
+    if "luals" in _ENABLED_BACKENDS:
+        return "lua"
+    return _ANY_LSP_FILETYPE
 
 
 def _require_backend(filetype: str) -> LspBackend:
@@ -5550,9 +5615,17 @@ async def _ensure_backend(filetype: str, project_root: str) -> LspBackend:
     (see _hold_backend): this is the one place that knows the backend TYPE for
     every semantic handler, so it is the only place the key cannot drift.
     """
+    if filetype == _ANY_LSP_FILETYPE:
+        _require_any_enabled()
+    if filetype == _NO_LSP_FILETYPE:
+        raise ValueError("no LSP backend handles this file type")
     backend_type = _route_filetype(filetype)
     if backend_type is None:
         raise ValueError(f"No LSP backend for filetype '{filetype}'")
+    # The one choke point every semantic handler passes: a backend the launch
+    # line did not switch on is refused here, BEFORE the lock, the registry or
+    # any spawn is touched.
+    _require_enabled(backend_type)
 
     # Serialize this backend for the rest of the request BEFORE touching the
     # registry. Everything below - the liveness check, the crash-recovery
@@ -6110,7 +6183,7 @@ async def handle_find_definition(params: dict, project_root: str, strict: bool =
         if not path:
             return {"error": "Positional find_definition requires 'path' with 'line'/'character'"}
         abs_path = safe_path(project_root, path, strict)
-        client = await _ensure_backend(_detect_language(abs_path), project_root)
+        client = await _ensure_backend(_lsp_filetype(abs_path), project_root)
         l = int(line if line is not None else 1) - 1
         c = int(char if char is not None else 1) - 1
         data = await _def_at(client, client._abs_path(abs_path), l, c, context_lines)
@@ -6139,7 +6212,7 @@ async def handle_find_type_definition(params: dict, project_root: str,
     if not path:
         return {"error": "find_type_definition requires 'path' with 'line'/'character'"}
     abs_path = safe_path(project_root, path, strict)
-    client = await _ensure_backend(_detect_language(abs_path), project_root)
+    client = await _ensure_backend(_lsp_filetype(abs_path), project_root)
     line = int(params.get("line", 1)) - 1
     char = int(params.get("character", 1)) - 1
     data = await _type_def_at(client, client._abs_path(abs_path), line, char,
@@ -6164,7 +6237,7 @@ async def handle_find_references(params: dict, project_root: str, strict: bool =
         if not path:
             return {"error": "Positional find_references requires 'path' with 'line'/'character'"}
         abs_path = safe_path(project_root, path, strict)
-        client = await _ensure_backend(_detect_language(abs_path), project_root)
+        client = await _ensure_backend(_lsp_filetype(abs_path), project_root)
         l = int(line if line is not None else 1) - 1
         c = int(char if char is not None else 1) - 1
         data = await _refs_at(client, client._abs_path(abs_path), l, c, max_results, context_lines)
@@ -6185,7 +6258,7 @@ async def handle_find_implementations(params: dict, project_root: str, strict: b
     if not path:
         return {"error": "find_implementations requires 'path' with 'line'/'character'"}
     abs_path = safe_path(project_root, path, strict)
-    client = await _ensure_backend(_detect_language(abs_path), project_root)
+    client = await _ensure_backend(_lsp_filetype(abs_path), project_root)
     line = int(params.get("line", 1)) - 1
     char = int(params.get("character", 1)) - 1
     impls = await client.implementation(client._abs_path(abs_path), line, char)
@@ -6212,7 +6285,7 @@ async def handle_type_at(params: dict, project_root: str, strict: bool = False) 
     if not path:
         return {"error": "type_at requires 'path' with 'line'/'character'"}
     abs_path = safe_path(project_root, path, strict)
-    client = await _ensure_backend(_detect_language(abs_path), project_root)
+    client = await _ensure_backend(_lsp_filetype(abs_path), project_root)
     line = int(params.get("line", 1)) - 1
     char = int(params.get("character", 1)) - 1
     result = await client.hover(client._abs_path(abs_path), line, char)
@@ -6235,7 +6308,7 @@ async def handle_diagnostics(params: dict, project_root: str, strict: bool = Fal
     if not path:
         return {"error": "diagnostics requires 'path'"}
     abs_path = safe_path(project_root, path, strict)
-    client = await _ensure_backend(_detect_language(abs_path), project_root)
+    client = await _ensure_backend(_lsp_filetype(abs_path), project_root)
     timeout = float(params.get("timeout", 10.0))
     cpath = client._abs_path(abs_path)
     diags = await client.get_diagnostics(cpath, timeout=timeout)
@@ -6264,7 +6337,7 @@ async def handle_outline(params: dict, project_root: str, strict: bool = False) 
     if not path:
         return {"error": "outline requires 'path'"}
     abs_path = safe_path(project_root, path, strict)
-    client = await _ensure_backend(_detect_language(abs_path), project_root)
+    client = await _ensure_backend(_lsp_filetype(abs_path), project_root)
     cpath = client._abs_path(abs_path)
     symbols = await client.document_symbol(cpath)
     file_uri = pathlib.Path(cpath).as_uri()
@@ -6352,7 +6425,7 @@ async def handle_inlay_hints(params: dict, project_root: str, strict: bool = Fal
     if not path:
         return {"error": "inlay_hints requires 'path'"}
     abs_path = safe_path(project_root, path, strict)
-    client = await _ensure_backend(_detect_language(abs_path), project_root)
+    client = await _ensure_backend(_lsp_filetype(abs_path), project_root)
     start_line = int(params.get("start_line", 1)) - 1
     end_line = int(params.get("end_line", 9999)) - 1
     limit = int(params.get("limit", 100))
@@ -6441,8 +6514,11 @@ def handle_lsp_init_noop(params: dict, project_root: str, strict: bool = False) 
 
     Under lazy init there is no explicit init step - the LSP backend spins up on
     first semantic call. This returns a benign notice (NOT an error) so existing
-    callers that still send an init do not break.
+    callers that still send an init do not break.  A backend the launch line
+    did not switch on is refused instead, naming the flag (luals_init carries
+    the dispatcher's "lua" hint; clangd_init / cuda_init are clangd's).
     """
+    _require_enabled("luals" if params.get("_backend") == "lua" else "clangd")
     return {"__raw_text__":
             "LSP backends initialize lazily on first semantic call - no explicit "
             "init is needed. (clangd_init/cuda_init are accepted as no-ops.)"}
@@ -6466,12 +6542,19 @@ async def handle_restart_lsp(params: dict, project_root: str, strict: bool = Fal
     backend even from inside a backoff window.  Re-init is eager: any spawn or
     handshake error surfaces here rather than on a later semantic call.
     """
-    raw = str(params.get("backend") or params.get("filetype") or "clangd").strip().lower()
+    raw = str(params.get("backend") or params.get("filetype") or "").strip().lower()
+    if not raw:
+        # No target named: the one enabled backend; clangd when both are on.
+        if not _ENABLED_BACKENDS:
+            _require_any_enabled()
+        raw = "luals" if _ENABLED_BACKENDS == frozenset({"luals"}) else "clangd"
     if raw in ("luals", "lua"):
         backend_type, filetype = "luals", "lua"
     else:
         backend_type, filetype = "clangd", "cpp"
     reindex = _bool_param(params.get("reindex"), False)
+    # Refused BEFORE the lock and before any teardown or cache wipe.
+    _require_enabled(backend_type)
 
     # The same request-scoped lock the semantic path takes (released by the
     # dispatcher). Taken HERE rather than left to the _ensure_backend call at
@@ -7113,6 +7196,41 @@ def _missing_function_refusal(arguments, params, names, envelope_keys=("function
 # END GENERATED: cbccd98521e6
 
 
+# The canonical semantic names (shared by every LSP backend) plus restart_lsp:
+# listed only while at least one backend is enabled.  clang_tidy is NOT here --
+# it is a plain subprocess and is always offered.
+_SEMANTIC_NAMES = frozenset({
+    "find_definition", "find_type_definition", "find_references",
+    "find_implementations", "type_at", "diagnostics", "outline", "symbol",
+    "symbol_context", "inlay_hints", "symbol_change_impact", "restart_lsp",
+})
+
+
+def _name_requires(name: str) -> Optional[Tuple[str, ...]]:
+    """The backend flags a registered function name needs: any one of them
+    (canonical semantic names, restart_lsp), exactly one (the legacy prefixed
+    names and the *_init no-ops), or None for a name that needs no backend."""
+    if name.startswith(("clangd_", "cuda_")):
+        return ("clangd",)
+    if name.startswith("luals_"):
+        return ("luals",)
+    if name in _SEMANTIC_NAMES:
+        return ("clangd", "luals")
+    return None
+
+
+def _visible_function_names() -> List[str]:
+    """Sorted registered names OFFERED to a caller: everything registered, minus
+    what needs a backend the launch line did not switch on.  A hidden name stays
+    in HANDLERS, so calling it still reaches the refusal that names the flag."""
+    out = []
+    for name in HANDLERS:
+        need = _name_requires(name)
+        if need is None or any(b in _ENABLED_BACKENDS for b in need):
+            out.append(name)
+    return sorted(out)
+
+
 async def handle_purity_call(arguments: dict, project_root: str, strict: bool = False) -> dict:
     """Route a purity_call invocation to the appropriate handler.
 
@@ -7145,16 +7263,18 @@ async def handle_purity_call(arguments: dict, project_root: str, strict: bool = 
         params["_backend"] = hint
 
     if not function:
-        missing = _missing_function_refusal(arguments, params, sorted(HANDLERS.keys()), ("function", "params", "f", "p"), ("max_answer_chars",))
+        offered = _visible_function_names()
+        missing = _missing_function_refusal(arguments, params, offered, ("function", "params", "f", "p"), ("max_answer_chars",))
         if missing:
             return {"error": missing}
-        func_list = "\n".join(f"  {name}" for name in sorted(HANDLERS.keys()))
+        func_list = "\n".join(f"  {name}" for name in offered)
         return {"__raw_text__": f"mcp-purity OK — project: {project_root}\nAvailable functions:\n{func_list}"}
 
     handler = HANDLERS.get(function)
     if not handler:
-        func_list = ", ".join(sorted(HANDLERS.keys()))
-        hint = _did_you_mean(function, HANDLERS, FUNCTION_ALIASES)
+        offered = _visible_function_names()
+        func_list = ", ".join(offered)
+        hint = _did_you_mean(function, offered, FUNCTION_ALIASES)
         return {"error": f"Unknown function: {_sanitize_log(function)}. Available: {func_list}{hint}"}
 
     # Reject unknown params up-front. Without this, an unrecognized key (a
@@ -7230,9 +7350,83 @@ async def handle_purity_call(arguments: dict, project_root: str, strict: bool = 
 # MCP Server
 # ---------------------------------------------------------------------------
 
-PURITY_CALL_TOOL = {
-    "name": "purity_call",
-    "description": (
+def _purity_description(enabled: frozenset) -> str:
+    """The purity_call tool description for the backends in *enabled*.
+
+    A file-ops core plus per-backend fragments, so what the model reads names
+    only what the launch line switched on: with no backend there is no semantic
+    block, no "LSPs spin up lazily", no legacy-name sentence and no semantic
+    list; clang_tidy (a plain subprocess, never gated) stays.  With both on the
+    result is the full text, byte for byte what the single literal used to be.
+    """
+    clangd = "clangd" in enabled
+    luals = "luals" in enabled
+    lsp = clangd or luals
+
+    tidy = ("  clang_tidy             - clang-tidy static analysis; auto -p from compile_commands.json\n\n")
+    if clangd and luals:
+        sem_head = (
+            "SEMANTIC CODE NAVIGATION — purity_call now ALSO does symbol work\n"
+            "purity_call now provides compiler-accurate (clangd-backed) symbol\n"
+            "navigation for C / C++ / CUDA and type-aware (luals-backed) symbol\n"
+            "navigation for Lua (.lua paths, luals_* functions), alongside the file ops above:\n\n"
+        )
+        spin = "The clangd and luals LSPs spin up lazily on first use."
+        retired = (
+            "The former standalone clangd_call / cuda_call /\n"
+            "luals_call TOOLS are retired and unregistered - they do not exist in any\n"
+            "session, and purity_call is the only entry point. Their legacy\n"
+            "clangd_*/cuda_*/luals_* FUNCTION names do still resolve, as aliases here.\n\n"
+        )
+    elif clangd:
+        sem_head = (
+            "SEMANTIC CODE NAVIGATION — purity_call now ALSO does symbol work\n"
+            "purity_call provides compiler-accurate (clangd-backed) symbol\n"
+            "navigation for C / C++ / CUDA, alongside the file ops above:\n\n"
+        )
+        spin = "The clangd LSP spins up lazily on first use."
+        retired = (
+            "The former standalone clangd_call / cuda_call TOOLS are retired and\n"
+            "unregistered - they do not exist in any session, and purity_call is the\n"
+            "only entry point. Their legacy clangd_*/cuda_* FUNCTION names do still\n"
+            "resolve, as aliases here.\n\n"
+        )
+    elif luals:
+        sem_head = (
+            "SEMANTIC CODE NAVIGATION — purity_call now ALSO does symbol work\n"
+            "purity_call provides type-aware (luals-backed) symbol\n"
+            "navigation for Lua (.lua paths, luals_* functions), alongside the file ops above:\n\n"
+        )
+        spin = "The luals LSP spins up lazily on first use."
+        retired = (
+            "The former standalone luals_call TOOL is retired and unregistered - it\n"
+            "does not exist in any session, and purity_call is the only entry point.\n"
+            "Its legacy luals_* FUNCTION names do still resolve, as aliases here.\n\n"
+        )
+    sem_list = (
+        "  find_definition       - by symbol name OR file position (symbol/at)\n"
+        "  find_type_definition   - at a file position: where the TYPE is defined\n"
+        "  find_references        - by symbol name OR file position\n"
+        "  find_implementations   - at a file position\n"
+        "  type_at                - hover + deduced (auto/template) type\n"
+        "  diagnostics            - compiler warnings/errors for a file\n"
+        "  outline                - document symbol outline\n"
+        "  symbol                 - workspace symbol search (index + grep fallback)\n"
+        "  symbol_context         - definition + references in one call\n"
+        "  inlay_hints            - parameter/type hints for a range\n"
+        "  symbol_change_impact   - definition + references + call hierarchy\n"
+    )
+    if lsp:
+        semantic_block = sem_head + sem_list + tidy
+        lazy = (spin + " For symbol work PREFER these\n"
+                "over grepping source - text matching misses overloads, macros, and\n"
+                "indirect references. search_for_pattern remains free-text search over ANY\n")
+    else:
+        semantic_block = "STATIC ANALYSIS (no LSP backend is enabled on this server)\n\n" + tidy
+        retired = ""
+        lazy = "search_for_pattern is free-text search over ANY\n"
+
+    head = (
         "Project file operations: search, glob, list (ls), write, surgical edits.\n\n"
         "ABSOLUTE PROHIBITION — Bash(\"find ...\") AND Bash(\"ls ...\") ARE FORBIDDEN\n"
         "You MUST NEVER invoke `find` through Bash. Not with `-name`, not with\n"
@@ -7255,25 +7449,9 @@ PURITY_CALL_TOOL = {
         "regex-on-output, hidden files, `head_limit` / `offset` pagination —\n"
         "and stays project-root-aware. If you catch yourself typing `ls` into\n"
         "Bash, STOP — call `list_dir` instead.\n\n"
-        "SEMANTIC CODE NAVIGATION — purity_call now ALSO does symbol work\n"
-        "purity_call now provides compiler-accurate (clangd-backed) symbol\n"
-        "navigation for C / C++ / CUDA and type-aware (luals-backed) symbol\n"
-        "navigation for Lua (.lua paths, luals_* functions), alongside the file ops above:\n\n"
-        "  find_definition       - by symbol name OR file position (symbol/at)\n"
-        "  find_type_definition   - at a file position: where the TYPE is defined\n"
-        "  find_references        - by symbol name OR file position\n"
-        "  find_implementations   - at a file position\n"
-        "  type_at                - hover + deduced (auto/template) type\n"
-        "  diagnostics            - compiler warnings/errors for a file\n"
-        "  outline                - document symbol outline\n"
-        "  symbol                 - workspace symbol search (index + grep fallback)\n"
-        "  symbol_context         - definition + references in one call\n"
-        "  inlay_hints            - parameter/type hints for a range\n"
-        "  symbol_change_impact   - definition + references + call hierarchy\n"
-        "  clang_tidy             - clang-tidy static analysis; auto -p from compile_commands.json\n\n"
-        "The clangd and luals LSPs spin up lazily on first use. For symbol work PREFER these\n"
-        "over grepping source - text matching misses overloads, macros, and\n"
-        "indirect references. search_for_pattern remains free-text search over ANY\n"
+    )
+
+    mid = (
         "filetype (comments, log strings, build text): substring_pattern is a regex\n"
         "by default; pass regex:false for a literal match (`size(` needs no escaping) - use it when\n"
         "you want text, not a symbol. only_matching:true (rg -o) makes each match its own\n"
@@ -7293,14 +7471,14 @@ PURITY_CALL_TOOL = {
         "It skips, like an ignored dir, any dir BELOW the search root holding a `.git`\n"
         "file or dir (worktree, submodule, nested clone); no_ignore:true searches them.\n"
         "A root outside the project is filtered by ITS OWN repo's root .gitignore.\n"
-        "The former standalone clangd_call / cuda_call /\n"
-        "luals_call TOOLS are retired and unregistered - they do not exist in any\n"
-        "session, and purity_call is the only entry point. Their legacy\n"
-        "clangd_*/cuda_*/luals_* FUNCTION names do still resolve, as aliases here.\n\n"
+    )
+
+    when_not = (
         "When NOT to use purity:\n"
         "  - Plain reading        -> built-in Read (less MCP overhead).\n"
-        "  - Lua symbols          -> purity_call itself (in-process luals, luals_* aliases).\n"
-        "  - Git                  -> mcp-git.\n"
+        + ("  - Lua symbols          -> purity_call itself (in-process luals, luals_* aliases).\n"
+           if luals else "")
+        + "  - Git                  -> mcp-git.\n"
         "  - Build / test / clean -> mcp-forge.\n\n"
         "MANDATORY Bash → purity mappings (NEVER call these via Bash):\n"
         "  Bash(\"ls ...\")                   → function=\"list_dir\" (alias \"ls\")  [FORBIDDEN via Bash]\n"
@@ -7315,10 +7493,17 @@ PURITY_CALL_TOOL = {
         "Also prefer this OVER built-in Write/Edit/Glob/Grep.\n\n"
         "File ops: search_for_pattern (grep), find_file (glob), list_dir (ls),\n"
         "create_text_file, create_temp_dir (mktemp), replace_content, replace_lines,\n"
-        "delete_lines, insert_at_line, read_file. Semantic (clangd-backed): find_definition,\n"
+        "delete_lines, insert_at_line, read_file."
+    )
+
+    file_ops_tail = (
+        " Semantic (" + ("clangd" if clangd else "luals") + "-backed): find_definition,\n"
         "find_type_definition, find_references,\n"
         "find_implementations, type_at, diagnostics, outline, symbol, symbol_context,\n"
-        "inlay_hints, symbol_change_impact. Project-root-scoped, .gitignore-aware, binary-safe.\n"
+        "inlay_hints, symbol_change_impact." if lsp else "")
+
+    rest = (
+        " Project-root-scoped, .gitignore-aware, binary-safe.\n"
         "Globs: a bare mask (`*.cu`) matches the BASENAME at any depth; a mask holding\n"
         "`/` or `**` matches the path, where `**/` means any depth INCLUDING zero, so\n"
         "`tests/**/*.py` matches `tests/foo.py` as well as `tests/sub/foo.py`. The one\n"
@@ -7340,21 +7525,37 @@ PURITY_CALL_TOOL = {
         "  grep text:  function=\"search_for_pattern\", "
         "params={\"pattern\":\"TODO\",\"path\":\"docs/\",\"glob\":\"*.md\"}\n"
         "Call without 'function' for full function list."
-    ),
-    "inputSchema": {
-        "type": "object",
-        "properties": {
-            "function": {
-                "type": "string",
-                "description": "Function name to call. REQUIRED at the top level, beside params, whenever anything else is sent (omit both function and params only for the status reply).",
-            },
-            "params": {
-                "type": "object",
-                "description": "Function parameters",
+    )
+
+    return (head + semantic_block + lazy + mid + (retired or "\n")
+            + when_not + file_ops_tail + rest)
+
+
+def _purity_call_tool(enabled: frozenset) -> dict:
+    """The purity_call tool entry for the backends in *enabled*."""
+    return {
+        "name": "purity_call",
+        "description": _purity_description(enabled),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "function": {
+                    "type": "string",
+                    "description": "Function name to call. REQUIRED at the top level, beside params, whenever anything else is sent (omit both function and params only for the status reply).",
+                },
+                "params": {
+                    "type": "object",
+                    "description": "Function parameters",
+                },
             },
         },
-    },
-}
+    }
+
+
+# The FULL description -- both backends on.  Kept as a module constant so the
+# tests can read it; the server serves _purity_call_tool(_ENABLED_BACKENDS), the
+# text for what the launch line actually enabled.
+PURITY_CALL_TOOL = _purity_call_tool(frozenset({"clangd", "luals"}))
 
 
 class McpServer:
@@ -7577,7 +7778,9 @@ class McpServer:
             return self._result(msg_id, {})
 
         if method == "tools/list":
-            return self._result(msg_id, {"tools": [PURITY_CALL_TOOL]})
+            # The description for what the launch line enabled (fixed after
+            # main() fills _ENABLED_BACKENDS), not the full-inventory constant.
+            return self._result(msg_id, {"tools": [_purity_call_tool(_ENABLED_BACKENDS)]})
 
         if method == "tools/call":
             return await self._handle_tool_call(msg_id, params)
@@ -7663,6 +7866,13 @@ def main() -> None:
         print("mcp-purity — available functions:\n")
         for name in sorted(HANDLERS.keys()):
             desc = HANDLER_DESCRIPTIONS.get(name, "")
+            need = _name_requires(name)
+            if need == ("clangd",):
+                desc = (desc + " " if desc else "") + "[requires --clangd]"
+            elif need == ("luals",):
+                desc = (desc + " " if desc else "") + "[requires --luals]"
+            elif need:
+                desc = (desc + " " if desc else "") + "[requires --clangd or --luals]"
             print(f"  {name:25s} {desc}")
         sys.exit(0)
 
@@ -7671,6 +7881,18 @@ def main() -> None:
     parser.add_argument("--strict", action="store_true", help="Hard-sandbox: reject every path outside project root, reads included")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging to stderr")
     parser.add_argument("--log-file", help="Log to file (implies --debug)")
+    # The LSP backends are OFF by default; each is switched on by its flag.
+    # Enabling is lazy: nothing is probed or spawned until a semantic call.
+    parser.add_argument(
+        "--clangd",
+        action="store_true",
+        help="Enable the clangd backend (C / C++ / CUDA semantic functions); off by default",
+    )
+    parser.add_argument(
+        "--luals",
+        action="store_true",
+        help="Enable the lua-language-server backend (Lua semantic functions); off by default",
+    )
     # CWE-426 (untrusted-PATH hijack): explicit absolute-path overrides for LSP
     # binaries.  When supplied, _resolve_lsp_binary() validates and pins the
     # binary before the first spawn.  When omitted, shutil.which() is used at
@@ -7701,6 +7923,12 @@ def main() -> None:
     # Store CWE-426 binary overrides in module-level vars so _init_backend can
     # read them without threading them through every call site.
     global _clangd_binary_override, _luals_binary_override, _clang_tidy_binary_override
+    global _ENABLED_BACKENDS
+    # --clangd-path / --luals-path imply their backend flag.
+    _ENABLED_BACKENDS = frozenset(
+        name for name, on in (("clangd", args.clangd or args.clangd_path is not None),
+                              ("luals", args.luals or args.luals_path is not None))
+        if on)
     _clangd_binary_override = args.clangd_path
     _luals_binary_override = args.luals_path
     _clang_tidy_binary_override = args.clang_tidy_path

@@ -375,7 +375,8 @@ class Driver:
     def __init__(self, project_root, timeout=RPC_TIMEOUT, strict=False):
         self.root = project_root
         self.cli = H.JsonRpcClient(
-            [sys.executable, SERVER, "--project-root", project_root]
+            [sys.executable, SERVER, "--project-root", project_root,
+             "--clangd", "--luals"]
             + (["--strict"] if strict else []),
             tool="purity_call", cwd=H.REPO_ROOT, timeout=timeout,
             client_name="ph-purity-file-ops")
