@@ -88,7 +88,7 @@ Routes (every route requires the bearer)
        field, canonical forms only) selects the app; /sdapi/* needs the prefix.
        A route of the other kind is 404. Request and answer bodies are forwarded
        byte-exact (sd_cpp_extra_args too); chat/messages bodies are capped at
-       16 MiB and embeddings/rerank at 4 MiB (min with body_limit); the chat
+       32 MiB and embeddings/rerank at 4 MiB (min with body_limit); the chat
        kind also forwards one anthropic-version / anthropic-beta header each.
        Exception, /v1/embeddings and /v1/rerank only: a request addressed to an
        embed_capable app is served by ANOTHER embed_capable app when that one is
@@ -958,10 +958,12 @@ ROUTES: Mapping[str, str] = types.MappingProxyType({
 # path -> the very key object of ROUTES, so a Target never carries the client's string
 _SD_ROUTE_KEYS: Mapping[str, str] = types.MappingProxyType({path: path for path in ROUTES})
 # The request-body cap of a ROUTES KIND TOKEN (never of a path: gate A10 keeps ONE path-keyed
-# table). 16 MiB chat/messages, 4 MiB embeddings/rerank (owner-unconfirmed numbers; raise by
-# editing the value). The image tokens have no entry and keep the configured body_limit.
+# table). 32 MiB chat/messages (the owner raised it from 16 MiB on 2026-11-16 after a 23.5 MB
+# /v1/messages was refused 413), 4 MiB embeddings/rerank (an owner-unconfirmed number; raise by
+# editing the value). The effective cap is min(cap, body_limit), so the default body_limit
+# (32 MiB) makes 32 MiB the chat ceiling. The image tokens have no entry and keep body_limit.
 _SD_KIND_BODY_CAPS: Mapping[str, int] = types.MappingProxyType({
-    "chat": 16 * 1024 * 1024,
+    "chat": 32 * 1024 * 1024,
     "embed": 4 * 1024 * 1024,
 })
 
@@ -4405,7 +4407,7 @@ def _sd_framing(handler: "_SdHandler", upstream: str) -> Optional[Tuple[int, str
         _sd_reply_refuse(handler, "length_required", "exactly one decimal Content-Length is required")
         return None
     length = int(lengths[0].strip())
-    # The kind token's cap (chat 16 MiB, embed 4 MiB) or the plain body_limit, whichever is smaller.
+    # The kind token's cap (chat 32 MiB, embed 4 MiB) or the plain body_limit, whichever is smaller.
     if length > _sd_body_cap(upstream, handler.server.settings.body_limit):
         _sd_reply_refuse(handler, "body_too_large", "the request body is over the body limit")
         return None

@@ -3388,7 +3388,7 @@ R_IMAGES = ("/v1/images/generations", "/v1/images/edits")     # the image routes
 R_LLM = ("/v1/chat/completions", "/v1/messages", "/v1/embeddings", "/v1/rerank")
 R_OPENAI = R_IMAGES + R_LLM      # every route that may take the body `model` (all but "sdapi")
 R_SDAPI = ("/sdapi/v1/txt2img", "/sdapi/v1/img2img")
-R_CAPS = {"chat": 16 * 1024 * 1024, "embed": 4 * 1024 * 1024}      # Step 8 (owner-unconfirmed)
+R_CAPS = {"chat": 32 * 1024 * 1024, "embed": 4 * 1024 * 1024}      # Step 8; chat 16 -> 32 MiB by the owner (2026-11-16)
 R_CODES = {"route_not_found": 404, "method_not_allowed": 405, "invalid_request": 400,
            "model_required": 400, "model_unknown": 404}
 R_LIMIT = 64 * 1024
@@ -3934,7 +3934,7 @@ def r21(mod):
         for limit in (body_limit, 1024, 1 << 30):
             if mod._sd_body_cap(path, limit) != limit:
                 problems.append("_sd_body_cap(%s, %d) must stay the body limit: image routes have no cap" % (path, limit))
-    return problems, ["chat/messages 16 MiB, embeddings/rerank 4 MiB by kind token; min(cap, body_limit); "
+    return problems, ["chat/messages 32 MiB, embeddings/rerank 4 MiB by kind token; min(cap, body_limit); "
                       "image routes keep body_limit"]
 
 
@@ -8269,8 +8269,24 @@ def p42(mod, sandbox, names, optional):
         big = _p_body("p42-img", extra="y" * 3000)
         problems += _p_relayed("an image body over the chat caps", _p_post(w.port, _p_m("A", P_GEN), big), big,
                                sandbox, "A", P_GEN)
+    # The real table and the default body_limit (32 MiB): a 20 MiB chat body (the 2026-11-16 prod size
+    # class, 23.5 MB) is relayed, 32 MiB + 1 is a 413 from the head alone, embeddings stay at 4 MiB.
+    problems += w.problems
+    with _p_front(mod, sandbox, {"A": _p_entry(sandbox, "A"), "L": _p_llm_entry(sandbox, "L")},
+                  label="front-real-caps") as w:
+        chat, embed = R_LLM[0], R_LLM[2]
+        body = _p_sized("Qwen3.8-Flash-Next", 20 * 1024 * 1024, "p42-real")
+        problems += _p_relayed("a 20 MiB body on %s (the real chat cap)" % chat,
+                               _p_post(w.port, _p_m("L", chat), body, timeout=60.0), body, sandbox, "L", chat)
+        problems += _p_refused("%s at 32 MiB + 1 (declared, none sent)" % chat,
+                               _p_early(w.port, _p_m("L", chat), length=32 * 1024 * 1024 + 1), "body_too_large")
+        problems += _p_refused("%s at 4 MiB + 1 (declared, none sent)" % embed,
+                               _p_early(w.port, _p_m("L", embed), length=4 * 1024 * 1024 + 1), "body_too_large")
+        if not w.settled(0):
+            problems.append("the real-cap refusals left %d admission(s) taken" % w.admitted())
     return problems + w.problems, ["each kind token's cap accepted, cap+1 is 413 unread, Transfer-Encoding 411 "
-                                   "(never 413), Content-Type 415; an image route is not capped by the table"]
+                                   "(never 413), Content-Type 415; an image route is not capped by the table; "
+                                   "the real table: a 20 MiB chat body relayed, 32 MiB + 1 and embed 4 MiB + 1 -> 413"]
 
 
 @_q_live

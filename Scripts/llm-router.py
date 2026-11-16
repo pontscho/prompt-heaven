@@ -214,9 +214,12 @@ addendum the limits of the codex/openai kinds, OAuth and Mistral reasoning)
   * Raw LLM relay (kind rawllm): the whole request body is read into memory first (the caps below),
     and a JSON answer (embeddings, rerank, a non-stream chat or messages answer) is held whole under
     _UPSTREAM_BODY_LIMIT before one byte is sent, so a truncated body is a 502 and never a partial
-    answer; only SSE streams. The body caps are the router's own numbers, not the upstream's: 16 MiB
+    answer; only SSE streams. The body caps are the router's own numbers, not the upstream's: 32 MiB
     for /v1/chat/completions, 4 MiB for /v1/embeddings and /v1/rerank, each min(cap, --body-limit);
-    /v1/messages keeps the plain --body-limit. --max-llm-requests (default 8) bounds the requests in
+    /v1/messages keeps the plain --body-limit (default 32 MiB). An upstream that refuses a body with a
+    413 on the head alone and closes while the router is still writing it (a broken pipe or a reset)
+    is answered 413 with the router's own text (request_too_large on /v1/messages, the OpenAI envelope
+    elsewhere) when that 413 head is already readable; any other early close stays the 502. --max-llm-requests (default 8) bounds the requests in
     flight to every rawllm route, /v1/messages included: a gpu-router in front queues without a wait
     limit, so an uncapped relay would hand every connection slot to the queue. The upstream path is
     fixed per endpoint and never comes from the client; no upstream response header is copied (a
@@ -8579,7 +8582,27 @@ def _rt_send(backend: BackendSpec, path: str, headers: List[Tuple[str, str]],
             conn.putheader(name, value)
         conn.putheader("Accept-Encoding", "identity")
         conn.putheader("Content-Length", str(len(body)))
-        conn.endheaders(body)
+        try:
+            conn.endheaders(body)
+        except (BrokenPipeError, ConnectionResetError):
+            # An upstream that refuses on the head alone (a gpu-router's 413 body_too_large) answers and
+            # closes while the body is still being written. Its head is already waiting: read it, and when
+            # it is a 413 the answer is the router's own 413, never the 502 of the broken pipe. Any other
+            # outcome (no readable head, another status) re-raises the original error: the same 502 as
+            # before. Nothing of the head's headers or body is read or kept; nothing is retried.
+            try:
+                early = conn.getresponse()
+            except Exception:  # noqa: BLE001 -- no readable head: the broken pipe stands
+                early = None
+            if early is None:
+                raise
+            status_early = early.status
+            early.close()
+            if status_early != 413:
+                raise
+            refusal_413 = UpstreamError(413, "request_too_large", "the request body is over the upstream body limit")
+            refusal_413.cause = "upstream_413"
+            raise refusal_413 from None
         resp = conn.getresponse()
         if 100 <= resp.status < 200:
             raise UpstreamError(502, "api_error", "backend %s: unexpected interim response %d"
@@ -9169,7 +9192,7 @@ _RT_ENDPOINT_MEDIA = {"messages": ("application/json",), "count_tokens": ("appli
 # The request-body caps of the raw-relay endpoints (the router's own numbers, not an upstream's), keyed by endpoint
 # TOKEN, never by path: effective min(cap, --body-limit), checked once the path is known and before any body byte
 # is read. /v1/messages and the image endpoints have no entry and keep the plain --body-limit.
-_RT_RAW_BODY_CAPS = {"chat_completions": 16 * 1024 * 1024, "embeddings": 4 * 1024 * 1024,
+_RT_RAW_BODY_CAPS = {"chat_completions": 32 * 1024 * 1024, "embeddings": 4 * 1024 * 1024,
                      "rerank": 4 * 1024 * 1024}
 
 # G-M1 DEFAULT: the query strings a client may send. Replace with exactly the set
@@ -10452,7 +10475,7 @@ example config (chmod 600; token: python3 -c 'import secrets;print(secrets.token
   POST /v1/messages to such a route goes to the same upstream; the client's bytes reach a FIXED upstream
   path untouched and a 2xx JSON answer comes back untouched, an SSE answer as whole events byte for
   byte (ending at [DONE] or message_stop; an upstream that ends sooner gets an in-band error event).
-  No upstream response header is copied. Request bodies are capped at 16 MiB (chat) and 4 MiB
+  No upstream response header is copied. Request bodies are capped at 32 MiB (chat) and 4 MiB
   (embeddings, rerank), each below --body-limit; --max-llm-requests caps these requests in flight.
   anthropic-version and anthropic-beta travel on /v1/messages only; count_tokens is refused 400.
   A mistral route's option tool_result_images (boolean, default true): an image inside a

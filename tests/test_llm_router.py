@@ -695,6 +695,7 @@ class ScriptedPeer:
         self.errors = []
         self.conns = 0
         self.closed_event = threading.Event()
+        self.head_only = False    # True: read the request head only (V16's early refusal); set by the test, reset by it
         self._lock = threading.Lock()
         self._stopping = False
         self._threads = []
@@ -810,6 +811,10 @@ class ScriptedPeer:
             if sep:
                 headers.append((name, value.strip()))
         lengths = [v for k, v in headers if k.lower() == "content-length"]
+        if self.head_only:
+            # V16: an upstream that refuses on the head alone: the body is NOT read, the script runs at once
+            # and the connection is closed over the unread bytes (a TCP reset to a client still writing).
+            return {"line": lines[0], "headers": headers, "body": body}
         if len(lengths) == 1 and lengths[0].isdigit():
             want = int(lengths[0])
             if want > PEER_BODY_LIMIT:
@@ -22843,8 +22848,9 @@ GV_CASES = (
     "models listing, count_tokens",      # V13 (R13)
     "no secret or payload in a log",     # V14
     "messages: case-variant keys",       # V15 (F1)
+    "upstream 413 on a broken pipe",     # V16 (prod 2026-11-16)
 )
-GV_IDS = ("V1", "V2", "V3", "V4", "V5", "V6", "V7", "V8", "V9", "V10", "V11", "V12", "V13", "V14", "V15")
+GV_IDS = ("V1", "V2", "V3", "V4", "V5", "V6", "V7", "V8", "V9", "V10", "V11", "V12", "V13", "V14", "V15", "V16")
 
 GV_CHAT = "tf-v-chat"                # rawllm routes (route key == model: the body is relayed as it came)
 GV_EMB = "tf-v-embed"
@@ -22859,7 +22865,7 @@ GV_MSG_P = "/v1/messages"
 GV_NEW_PATHS = (GV_CHAT_P, GV_EMB_P, GV_RANK_P)
 GV_MODEL_OF = {GV_CHAT_P: GV_CHAT, GV_EMB_P: GV_EMB, GV_RANK_P: GV_RANK, GV_MSG_P: GV_CHAT}
 GV_PREFIX = "/m/tfv"                 # the rawllm backends' base path: the fixed path is appended to it
-GV_CAPS = {GV_CHAT_P: 16 << 20, GV_EMB_P: 4 << 20, GV_RANK_P: 4 << 20}     # written here, not read from the module
+GV_CAPS = {GV_CHAT_P: 32 << 20, GV_EMB_P: 4 << 20, GV_RANK_P: 4 << 20}     # written here, not read from the module
 GV_PAYLOAD = "tf-v-payload-SENTINEL-" + secrets.token_hex(8)    # in every request body; never in a log
 # The upstream answers carry a whitespace and key-order quirk: a router that re-dumps them changes the bytes.
 GV_CHAT_OK = (b'{ "id" : "chatcmpl-tfv",\n  "object":"chat.completion", "choices":[{"index":0,"message":'
@@ -23123,7 +23129,7 @@ def gv_v2(ctx):
 
 
 def gv_v3(ctx):
-    """V3 (R10): the per-route request caps (16 MiB chat, 4 MiB embeddings and rerank; effective min(cap, --body-limit)),
+    """V3 (R10): the per-route request caps (32 MiB chat, 4 MiB embeddings and rerank; effective min(cap, --body-limit)),
     the order 411 -> 413, and no regression for /v1/messages (plain --body-limit)."""
     client, peer, fixture_root = ctx["client"], ctx["peer"], ctx["fixture_root"]
     problems = []
@@ -23917,6 +23923,65 @@ def gv_v15(ctx):
                       "unchanged   : the same Model body on a passthrough route reaches its peer"]
 
 
+def gv_v16(ctx):
+    """V16 (prod 2026-11-16, a 23.5 MB /v1/messages through llm-router to a gpu-router that refused 413 at once):
+    an upstream that answers a 413 on the head alone and closes while the router is still writing a body larger than
+    the socket buffers (12 MiB) is the client's 413 -- the router's own request_too_large on /v1/messages, the OpenAI
+    envelope on /v1/chat/completions, a message naming a rule and no upstream byte -- and never the 502 of a broken
+    pipe; an early close with any other status, or with no answer, stays that 502; a plain 413 (the body fully
+    read) is relayed as 413; the structure-only upstream-failure line says `upstream_413` and carries no body."""
+    client, peer, state, log_path = ctx["client"], ctx["peer"], ctx["state"], ctx["log_path"]
+    problems = []
+    big = 12 << 20
+    echo = "tf v16 upstream text " + TF_KEY_RAWLLM
+    too_large = [("respond_json", 413, {"error": {"message": echo}})]
+    rows = (("an early 413", too_large, True, 413),
+            ("an early 500", [("respond_json", 500, {"error": {"message": echo}})], True, 502),
+            ("an early close with no answer", [], True, 502),
+            ("a plain 413 after the whole body", too_large, False, 413))
+    try:
+        for label, script, head_only, want in rows:
+            for path in (GV_CHAT_P, GV_MSG_P):
+                state["script"] = lambda _i, _r, s=script: s
+                peer.head_only = head_only
+                body = gv_sized(path, big) if head_only else gv_body(path)
+                status, _h, got = gv_post(client, path, body, timeout=60.0)
+                where = "%s on %s" % (label, path)
+                if path == GV_CHAT_P:
+                    problems += gv_oai(where, status, got, want, "upstream body limit" if (want == 413 and head_only) else None,
+                                       absent=(TF_KEY_RAWLLM,) if head_only else ())
+                else:
+                    problems += gv_anth(where, status, got, want, "upstream body limit" if (want == 413 and head_only) else None)
+                    if status == want:
+                        etype, _msg, why = gb_envelope(got)
+                        wtype = "request_too_large" if want == 413 else "api_error"
+                        if not why and etype != wtype:
+                            problems.append("%s: error type %r, expected %r" % (where, etype, wtype))
+                    if TF_KEY_RAWLLM.encode() in got:
+                        problems.append("%s: the upstream's text reached the client" % where)
+    finally:
+        peer.head_only = False
+        state["script"] = None
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+    except OSError as exc:
+        text = ""
+        problems.append("the router log is unreadable: %s" % type(exc).__name__)
+    if "reason='upstream_413'" not in text:    # _log_value quotes a str
+        problems.append("no upstream-failure line says reason='upstream_413'")
+    if GV_PAYLOAD in text or TF_KEY_RAWLLM in text:
+        problems.append("the log carries a body or a key")
+    status, _h, got = gv_post(client, GV_CHAT_P, gv_body(GV_CHAT_P))
+    if status != 200:
+        problems.append("a clean chat request after the early closes answered %r, expected 200 (a slot leaked?)" % status)
+    return problems, ["early 413   : a 12 MiB body, the peer answers 413 on the head and closes -> 413 (request_too_large on "
+                      "messages, the OpenAI envelope on chat), a rule in the message, no upstream text",
+                      "stays 502   : an early 500 and an early close with no answer",
+                      "plain       : a 413 after the whole body is relayed as 413",
+                      "log         : reason=upstream_413, no body, no key"]
+
+
 def group_v(suite, fixture_root):
     """V. the rawllm kind (stage 3).  One router in front of one scripted peer (and a second peer that must never be
     contacted) serves most cases, with a debug log V14 sweeps last; V3, V6, V10 and V12 start routers of their own
@@ -23943,7 +24008,8 @@ def group_v(suite, fixture_root):
         with peer, peer2:
             ctx = {"mod": mod, "peer": peer, "peer2": peer2, "state": state, "fixture_root": fixture_root,
                    "client": proc.client() if port is not None else None, "log_path": log_path, "proc": proc}
-            fns = (gv_v1, gv_v2, gv_v3, gv_v4, gv_v5, gv_v6, gv_v7, gv_v8, gv_v9, gv_v10, gv_v11, None, gv_v13, gv_v14, gv_v15)
+            fns = (gv_v1, gv_v2, gv_v3, gv_v4, gv_v5, gv_v6, gv_v7, gv_v8, gv_v9, gv_v10, gv_v11, None, gv_v13, gv_v14, gv_v15,
+                   gv_v16)
             for cid, fn in zip(GV_CASES, fns):
                 try:
                     if fn is None:
