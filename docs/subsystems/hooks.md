@@ -15,6 +15,7 @@ links:
   - 0005-approve-the-wrapper-not-the-command
   - 0031-sbx-restricted-mode
   - 0033-egress-through-an-allowlisting-proxy
+  - mcp-messagebox
 ---
 
 # Post-edit Hooks
@@ -43,7 +44,10 @@ identity).
 
 Not in this directory: `Scripts/context-guard.sh` is also a Claude Code hook
 (PreToolUse and PostToolUse, for restartable sessions), but it lives in
-`Scripts/` and is documented on [[scripts]].
+`Scripts/` and is documented on [[scripts]]. So is `Scripts/messagebox-hook.py`,
+the asyncRewake hook run from SessionStart and Stop that hands a session's
+peer messages to the model `Scripts/messagebox-hook.py`; it is the other half of
+the mcp-messagebox server and is documented on [[mcp-messagebox]].
 
 ## Declared limits
 

@@ -23,8 +23,8 @@ sources:
   - Scripts/_mcp_zstd.py
   - tests/test_generated_region.py
 verified:
-  commit: bb3911d
-  date: 2026-11-12
+  commit: 8b83ebf
+  date: 2026-11-16
 links:
   - scripts
   - tests
@@ -199,7 +199,7 @@ left them in: the first two had read `70` and `84` since before the logging
 source existed, and the third read `11` against a table that summed to thirteen
 further down this same page.
 
-## Fourteen canonical sources, and why fourteen
+## Fifteen canonical sources, and why fifteen
 
 The registry is a hand-written tuple, not a glob `Scripts/amalgamate.py:CANONICAL_NAMES`,
 because a glob would let an unrelated file become a generation source by merely
@@ -247,6 +247,7 @@ decides when a sixth source is warranted are
 | `Scripts/_mcp_lsp.py` | how the LSP wire is spoken — `Content-Length` framing for a message, the `file://` DocumentUri for a path, the client-side hops that put a message on that wire, and the two spellings of a resolved path |
 | `Scripts/_mcp_oauth.py` | how a native public client obtains, keeps and renews an OAuth 2.0 / OIDC grant — PKCE, the authorize redirect, the code, refresh and device grants, the token-endpoint answers and the ID-token claims, and the loopback redirect it listens on |
 | `Scripts/_mcp_paging.py` | how much of a result a caller gets, and how it is told where the rest is |
+| `Scripts/_mcp_spool.py` | what a peer message and the per-session spool directory it lives in must look like on disk for two processes of one session to agree — who owns the spool, what may be read from disk, the grammar of a name and an id, the text rule that refuses rather than sanitizes, what a spool record is, and strict JSON for those files |
 | `Scripts/_mcp_websearch.py` | how a query becomes web results — the request each endpoint (DDG lite, Bing) is sent, the page it answers with and how it is parsed, the block signal, and the run loop that moves a batch from DDG to Bing |
 | `Scripts/_mcp_websocket.py` | how a client speaks the WebSocket wire — the upgrade, the frames, message assembly, the control frames it must answer, and the ceilings on what a peer can make it allocate |
 | `Scripts/_mcp_zstd.py` | decoding one compression format, zstd, through the system shared library over `ctypes` |
@@ -363,7 +364,7 @@ why it is not whole are recorded in
 clock as the way a protocol source stays host-neutral are recorded in
 [[0025-generate-do-not-import]] (addendum).
 
-`Scripts/_mcp_httpfront.py` is the thirteenth, and the newest (R-0072). It was
+`Scripts/_mcp_httpfront.py` is the thirteenth (R-0072). It was
 lifted out of two hosts, `Scripts/mcp-proxy.py` and `Scripts/llm-router.py`,
 whose stdlib HTTP fronts had been a declared, adapted copy of each other with no
 gate holding them equal. It holds only the mechanism both hosts carried as
@@ -467,6 +468,32 @@ row proving every dispatcher carries and calls it is group A's
 `Scripts/_mcp_smoke_test.py:missing_function_checks`. The rule, the exemptions
 and the limits are the addendum to
 [[0030-point-at-the-near-miss-never-resolve-it]].
+
+`Scripts/_mcp_spool.py` is the fifteenth (`2191df6`), and the first source
+whose two hosts talk to each other: `Scripts/mcp-messagebox.py` writes a
+session's peer messages into a private spool directory and
+`Scripts/messagebox-hook.py` reads only that directory and hands them to the
+model, so the hook must judge a message by exactly the rules the server judged
+it by, and both must find the owning session the same way. The source holds that
+contract once: the owner walk `Scripts/_mcp_spool.py:_find_owner`, the text rule
+`Scripts/_mcp_spool.py:unsafe_text_reason` and the record check one function
+serves for both sides `Scripts/_mcp_spool.py:_valid_message`. The JSON source
+was the nearest home and the wrong question again: it owns how a JSON-RPC frame
+is enveloped and parsed, and this one what a file on disk must look like, so its
+strict parser is its own `Scripts/_mcp_spool.py:_parse_strict` rather than a
+call to `_strict_loads` — a block cannot reach another source's names, and the
+hook must not carry the JSON-RPC envelope to parse a file. Nor could a search
+source's sanitizer hold the text rule: those shape output for a model, this one
+refuses input that would reach it. It is a `WHOLE_SOURCES` entry
+`Scripts/amalgamate.py:WHOLE_SOURCES`, because the record check reads the
+grammar, the text rule and the parser and the owner walk reads the file reader
+and the parser, so each host spells one marker naming every block in source
+order; the `canonical-block-hosts` table below collapses it to one row. The
+behaviour is gated by `tests/test_messagebox.py` and
+`tests/test_messagebox_hook.py`, which drive the generated copies, rather than by
+group E here; the spool contract itself is [[mcp-messagebox]]. No ADR records
+this domain decision yet; its argument is the source's own docstring
+`Scripts/_mcp_spool.py`.
 
 That column is the half no command can print: a domain is a decision about what a
 source is *for*. What each source actually **defines** is measured
@@ -936,6 +963,16 @@ the tuple entry in both spellings, its expected indent style in
 `tests/test_generated_region.py:group_tabs`, its classes in the adaptation
 table and the file in `py_deps`' 3.10+ API scope `tests/test_py_deps.py:NEW_39_SCOPE`
 ([[gpu-router]], [[0034-sd-router-a-supervisor-and-proxy-for-sd-server]]).
+
+`Scripts/messagebox-hook.py` (`2191df6`) is the sixth declared host, and the
+first that is the other half of a server: the asyncRewake hook of mcp-messagebox,
+run as `python3 -I <path>`, so it could not import a sibling even if it tried. It
+carries one region, `Scripts/_mcp_spool.py` whole, and nothing else — no logging,
+no strict-JSON and no dispatch block — and it must stay free of any network
+import, which its own suite checks `tests/test_messagebox_hook.py`. It is a space
+host `tests/test_generated_region.py:group_tabs`. In the tuple it sits before
+`gpu-router.py`, which arrived first `Scripts/amalgamate.py:DECLARED_HOSTS`;
+the ordinals on this page follow arrival, not tuple position ([[mcp-messagebox]]).
 
 They are **not** in the `--census fleet` count, deliberately: that census is
 about the server fleet and says so in its first line, so its measured block above
