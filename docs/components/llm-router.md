@@ -11,8 +11,8 @@ sources:
   - tests/test_llm_router.py
   - tests/files/llm_router/README.md
 verified:
-  commit: b398368
-  date: 2026-11-10
+  commit: bc22093
+  date: 2026-11-16
 links:
   - 0028-route-by-model-translate-at-the-edge
   - mcp-proxy
@@ -124,7 +124,9 @@ then the route's advertised `max_input_tokens` and `max_tokens` and a
 `context_window` equal to `max_input_tokens` (each `null` when the route sets
 none), and after them, on an image route and only when the route configures
 them, `sizes` (a list) and `default_size` (a string), each key absent rather
-than `null` otherwise (see *Advertised sizes* under Image endpoints); `display_name` is the route's own or else the key, and `created_at` is
+than `null` otherwise (see *Advertised sizes* under Image endpoints), and then, on
+every image route, `edit_formats` (see *Advertised edit formats*), a key no other
+modality carries `Scripts/llm-router.py:_rt_edit_formats`; `display_name` is the route's own or else the key, and `created_at` is
 the router's start time in UTC to the second, read from the same clock reading
 as `created` `Scripts/llm-router.py:_rt_model_entry`
 `Scripts/llm-router.py:_RouterHttpServer`. The `default` route has no name
@@ -1049,6 +1051,29 @@ honest entry there. Refusing an unlisted size was not done for the reason codex
 keeps `size` unrefused (above): it would break a client that sends one size
 enum to every image route.
 
+**Advertised edit formats.** Every image route's entry in `GET /v1/models` and
+`GET /v1/models/{id}` ends with `edit_formats`, the `/v1/images/edits` body forms
+the route takes: a list over `json` and `multipart`, `json` first, read from the
+backend kind's adapter flags `IMAGE_EDIT_JSON` and `IMAGE_EDIT_MULTIPART` and never
+from a kind name, and `[]` for a kind that sets neither
+`Scripts/llm-router.py:_rt_edit_formats`. It follows `sizes` and `default_size`
+(or `context_window` when neither is configured); a chat, `embedding` or `rerank`
+route has no such key `Scripts/llm-router.py:_rt_model_entry`. The kind is looked
+up through the route's backend in `KIND_CLASSES` on both the list and the
+single-model path `Scripts/llm-router.py:_rt_models_list`
+`Scripts/llm-router.py:_RouterHandler`, so it is not configurable. Today's values
+follow from the flags (base default `IMAGE_EDIT_JSON` false, `IMAGE_EDIT_MULTIPART`
+true `Scripts/llm-router.py:Adapter`): `codex` `["json"]`
+`Scripts/llm-router.py:CodexAdapter`, `openai` `["json", "multipart"]`
+`Scripts/llm-router.py:OpenaiAdapter`, `sdcpp` `["multipart"]`
+`Scripts/llm-router.py:SdcppAdapter`. The reason is that a client cannot otherwise
+tell which edit body a route accepts: the trigger was a client that sent a JSON
+edit to an `sdcpp` route and got the 400 "content-type: this route accepts
+multipart edits only" `Scripts/llm-router.py:_rt_parse_image_inbound`. For the same
+client an advertised `default_size` matters on `sdcpp`, because an `sdcpp` edit
+must carry an explicit `WxH` `size` (below); the router still never injects it,
+so a client that wants it must read it and send it.
+
 **Streamed image answers (kind `openai`).** With `"stream": true` (a JSON boolean,
 or the multipart text field `true`; `partial_images` 0-3 is the client's and goes
 through in the raw body) the router sends the same bytes upstream with `Accept:
@@ -1213,7 +1238,8 @@ never a value, with the peer untouched `Scripts/llm-router.py:SdcppAdapter`:
   from the uploaded image when `size` is absent or `auto` (read in the sd.cpp
   source, `set_width_and_height_if_unset`, clamped to 4096 per side; the absent
   case also measured live), which would sidestep `max_pixels`. A generation keeps `auto` and absent: the server's
-  operator-set default applies.
+  operator-set default applies. A route's advertised `default_size` is the value a
+  client can read for this, never filled in by the router (*Advertised edit formats*).
 - **The prompt rule.** A prompt that holds `sd_cpp_extra_args` in any letter case
   (the decoded JSON string or the multipart `prompt` field, so a `_` escape does
   not hide it) is refused with "the prompt carries sd.cpp native arguments; not
@@ -1613,7 +1639,7 @@ line, with a mistral translator's refusal of a non-JSON chunk named in
 `tests/test_llm_router.py:group_u`. K-U run before I and
 J, because I sweeps every log the run collected and J compares start-of-run
 snapshots `tests/test_llm_router.py:GROUP_ORDER`. Its case count is declared
-once, per group, in `tests/run.py:SUITES` (495 typed cases when this page was
+once, per group, in `tests/run.py:SUITES` (496 typed cases when this page was
 last verified, group M 33 of them), and checked against the run; the
 per-group detail is the suite's row in [[tests]], and the red-first record per
 group is ADR 0028's, its addendum included. The config twins of the flags are
@@ -1671,8 +1697,9 @@ boundary 400 and the `/v1/messages` multipart 400 pinned as stdlib-dependent (Q5
 the wrong-endpoint 400s and the no-default 404 (Q6); only the canonical
 `stream` spellings accepted (Q7; stream true itself is group T's); the
 OpenAI envelope, keep-alive switching included (Q8), and the upstream error
-hygiene with a masked key echo (Q8b); the `/v1/models` additions and the
-`modality` filter (Q9); the sniffer's refusals in-process (Q10); the body limit
+hygiene with a masked key echo (Q8b); the `/v1/models` additions, an image
+entry ending with `edit_formats` `["json", "multipart"]` on the `openai` kind, and the
+`modality` filter (Q9) `tests/test_llm_router.py:group_q`; the sniffer's refusals in-process (Q10); the body limit
 and a 64 MiB answer (Q11); no prompt, base64 or file byte in any log, with
 Q-local sentinels `tests/test_llm_router.py:GQ_SENTINELS`, never the I group's,
 which would sweep a relayed base64 body (Q12); the rebuilt `Content-Type` (Q14); 411 and `Expect` on an upload (Q15); an
@@ -1726,11 +1753,16 @@ route, absent as none, `default_size` alone, one entry and the 32-entry cap,
 while every malformed shape, a `default_size` outside `sizes`, a chat route and `default`
 are refused by path without echoing the value, the cap written in the test and
 not read from the module (U1) `tests/test_llm_router.py:gu_u1`; the models
-entry carrying the two keys after `context_window` only where configured, under
-every `?modality` filter (U2) `tests/test_llm_router.py:gu_u2`; and on a live
-`openai` router, a size outside the list and a body with no size both reaching
-the peer byte for byte, with the keys shown over HTTP on the list and the
-single-model path (U3) `tests/test_llm_router.py:gu_u3`.
+entry carrying the two keys after `context_window` only where configured, then
+`edit_formats` on every image entry, under every `?modality` filter (U2)
+`tests/test_llm_router.py:gu_u2`; on a live `openai` router, a size outside the
+list and a body with no size both reaching the peer byte for byte, with the keys
+and `edit_formats` `["json", "multipart"]` shown over HTTP on the list and the
+single-model path (U3) `tests/test_llm_router.py:gu_u3`; and `edit_formats` read
+from the adapter flags in-process, `codex` `["json"]`, `openai`
+`["json", "multipart"]`, `sdcpp` `["multipart"]` after `sizes` and `default_size`,
+`[]` for a kind class with both flags off swapped into `KIND_CLASSES`, and absent
+on a chat route (U4) `tests/test_llm_router.py:gu_u4`.
 
 **Codex image routes (experimental).** Group S `tests/test_llm_router.py:group_s`
 `tests/test_llm_router.py:GS_IDS` drives a codex OAuth backend through the N

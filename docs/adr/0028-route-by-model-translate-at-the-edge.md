@@ -1528,3 +1528,23 @@ The codex and openai kinds gained three route options, each opt-in per route and
 - capture_dir (a40e192): an absolute path; the exact bytes of the latest upstream request are kept per route as <route>.last.json, 0600, through a temp file and an atomic rename, only in an existing directory with no group or other bit. A bad directory or a failed write is one fixed-text WARNING and never fails the request; neither the path nor the body is logged (ADR 0011) (`Scripts/llm-router.py:_rt_rs_capture`).
 
 Two DEBUG lines were added with no behaviour change (3301437, 676fee5, 5089d0f, 1f7a530): `responses request` with the shape of the outgoing body (`Scripts/llm-router.py:_rt_rs_log_shape`) and `responses terminal` on each terminal event with the status, the incomplete reason, the usage counts and the stream's event, delta and done function_call counts (`Scripts/llm-router.py:ResponsesStreamTranslator._log_terminal`). Integers and closed vocabularies only, so ADR 0011's structure-only rule holds. Separately (47dd15e), server_is_overloaded and server_error map to 529 overloaded_error (`Scripts/llm-router.py:_rt_rs_error_codes`). Tests M27-M33; 495 typed cases in the llm_router suite.
+
+## Addendum (2026-11-16): Advertised edit formats: image routes list edit_formats in /v1/models
+
+A client of an image route could not tell which `/v1/images/edits` body form the route takes. The three image kinds differ: codex accepts only the JSON form (the 2026-10-28 live-findings addendum), openai both, sdcpp only multipart. The observed trigger was a client that sent a JSON edit to an sdcpp route and got the 400 `content-type: this route accepts multipart edits only`.
+
+### Decisions
+
+- Every `modality` image route's entry in `GET /v1/models` and `GET /v1/models/{id}` carries `edit_formats`, a list over `json` and `multipart`, `json` first, placed after `sizes` and `default_size` (after `context_window` when neither is configured) (`_rt_model_entry`). A route of any other modality carries no such key.
+- The list is derived from the backend kind's adapter flags `IMAGE_EDIT_JSON` and `IMAGE_EDIT_MULTIPART`, the same flags the inbound parser enforces, never from a kind name (`_rt_edit_formats`, looked up through `KIND_CLASSES` on the list and the single-model path). A kind that sets neither flag advertises `[]`. It is not a route key and not configurable, so the advertisement cannot disagree with the parser.
+- Values at this commit: codex `["json"]`, openai `["json", "multipart"]`, sdcpp `["multipart"]`.
+- `default_size` stays advertised only and is never injected. It matters more to an sdcpp client now that the edit form is visible, because an sdcpp edit must carry an explicit `WxH` `size`; the client reads the advertised value and sends it.
+
+### Alternatives rejected
+
+- A configurable route key. Rejected: the accepted forms are a property of the kind, already encoded in the adapter flags the parser reads; a hand-written value could advertise a form the router then refuses.
+- Accepting a JSON edit on sdcpp and converting it to multipart. Rejected: it would end the byte-exact relay of the image body that every image kind's tests pin.
+
+### Tests
+
+U4 (new): `edit_formats` read from the adapter flags in-process for codex, openai and sdcpp, `[]` for a kind class with both flags off, the key order after `sizes` and `default_size`, and absent on a chat route. U2 now expects `edit_formats` at the end of every image entry under each `?modality` filter; U3 checks it over HTTP on the list and the single-model path; Q9 expects it on the openai image entry. The llm_router suite moved from 495 to 496 cases; the live count is declared once in `tests/run.py:SUITES`.
