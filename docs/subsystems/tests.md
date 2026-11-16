@@ -386,7 +386,9 @@ Making purity's LSP backends opt-in (`8717044`,
 `--clangd --luals` `tests/run.py:SUITES`.
 The child's output in gpu-router's log and the zombie after a failed start
 (`5de1f34`) moved `gpu_router` 259 to 271 (S 22 to 31, Q-sched 16 to 19)
-`tests/run.py:SUITES`.
+`tests/run.py:SUITES`. The opt-in `embed_capable` app key (`8e8638c`) then
+moved it 271 to 276 (L 49 to 50, D 26 to 27, Q-sched 19 to 22: L50, D27,
+QS20-QS22) `tests/run.py:SUITES`.
 These are a snapshot copied for the reader, not a second authority: the
 table wins wherever the two disagree, and the fleet total is computed by the
 run, never typed `tests/run.py:main`.

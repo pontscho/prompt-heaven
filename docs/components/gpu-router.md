@@ -3,14 +3,14 @@ name: gpu-router
 type: component
 status: active
 title: gpu-router — a supervisor and reverse proxy for one GPU's apps (sd-server and inferNO-style LLM engines)
-description: The stdlib-only HTTP front that owns one GPU's apps -- a 0600 JSON config of apps, each one child process serving one or more model ids, of kind sd (stable-diffusion.cpp sd-server, buffered answers) or llm (inferNO-style, streamed answers), with the listener keys under CLI over config over default; an edge-only model-id index, one kind table, a readiness probe path and an optional fixed child port; one strict FIFO with one request in flight and a swap when the head names another app; a per-app state machine with one definition of resident, queued and forced unloads through any model id that answer 200 only once the child's process group is verified gone; streamed llm answers through a bounded queue with an allow-listed head and a strict de-chunker; the abort matrix under which a client abort closes the upstream and kills nothing; retries and a restart budget that disables; the child's merged output read into the log by one reader per child, and the zombie a surviving group leaves and how to clear it; a closed table of OpenAI-shaped error codes; the llm-router sdcpp and rawllm integration through a bearer; how it is tested against two adversarial stub children; the code-mode security review and its fix round; and what it declares rather than gates.
+description: The stdlib-only HTTP front that owns one GPU's apps -- a 0600 JSON config of apps, each one child process serving one or more model ids, of kind sd (stable-diffusion.cpp sd-server, buffered answers) or llm (inferNO-style, streamed answers), with the listener keys under CLI over config over default; an edge-only model-id index, one kind table, a readiness probe path and an optional fixed child port; one strict FIFO with one request in flight and a swap when the head names another app, except that an opt-in embed_capable llm app has its embeddings and rerank answered by another resident READY embed_capable app; a per-app state machine with one definition of resident, queued and forced unloads through any model id that answer 200 only once the child's process group is verified gone; streamed llm answers through a bounded queue with an allow-listed head and a strict de-chunker; the abort matrix under which a client abort closes the upstream and kills nothing; retries and a restart budget that disables; the child's merged output read into the log by one reader per child, and the zombie a surviving group leaves and how to clear it; a closed table of OpenAI-shaped error codes; the llm-router sdcpp and rawllm integration through a bearer; how it is tested against two adversarial stub children; the code-mode security review and its fix round; and what it declares rather than gates.
 sources:
   - Scripts/gpu-router.py
   - tests/test_gpu_router.py
   - tests/files/gpu_router/tf_stub_sd.py
   - tests/files/gpu_router/tf_stub_llm.py
 verified:
-  commit: 5de1f34
+  commit: 8e8638c
   date: 2026-11-16
 links:
   - llm-router
@@ -114,6 +114,7 @@ name, the refusal listing the allowed ones `Scripts/gpu-router.py:_SD_TOP_KEYS`
 | `ready_path` | optional; the readiness probe path, origin-form with no query, fragment or space `Scripts/gpu-router.py:_SD_READY_PATH_RE`; default `/` for `sd`, `/v1/models` for `llm` |
 | `ready_status` | optional; 100-599: ready only on exactly that status. Without it `sd` is ready on any status but 503 and `llm` on 200 |
 | `child_port` | optional; a fixed child port in `Scripts/gpu-router.py:_SD_CHILD_PORT_RANGE`, never the listener's port and never another app's `Scripts/gpu-router.py:_sd_cfg_child_ports`; without it a free port is picked |
+| `embed_capable` | optional; `llm` only, a real boolean, default `false`: the app was started with the embedding and rerank models, so another resident embed_capable app may answer its `/v1/embeddings` and `/v1/rerank` (*Embeddings and rerank between embed_capable apps* below). On an `sd` app the key is refused, not ignored `Scripts/gpu-router.py:_sd_cfg_model` `Scripts/gpu-router.py:ModelSpec` |
 | `retries` | optional; the number of ADDITIONAL sends after a crash, default `Scripts/gpu-router.py:_SD_RETRIES_DEFAULT`, at most `Scripts/gpu-router.py:_SD_RETRIES_MAX` |
 
 Every key added for the llm kind is defaulted, so a config written for
@@ -279,6 +280,28 @@ two readers could read two ways is a 400, and so is a JSON body longer than the
 window `Scripts/gpu-router.py:sniff_model`, which is why a long chat body needs
 the prefix. It is a smaller hand-written analogue of llm-router's image field
 readers: it copies their behaviour, none of their code.
+
+**Embeddings and rerank between embed_capable apps (since `8e8638c`).** The one
+exception to the prefix being authoritative, and only for the two `embed`
+paths, `/v1/embeddings` and `/v1/rerank`: a request addressed to an
+`embed_capable` app is served by the RESIDENT app instead when that one is
+another `embed_capable` app, `READY`, not disabled and not a zombie, so no swap
+happens; every other combination (the addressed app itself resident, nothing
+resident, either app not capable, the resident one `STARTING` or `STOPPING`)
+returns nothing and the decision runs unchanged on the addressed app
+`Scripts/gpu-router.py:_sd_embed_retarget`. Every chat and image path, and a
+forced unload, keeps the prefix authoritative. The check runs on the scheduler
+thread, under the Condition, when the request reaches the head, from the same
+snapshot `decide()` then reads, so nothing changes between the check and the
+decision `Scripts/gpu-router.py:_take`. It overwrites the ticket's `model` with
+the serving app, and from there the ticket IS that app's: a `?force=1` unload of
+the serving app aborts it `Scripts/gpu-router.py:submit_unload`, and a crash
+before any byte re-queues the same ticket under the serving app, whose restart
+it then waits for `Scripts/gpu-router.py:_send_failed`. The body, its `model` field included,
+is forwarded unchanged. Each retarget logs one INFO line after the lock,
+`sd embed retarget: requested=<app> serving=<app>`, app names only (QS20 pins
+that no body or path content reaches it). The design and the alternatives
+rejected are in [[0035-one-gpu-several-apps]].
 
 **The proxy hop.** `Scripts/gpu-router.py:_sd_send` is the one upstream send
 site. The client's first `Content-Type` crosses, and on a `chat` route the first
@@ -719,11 +742,11 @@ The groups, in run order `tests/test_gpu_router.py:GROUP_ORDER`:
 
 | Group | What it pins | Cases |
 |---|---|---|
-| L | config and CLI refusals and defaults: the listener keys and their precedence (L33-L39), the kind and its defaults, `model_ids` and the index collisions, `ready_path` / `ready_status`, the per-kind deadline caps, `child_port`, the new keys in the repr (L40-L45), the `ready_file` / `log_file` / `debug` keys and their precedence (L46-L48), a `bind` list and a repeatable `--bind` (L49) | `tests/test_gpu_router.py:GL_CASES` |
+| L | config and CLI refusals and defaults: the listener keys and their precedence (L33-L39), the kind and its defaults, `model_ids` and the index collisions, `ready_path` / `ready_status`, the per-kind deadline caps, `child_port`, the new keys in the repr (L40-L45), the `ready_file` / `log_file` / `debug` keys and their precedence (L46-L48), a `bind` list and a repeatable `--bind` (L49), the `embed_capable` key: a real bool, llm only, in the repr and in the unknown-key listing (L50) | `tests/test_gpu_router.py:GL_CASES` |
 | R | routing and the sniffer (pure); the llm routes' tokens, caps, ids and kind check, the neutral refusal wording (R21-R23) | `tests/test_gpu_router.py:GR_CASES` |
-| D | the pure FIFO decision; the abort matrix (D23), the strict de-chunker (D24), the stream head parser (D25), the bounded stream queue (D26) | `tests/test_gpu_router.py:GD_CASES` |
+| D | the pure FIFO decision; the abort matrix (D23), the strict de-chunker (D24), the stream head parser (D25), the bounded stream queue (D26), the pure embed retarget: only the two embed paths, only an embed_capable pair, only a READY non-disabled resident (D27) | `tests/test_gpu_router.py:GD_CASES` |
 | S | spawn, readiness, the stop ladder, the group sweep, the budget; the probe path and status (S21), a fixed `child_port` and one spawn (S22), the child's output in the log: DEBUG rows, the sanitizer and caps, the WARNING tail, a reader that ends on its stop flag, the `/proc` member listing, a surviving group recorded on `survivor` (S23-S31) | `tests/test_gpu_router.py:GS_CASES` |
-| Q-sched | one in flight, queued and forced unloads, cancel (QS8: cancelling a running request kills nothing), the admission race; the rate-limited zombie WARNING (QS17), the output tail after a crash (QS18), a failed start whose group survived left a zombie (QS19) | `tests/test_gpu_router.py:GQS_CASES` |
+| Q-sched | one in flight, queued and forced unloads, cancel (QS8: cancelling a running request kills nothing), the admission race; the rate-limited zombie WARNING (QS17), the output tail after a crash (QS18), a failed start whose group survived left a zombie (QS19); embeddings and rerank served by the resident embed_capable app with no spawn, no stop and the body byte-exact (QS20), an addressed resident, an empty GPU and a non-capable addressed app as before (QS21), a non-capable resident swapped out and a chat path never retargeted (QS22) | `tests/test_gpu_router.py:GQS_CASES` |
 | T | retries, `request_timeout`, the poison prompt, the restart budget; a squatter never sees a request (T14), the llm timeouts abort without a kill (T15, T17), shutdown mid-stream (T16) | `tests/test_gpu_router.py:GT_CASES` |
 | P | auth, routing, framing, the byte-exact relay, startup lines, the error table; the config `port` and `bind` (P39, P40), the llm routes (P41), the per-kind caps with 411 first (P42), the `anthropic-*` headers (P43), the stream head allow-list (P44), an incremental chunked stream (P45), a mid-stream EOF never replayed (P46), several listeners: every address answers (P47), one bind failure aborts startup (P48), what a `peer` listener shares and keeps (P49) | `tests/test_gpu_router.py:GP_CASES` |
 | Q-http | departed clients, the disconnect loop, the over-cap race, racing unloads; a client that leaves a stream kills nothing (QH6) | `tests/test_gpu_router.py:GQH_CASES` |
@@ -750,7 +773,9 @@ ledger read 211 when sd-router landed, the listener options moved it to 220,
 and the three stage commits to 239 (2a), 251 (2b) and 252 (stage 3, E6); the
 `ready_file`, `log_file` and `debug` config keys moved it to 255 (L46-L48), and
 several listeners on one port to 259 (L49, P47-P49), and the child output and
-zombie diagnostics (`5de1f34`) to 271 (S23-S31, QS17-QS19). P47 and P48 bind
+zombie diagnostics (`5de1f34`) to 271 (S23-S31, QS17-QS19), and the opt-in
+`embed_capable` key (`8e8638c`) to 276 (L 50, D 27, Q-sched 22: L50, D27,
+QS20-QS22). P47 and P48 bind
 `127.0.0.2` only where the host can (Linux, where all of 127/8 is up); on macOS
 they exercise `127.0.0.1` alone and say so in their detail, and P48 then fails
 on the unbindable second address instead of a held port. P49 needs no second
@@ -861,6 +886,14 @@ additions.
 - **The survivor member listing is Linux-only.** It reads `/proc`; on macOS
   the `survived the stop ladder` WARNING names only the pgid
   `Scripts/gpu-router.py:_sd_group_members`.
+- **An embed retarget forwards the body verbatim.** The `model` field the
+  client wrote for the addressed app reaches the serving app unchanged, so the
+  serving engine must accept that model id; the router checks nothing of the
+  kind `Scripts/gpu-router.py:_sd_embed_retarget`. `GET /v1/models` does not
+  advertise `embed_capable` or which app may answer for which
+  `Scripts/gpu-router.py:_sd_models_entry`, and each retargeted request logs one
+  INFO line, so a client that calls on every turn (an ai-soul hook) logs one per
+  call `Scripts/gpu-router.py:_take`.
 - **A force unload leaves queued work to cold-start again (D-3)**, and repeated
   forces on the resident model each cost a cold start.
 - **A poison prompt can burn the shared restart budget.** A prompt that kills
