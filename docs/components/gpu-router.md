@@ -3,15 +3,15 @@ name: gpu-router
 type: component
 status: active
 title: gpu-router — a supervisor and reverse proxy for one GPU's apps (sd-server and inferNO-style LLM engines)
-description: The stdlib-only HTTP front that owns one GPU's apps -- a 0600 JSON config of apps, each one child process serving one or more model ids, of kind sd (stable-diffusion.cpp sd-server, buffered answers) or llm (inferNO-style, streamed answers), with the listener keys under CLI over config over default; an edge-only model-id index, one kind table, a readiness probe path and an optional fixed child port; one strict FIFO with one request in flight and a swap when the head names another app; a per-app state machine with one definition of resident, queued and forced unloads through any model id that answer 200 only once the child's process group is verified gone; streamed llm answers through a bounded queue with an allow-listed head and a strict de-chunker; the abort matrix under which a client abort closes the upstream and kills nothing; retries and a restart budget that disables; a closed table of OpenAI-shaped error codes; the llm-router sdcpp and rawllm integration through a bearer; how it is tested against two adversarial stub children; the code-mode security review and its fix round; and what it declares rather than gates.
+description: The stdlib-only HTTP front that owns one GPU's apps -- a 0600 JSON config of apps, each one child process serving one or more model ids, of kind sd (stable-diffusion.cpp sd-server, buffered answers) or llm (inferNO-style, streamed answers), with the listener keys under CLI over config over default; an edge-only model-id index, one kind table, a readiness probe path and an optional fixed child port; one strict FIFO with one request in flight and a swap when the head names another app; a per-app state machine with one definition of resident, queued and forced unloads through any model id that answer 200 only once the child's process group is verified gone; streamed llm answers through a bounded queue with an allow-listed head and a strict de-chunker; the abort matrix under which a client abort closes the upstream and kills nothing; retries and a restart budget that disables; the child's merged output read into the log by one reader per child, and the zombie a surviving group leaves and how to clear it; a closed table of OpenAI-shaped error codes; the llm-router sdcpp and rawllm integration through a bearer; how it is tested against two adversarial stub children; the code-mode security review and its fix round; and what it declares rather than gates.
 sources:
   - Scripts/gpu-router.py
   - tests/test_gpu_router.py
   - tests/files/gpu_router/tf_stub_sd.py
   - tests/files/gpu_router/tf_stub_llm.py
 verified:
-  commit: f43a052
-  date: 2026-10-30
+  commit: 5de1f34
+  date: 2026-11-16
 links:
   - llm-router
   - mcp-proxy
@@ -370,7 +370,8 @@ time (QS13 pins it), whatever its kind.
   `Scripts/gpu-router.py:wait_ready` `Scripts/gpu-router.py:_sd_probe_status`.
   A refused connect keeps the probe polling, which is how an inferNO-style
   engine that does not listen while it loads is waited for. Readiness is never
-  read from the child's output: its stdio stays `DEVNULL`. A child that exits
+  read from the child's output: the output goes to the log (*Child output*
+  below) and nothing there feeds the supervisor. A child that exits
   within `Scripts/gpu-router.py:_SD_EARLY_EXIT_S` of its spawn is taken for a
   port collision and respawned on a new port, at most
   `Scripts/gpu-router.py:_SD_PORT_TRIES` spawns — unless the app has a fixed
@@ -379,7 +380,14 @@ time (QS13 pins it), whatever its kind.
   `SubprocessError` or `ValueError`) is a failed start, not a crash of the
   scheduler step. A start that fails or times out leaves the app `DEAD`, never
   `STARTING`, charges the budget and fails the head 502 `model_start_failed` or
-  504 `model_start_timeout` `Scripts/gpu-router.py:_exec_start`.
+  504 `model_start_timeout` `Scripts/gpu-router.py:_exec_start`. `launch` keeps
+  the result of the stop ladder it runs on a failed, timed-out or stopped start:
+  a group that survives it is recorded on `Scripts/gpu-router.py:Supervisor`'s
+  `survivor` (cleared at every launch) and is never respawned beside, and
+  `_exec_start` then makes that app a zombie exactly as the send path's ladder
+  does, `DEAD` with `group_alive` and resident, rather than leaving an untracked
+  group beside the next spawn (QS19). Before `5de1f34` the ladder's result was
+  dropped there.
 - What a failed or aborted send does is one row of the abort matrix, a pure
   function of the abort reason, the app's kind and whether a byte was relayed
   `Scripts/gpu-router.py:_sd_abort_plan`, acted on by
@@ -390,7 +398,27 @@ time (QS13 pins it), whatever its kind.
 - A group that survives SIGKILL leaves the app `DEAD` with `group_alive` set.
   While such a zombie exists every request that reaches the head fails 500
   `unload_failed`, and the group is re-probed with signal 0 before each pop
-  until it is gone `Scripts/gpu-router.py:_reprobe`.
+  until it is gone `Scripts/gpu-router.py:_reprobe`. Each such refusal is
+  reported, rate-limited to one WARNING per app per
+  `Scripts/gpu-router.py:_SD_ZOMBIE_WARN_S` (60 s), as `sd zombie group still
+  holds the GPU: model=<app> pgid=<pgid>`, so a sticky 500 names its cause in
+  the log `Scripts/gpu-router.py:_warn_zombie` (QS17).
+
+**Finding and clearing a zombie.** The first cause is earlier in the log: `sd
+child group survived the stop ladder: model=... pgid=...`, followed on Linux by
+`sd child group survivors: ... members=<pid>:<state> ...` (at most
+`Scripts/gpu-router.py:_SD_GROUP_MEMBERS_SHOWN` members, read from `/proc`;
+nothing on macOS) `Scripts/gpu-router.py:_sd_group_members`, then `sd model
+zombie` from the send path or `sd model start failed` from a failed start, and
+from there `sd zombie group still holds the GPU` once a minute while requests
+fail. The zombie clears by itself once the signal-0 re-probe finds the group
+gone (`sd zombie group gone`). To retry the kill, `POST /v1/unload` for the app:
+a resident target, a zombie included, re-runs the ladder and answers 200 only
+once the group is confirmed gone, else 500 `unload_failed` again
+`Scripts/gpu-router.py:decide` `Scripts/gpu-router.py:_exec_unload`; `?force=1`
+puts that unload ahead of the queue. A group that survives SIGKILL repeatedly
+(a process stuck in the kernel, or outside the session) needs the operator to
+find and kill its members by the pgid the log names.
 
 **The abort matrix** ([[0035-one-gpu-several-apps]]):
 
@@ -439,7 +467,8 @@ about 768 MiB at the defaults `Scripts/gpu-router.py:_SD_DEFAULT_MAX_CONNECTIONS
 queue. The operator sizes the limits against RAM.
 
 **Children.** A child is spawned in its own session from an argv list, never a
-shell, with stdio on `DEVNULL` — the file's only `Popen`
+shell, with stdin on `DEVNULL` and stdout a pipe with stderr merged into it
+(*Child output* below) — the file's only `Popen`
 `Scripts/gpu-router.py:start`. Its environment is `PATH`, `HOME` and `LANG` plus
 the config `env`, never the router's own and never the token (D-1)
 `Scripts/gpu-router.py:_sd_child_env`. The port is the app's `child_port`, or
@@ -463,6 +492,43 @@ before its SIGKILL, and sends none once it is empty
 spawn registry at once; the shutdown sweep re-probes each remaining entry right
 before its SIGKILL, and ESRCH or EPERM drops it unsignalled
 `Scripts/gpu-router.py:kill_all`.
+
+**Child output (since `5de1f34`, ADR 0034's D-2 amended).** The child's
+stdout and stderr are one pipe, read by one daemon thread per child, named
+`sd-output-<app>`, in unit 4 `Scripts/gpu-router.py:_SdOutput`. The reader
+waits in `select` with a `Scripts/gpu-router.py:_SD_OUT_TICK_S` (50 ms) tick and
+ends on a stop flag, never only on EOF, because a grandchild in another session
+can hold the write end open after the group is dead. It always keeps draining,
+whether it logs a line or drops it, since a full pipe would block the child.
+Each line is cut at `Scripts/gpu-router.py:_SD_OUT_LINE_MAX` bytes (2048, the
+rest of the line discarded and ` [truncated]` appended), decoded as UTF-8 with
+`errors=replace`, and every C0 control (CR and ESC included), C1 control, DEL
+and U+2028/U+2029 escaped repr-style, so child text cannot end a log line or
+forge another `Scripts/gpu-router.py:_sd_out_text`. That is a host-local
+sanitizer, not the generated `_log_value`, which cuts at 80 characters. Live rows
+go out at DEBUG as `child output: app=<app> pid=<pid>: <line>` within a token
+bucket of `Scripts/gpu-router.py:_SD_OUT_LINES_PER_S` (200) lines per second and
+`Scripts/gpu-router.py:_SD_OUT_LOG_BYTES` (1 MiB) logged bytes per child over its
+life; a line over either cap is counted, and a `child output dropped: ...
+lines=<n>` DEBUG row reports the count. The last
+`Scripts/gpu-router.py:_SD_OUT_TAIL_LINES` (50) sanitized lines stay in a ring
+whatever the level, and `Scripts/gpu-router.py:dump_tail` writes them once per
+child at WARNING as `child output tail: app=<app> pid=<pid>: <line>`, after the
+reader has drained what the dead child left: `launch` dumps it for a failed or
+timed-out start, and the send path for a crash, or an sd `request_timeout`
+ladder, after a send `Scripts/gpu-router.py:_send_failed`. So the reason a
+start failed is in the log without `--debug`. `finish` sets the stop flag,
+lets the reader read at most `Scripts/gpu-router.py:_SD_OUT_FINAL_BYTES` that
+are readable now and waits at most `Scripts/gpu-router.py:_SD_OUT_JOIN_S` (1 s)
+for it; a confirmed-gone group finishes its reader, a surviving one keeps it
+draining until the `stop` that clears the group
+`Scripts/gpu-router.py:stop`. A reader thread that cannot be started stops the
+child and fails the spawn rather than run a child nobody drains. The output is
+operator-trusted text, the one deliberate carve-out from the structure-only
+logging rule (below); readiness is still never read from it. S23-S31 and
+QS17-QS19 pin it, the rows, the sanitizer, the caps, the tail, the stop-flag
+end with a grandchild holding the pipe, the `/proc` member listing and the
+zombie diagnostics `tests/test_gpu_router.py:GS_OUT`.
 
 ## Unload
 
@@ -579,7 +645,10 @@ and each hand-written stdlib override has its row in
 `tests/test_generated_region.py:HTTPFRONT_ADAPTATIONS`. Logging is structure
 only: a log line carries a routed path shape or `<unrouted>`, never a header,
 query, body, token or env value `Scripts/gpu-router.py:log_message`
-([[0011-a-truncated-payload-carries-the-first-cookie]]).
+([[0011-a-truncated-payload-carries-the-first-cookie]]). The one exception is the
+child's own output, sanitized and logged at DEBUG with its tail at WARNING
+(*Child output* above): it is text the operator's own configured program writes,
+not a client's request.
 
 ## llm-router integration
 
@@ -626,7 +695,10 @@ four image routes with canned sd-shaped JSON, records each body and its SHA-256,
 and takes behaviour flags: `--crash-on-start`, `--crash-on-start-first`,
 `--start-delay`, `--bind-fail`, `--bind-fail-first`, `--crash-after`,
 `--crash-on-marker` (the poison prompt), `--ignore-term`, `--spawn-grandchild`,
-`--hang`, `--hang-after-accept`, `--keep-generating`, `--answer-delay`,
+`--spawn-output-grandchild` (a sleeper in its own session that keeps the output
+pipe's write end), `--emit` (repeatable fixed texts on stdout or stderr: control
+bytes, a forged log line, bad UTF-8, a 7000-byte line, a flood larger than a
+pipe), `--hang`, `--hang-after-accept`, `--keep-generating`, `--answer-delay`,
 `--response-bytes`, `--ready-503-for`, `--dump-env` and `--control-file`, which
 picks one POST's behaviour, including the raw answers the relay must refuse.
 
@@ -650,8 +722,8 @@ The groups, in run order `tests/test_gpu_router.py:GROUP_ORDER`:
 | L | config and CLI refusals and defaults: the listener keys and their precedence (L33-L39), the kind and its defaults, `model_ids` and the index collisions, `ready_path` / `ready_status`, the per-kind deadline caps, `child_port`, the new keys in the repr (L40-L45), the `ready_file` / `log_file` / `debug` keys and their precedence (L46-L48), a `bind` list and a repeatable `--bind` (L49) | `tests/test_gpu_router.py:GL_CASES` |
 | R | routing and the sniffer (pure); the llm routes' tokens, caps, ids and kind check, the neutral refusal wording (R21-R23) | `tests/test_gpu_router.py:GR_CASES` |
 | D | the pure FIFO decision; the abort matrix (D23), the strict de-chunker (D24), the stream head parser (D25), the bounded stream queue (D26) | `tests/test_gpu_router.py:GD_CASES` |
-| S | spawn, readiness, the stop ladder, the group sweep, the budget; the probe path and status (S21), a fixed `child_port` and one spawn (S22) | `tests/test_gpu_router.py:GS_CASES` |
-| Q-sched | one in flight, queued and forced unloads, cancel (QS8: cancelling a running request kills nothing), the admission race | `tests/test_gpu_router.py:GQS_CASES` |
+| S | spawn, readiness, the stop ladder, the group sweep, the budget; the probe path and status (S21), a fixed `child_port` and one spawn (S22), the child's output in the log: DEBUG rows, the sanitizer and caps, the WARNING tail, a reader that ends on its stop flag, the `/proc` member listing, a surviving group recorded on `survivor` (S23-S31) | `tests/test_gpu_router.py:GS_CASES` |
+| Q-sched | one in flight, queued and forced unloads, cancel (QS8: cancelling a running request kills nothing), the admission race; the rate-limited zombie WARNING (QS17), the output tail after a crash (QS18), a failed start whose group survived left a zombie (QS19) | `tests/test_gpu_router.py:GQS_CASES` |
 | T | retries, `request_timeout`, the poison prompt, the restart budget; a squatter never sees a request (T14), the llm timeouts abort without a kill (T15, T17), shutdown mid-stream (T16) | `tests/test_gpu_router.py:GT_CASES` |
 | P | auth, routing, framing, the byte-exact relay, startup lines, the error table; the config `port` and `bind` (P39, P40), the llm routes (P41), the per-kind caps with 411 first (P42), the `anthropic-*` headers (P43), the stream head allow-list (P44), an incremental chunked stream (P45), a mid-stream EOF never replayed (P46), several listeners: every address answers (P47), one bind failure aborts startup (P48), what a `peer` listener shares and keeps (P49) | `tests/test_gpu_router.py:GP_CASES` |
 | Q-http | departed clients, the disconnect loop, the over-cap race, racing unloads; a client that leaves a stream kills nothing (QH6) | `tests/test_gpu_router.py:GQH_CASES` |
@@ -677,7 +749,8 @@ carries the measured runtime and the timeout derived from it. As history: the
 ledger read 211 when sd-router landed, the listener options moved it to 220,
 and the three stage commits to 239 (2a), 251 (2b) and 252 (stage 3, E6); the
 `ready_file`, `log_file` and `debug` config keys moved it to 255 (L46-L48), and
-several listeners on one port to 259 (L49, P47-P49). P47 and P48 bind
+several listeners on one port to 259 (L49, P47-P49), and the child output and
+zombie diagnostics (`5de1f34`) to 271 (S23-S31, QS17-QS19). P47 and P48 bind
 `127.0.0.2` only where the host can (Linux, where all of 127/8 is up); on macOS
 they exercise `127.0.0.1` alone and say so in their detail, and P48 then fails
 on the unbindable second address instead of a held port. P49 needs no second
@@ -774,8 +847,20 @@ additions.
 - **A long chat body needs the prefix.** The body sniffer reads only the first
   `Scripts/gpu-router.py:_SD_SNIFF_LIMIT` bytes and refuses a longer JSON body
   without the `/m/<x>/` prefix; llm-router always sends the prefix.
-- **An inferNO-style engine loads silently.** Nothing reports progress while the
-  probe polls; the `[serve] Ready` log line is not read.
+- **The child's output is logged, never read for readiness.** What the engine
+  prints while the probe polls reaches the log at DEBUG (and its tail at WARNING
+  on a failed start), but the `[serve] Ready` line, or any other, is never
+  parsed; readiness is the probe alone.
+- **A blocking log sink blocks the child.** The reader logs from its own
+  thread, so a sink that blocks stalls the reader and, once the pipe is full,
+  the child's next write. There is no second queue thread per child, by
+  decision `Scripts/gpu-router.py:_SdOutput`.
+- **The reader lingers while a group survives.** A group that survives the
+  ladder keeps its reader draining (the survivors may still write) until the
+  `stop` that clears it, or EOF.
+- **The survivor member listing is Linux-only.** It reads `/proc`; on macOS
+  the `survived the stop ladder` WARNING names only the pgid
+  `Scripts/gpu-router.py:_sd_group_members`.
 - **A force unload leaves queued work to cold-start again (D-3)**, and repeated
   forces on the resident model each cost a cold start.
 - **A poison prompt can burn the shared restart budget.** A prompt that kills

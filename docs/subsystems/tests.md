@@ -384,6 +384,9 @@ Making purity's LSP backends opt-in (`8717044`,
 [[0038-the-lsp-backends-are-opt-in]]) moved `purity_lsp` 155 to 187 (group K,
 32 cases), and the smoke row and both purity suites now launch with
 `--clangd --luals` `tests/run.py:SUITES`.
+The child's output in gpu-router's log and the zombie after a failed start
+(`5de1f34`) moved `gpu_router` 259 to 271 (S 22 to 31, Q-sched 16 to 19)
+`tests/run.py:SUITES`.
 These are a snapshot copied for the reader, not a second authority: the
 table wins wherever the two disagree, and the fleet total is computed by the
 run, never typed `tests/run.py:main`.
