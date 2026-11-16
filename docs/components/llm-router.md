@@ -11,7 +11,7 @@ sources:
   - tests/test_llm_router.py
   - tests/files/llm_router/README.md
 verified:
-  commit: bc22093
+  commit: 9d8cfa7
   date: 2026-11-16
 links:
   - 0028-route-by-model-translate-at-the-edge
@@ -1311,9 +1311,10 @@ from a [[gpu-router]] llm app `Scripts/llm-router.py:RawllmAdapter`.
 **Inbound.** `POST /v1/chat/completions`, `/v1/embeddings` and `/v1/rerank` are
 the raw endpoints `Scripts/llm-router.py:_RT_RAW_ENDPOINTS`: bearer first, then
 `Content-Type: application/json`, then the framing (any `Transfer-Encoding` is
-411, before any length check), then the endpoint's body cap — 16 MiB for chat,
-4 MiB for embeddings and rerank, each `min(cap, --body-limit)`, checked before a
-body byte is read `Scripts/llm-router.py:_RT_RAW_BODY_CAPS`. The body is parsed
+411, before any length check), then the endpoint's body cap — 32 MiB for chat
+(16 MiB until `9d8cfa7`), 4 MiB for embeddings and rerank, each
+`min(cap, --body-limit)`, checked before a body byte is read
+`Scripts/llm-router.py:_RT_RAW_BODY_CAPS`. The body is parsed
 by the strict loader (a repeated key, `NaN` / `Infinity`, depth and a long
 integer refused) for VALIDATION only and never rebuilt: it must be an object
 whose `model` (1-256 characters) names a configured route by exact name —
@@ -1323,7 +1324,8 @@ takes `chat`, `/v1/embeddings` `embedding`, `/v1/rerank` `rerank`; a mismatch is
 absent or a boolean and `true` on chat only `Scripts/llm-router.py:_rt_parse_raw_inbound`.
 `/v1/messages` to a `rawllm` route enters through the Anthropic parser, whose
 validation only reads the body, and is relayed as the client's bytes too; it
-keeps the plain `--body-limit`. On both paths a key that only a case-insensitive
+keeps the plain `--body-limit` (32 MiB by default, so chat and messages now share
+one ceiling). On both paths a key that only a case-insensitive
 reader would take for `model` or `stream` (`"Model"`, `"STREAM"`) is refused 400,
 because the router reads the exact lower-case keys and the upstream may not
 `Scripts/llm-router.py:_rt_refuse_case_variants`
@@ -1346,6 +1348,21 @@ client's bytes; the credential is exactly `Authorization: Bearer <api_key>` or
 none; the only client headers that travel are `anthropic-version` and
 `anthropic-beta` on `/v1/messages`, each once, 1-256 printable ASCII
 characters. An upstream 3xx is never followed.
+
+**An upstream that refuses on the head.** A gpu-router in front answers an
+oversized body `413 body_too_large` from its head alone and closes while the
+router is still writing the body, so the write ends in `BrokenPipeError` or
+`ConnectionResetError`. The one sender then reads the response head that is
+already waiting: when it is a 413, the client gets the router's own 413 —
+`request_too_large` with the fixed text "the request body is over the upstream
+body limit", in the endpoint's shape (the Anthropic error on `/v1/messages`, the
+OpenAI envelope elsewhere), no byte of the upstream's head or body kept — and
+the `upstream failed:` line says `reason='upstream_413'`; no readable head, or
+any other status, re-raises the broken pipe and stays the 502 it always was.
+Nothing is retried `Scripts/llm-router.py:_rt_send`. The trigger, on
+2026-11-16: a 23.5 MB `/v1/messages` (images embedded by an ai-soul bug, fixed
+on their side) was refused 413 by gpu-router, and the client saw `status=502
+BrokenPipeError` and "model server unreachable" instead of a size refusal.
 
 **The answer.** Nothing of the upstream's head is copied but a digit-only
 `Retry-After` on a 429 `Scripts/llm-router.py:_relay_raw`:
@@ -1535,7 +1552,7 @@ one WARNING line on the default sink (no `--debug` needed):
 answered (a stream that failed after its 200 head: 200, the failure travelling in-band);
 `reason` is a fixed category (`stalled`, `stream_ended_early`, `line_too_long`,
 `upstream_error_event`, `upstream_status`, `stream_failed`, `login_required`,
-`timeout`, `busy`, `upstream_error`), the type name of the exception that cut the
+`timeout`, `busy`, `upstream_error`, `upstream_413`), the type name of the exception that cut the
 connection (`RemoteDisconnected`, `SSLEOFError`, ...), or, when the translator
 closed the stream with its own `fail()` on an upstream line (a tool call or a
 chunk it refused), `translator_refused: ` followed by that refusal's fixed
@@ -1639,8 +1656,8 @@ line, with a mistral translator's refusal of a non-JSON chunk named in
 `tests/test_llm_router.py:group_u`. K-U run before I and
 J, because I sweeps every log the run collected and J compares start-of-run
 snapshots `tests/test_llm_router.py:GROUP_ORDER`. Its case count is declared
-once, per group, in `tests/run.py:SUITES` (496 typed cases when this page was
-last verified, group M 33 of them), and checked against the run; the
+once, per group, in `tests/run.py:SUITES` (497 typed cases when this page was
+last verified, group M 33 and group V 16 of them), and checked against the run; the
 per-group detail is the suite's row in [[tests]], and the red-first record per
 group is ADR 0028's, its addendum included. The config twins of the flags are
 A51 (all eleven keys applied, absent keys giving the defaults), A52 (a flag
@@ -1826,7 +1843,13 @@ upstream errors, a 3xx never followed, the status map and a digit-only
 listing and the `count_tokens` refusal (V13); no secret or payload in a log
 (V14); and a case-variant `model` or `stream` key on `/v1/messages` to a
 `rawllm` route refused 400 with every other kind unchanged (V15, the fix of
-security finding F1). J42 and J44 also pin the raw hooks and `RAW_PATHS`. The
+security finding F1); and an upstream that answers 413 on the head and closes
+while a 12 MiB body is still being written is the client's 413 on chat and
+messages, with `reason='upstream_413'` in the log, while an early 500 or an
+early close with no answer stays the 502 and a plain 413 after the whole body
+is relayed (V16, from the 2026-11-16 trigger; the scripted peer's `head_only`
+switch reads the request head only) `tests/test_llm_router.py:gv_v16`
+`tests/test_llm_router.py:ScriptedPeer`. J42 and J44 also pin the raw hooks and `RAW_PATHS`. The
 end-to-end chain through a live gpu-router to its stub LLM app is case E6 of
 the `gpu_router` suite ([[gpu-router]]).
 
@@ -2020,9 +2043,13 @@ read before relying on one of them. In brief:
   in front of one needs an `idle_timeout` above the longest queue wait it should
   survive. Whether the upstream stops its work on a closed connection is the
   upstream's own behaviour.
-- **The raw endpoints parse before the slot.** Up to 16 MiB of JSON is parsed
+- **An early upstream 413 is best effort.** The 413 is recovered only when the
+  upstream's head is still readable after the broken pipe. This was found and
+  measured on macOS; on Linux a reset can discard an unread response head, so
+  some early 413s may still end as the 502 `Scripts/llm-router.py:_rt_send`.
+- **The raw endpoints parse before the slot.** Up to 32 MiB of JSON is parsed
   before `--max-llm-requests` is consulted, the same exposure class as the
-  existing body limit. The caps (16 MiB chat, 4 MiB embeddings and rerank) and
+  existing body limit. The caps (32 MiB chat, 4 MiB embeddings and rerank) and
   the in-flight default 8 are the router's numbers, not the owner's or the
   upstream's; they can cut a large embedding batch or a base64-image chat.
 - **A stalled resolve is given up, not interrupted.** `getaddrinfo` cannot be

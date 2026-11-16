@@ -452,3 +452,13 @@ The readiness section declined the `[serve] Ready` log line partly because readi
 **Declared limits.** The body, `model` included, is forwarded verbatim, so the serving engine must accept the model id the client wrote for the addressed app. `GET /v1/models` does not advertise `embed_capable` or which app may answer for which. Every retargeted request logs one INFO line, so a client that calls on every turn logs one per call.
 
 **Tests.** L50 (the key), D27 (the pure retarget table) and QS20-QS22 (served by the resident app with no spawn, no stop and the body byte-exact; an addressed resident, an empty GPU and a non-capable app as before; a non-capable resident swapped and a chat path never retargeted) moved `gpu_router` 271 to 276 `tests/run.py:SUITES`. The component page is [[gpu-router]].
+
+## Addendum (2026-11-16): The chat kind body cap is raised to 32 MiB by the owner (9d8cfa7)
+
+**Trigger, observed.** On 2026-11-16 at 12:45:18 a 23.5 MB `/v1/messages` (images embedded by an ai-soul bug, since fixed on their side) was refused `413 body_too_large` by gpu-router under the 16 MiB chat cap, one of the owner-unconfirmed defaults this ADR lists. Through llm-router it reached the client as a 502 and "model server unreachable"; that half is fixed in llm-router, see ADR 0028's addendum of this date.
+
+**Decision (owner, 2026-11-16).** The `chat` kind token's cap, which covers `/v1/chat/completions` and `/v1/messages`, is raised from 16 MiB to 32 MiB `Scripts/gpu-router.py:_SD_KIND_BODY_CAPS`. The effective cap stays `min(cap, body_limit)` `Scripts/gpu-router.py:_sd_body_cap`, so at the default `body_limit` of 32 MiB the chat ceiling is 32 MiB. The `embed` cap (embeddings and rerank) stays 4 MiB and owner-unconfirmed; the image tokens keep the plain `body_limit`. llm-router's `rawllm` chat cap moved to 32 MiB in the same commit, so the two routers agree.
+
+**Consequence.** A buffered chat ticket may now hold up to 32 MiB, so the queue's memory worst case (`max_connections` buffered bodies, each at most its route's cap) doubles for chat bodies; it was already bounded by `body_limit` for the image routes.
+
+**Tests.** R21 now expects 32 MiB for chat; P42 gained a second block on the real table at the default `body_limit`: a 20 MiB chat body (the production size class) relayed, chat 32 MiB + 1 and embed 4 MiB + 1 refused 413 from the head alone. No case was added; `gpu_router` stays at 276 `tests/run.py:SUITES`. The component page is [[gpu-router]].

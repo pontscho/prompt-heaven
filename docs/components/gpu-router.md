@@ -10,7 +10,7 @@ sources:
   - tests/files/gpu_router/tf_stub_sd.py
   - tests/files/gpu_router/tf_stub_llm.py
 verified:
-  commit: 8e8638c
+  commit: 9d8cfa7
   date: 2026-11-16
 links:
   - llm-router
@@ -244,8 +244,11 @@ model-management routes are not proxied.
    the app resolution and the kind check live in the pipeline.
 4. Header-only framing: any `Transfer-Encoding` is 411, so is anything but
    exactly one decimal `Content-Length`; over the route's body cap is 413 —
-   `min(cap, body_limit)`, with 16 MiB for the `chat` token and 4 MiB for
-   `embed`, and the plain `body_limit` for the image tokens
+   `min(cap, body_limit)`, with 32 MiB for the `chat` token (raised from 16 MiB
+   by the owner on 2026-11-16, after a 23.5 MB `/v1/messages` was refused 413;
+   at the default `body_limit` of 32 MiB that is also the chat ceiling) and
+   4 MiB for `embed` (still owner-unconfirmed), and the plain `body_limit` for
+   the image tokens
    `Scripts/gpu-router.py:_SD_KIND_BODY_CAPS` `Scripts/gpu-router.py:_sd_body_cap`;
    a Content-Type holding any control character (an obs-fold CRLF, a tab and DEL
    included) is 400 `invalid_request` on every path, the `/m/<x>/` prefix
@@ -698,7 +701,13 @@ error naming `backends.<n>.auth_header` `Scripts/llm-router.py:_rt_cfg_backend`.
   such requests are in flight (`--max-llm-requests`), since gpu-router queues
   without a wait limit; and a rawllm backend in front of gpu-router needs an
   `idle_timeout` above the longest queue wait it should survive, because a
-  queued request sees no byte. The details are [[llm-router]]'s *Raw LLM relay*.
+  queued request sees no byte. A body over the chat cap is refused 413
+  `body_too_large` from the head alone and the connection closed while
+  llm-router is still writing; llm-router reads that head after the broken pipe
+  and answers its own 413 `request_too_large` rather than a 502 (best effort:
+  on Linux a reset can discard the unread head)
+  `Scripts/llm-router.py:_rt_send`. The details are [[llm-router]]'s *Raw LLM
+  relay*.
 
 The end-to-end group drives both: an `sdcpp` round trip, a swap, a forced unload
 and a wrong key (E1-E4), chat, image and embedding requests interleaved across
@@ -748,7 +757,7 @@ The groups, in run order `tests/test_gpu_router.py:GROUP_ORDER`:
 | S | spawn, readiness, the stop ladder, the group sweep, the budget; the probe path and status (S21), a fixed `child_port` and one spawn (S22), the child's output in the log: DEBUG rows, the sanitizer and caps, the WARNING tail, a reader that ends on its stop flag, the `/proc` member listing, a surviving group recorded on `survivor` (S23-S31) | `tests/test_gpu_router.py:GS_CASES` |
 | Q-sched | one in flight, queued and forced unloads, cancel (QS8: cancelling a running request kills nothing), the admission race; the rate-limited zombie WARNING (QS17), the output tail after a crash (QS18), a failed start whose group survived left a zombie (QS19); embeddings and rerank served by the resident embed_capable app with no spawn, no stop and the body byte-exact (QS20), an addressed resident, an empty GPU and a non-capable addressed app as before (QS21), a non-capable resident swapped out and a chat path never retargeted (QS22) | `tests/test_gpu_router.py:GQS_CASES` |
 | T | retries, `request_timeout`, the poison prompt, the restart budget; a squatter never sees a request (T14), the llm timeouts abort without a kill (T15, T17), shutdown mid-stream (T16) | `tests/test_gpu_router.py:GT_CASES` |
-| P | auth, routing, framing, the byte-exact relay, startup lines, the error table; the config `port` and `bind` (P39, P40), the llm routes (P41), the per-kind caps with 411 first (P42), the `anthropic-*` headers (P43), the stream head allow-list (P44), an incremental chunked stream (P45), a mid-stream EOF never replayed (P46), several listeners: every address answers (P47), one bind failure aborts startup (P48), what a `peer` listener shares and keeps (P49) | `tests/test_gpu_router.py:GP_CASES` |
+| P | auth, routing, framing, the byte-exact relay, startup lines, the error table; the config `port` and `bind` (P39, P40), the llm routes (P41), the per-kind caps with 411 first, and the real table at the default `body_limit`: a 20 MiB chat body relayed, chat 32 MiB + 1 and embed 4 MiB + 1 refused 413 unread (P42), the `anthropic-*` headers (P43), the stream head allow-list (P44), an incremental chunked stream (P45), a mid-stream EOF never replayed (P46), several listeners: every address answers (P47), one bind failure aborts startup (P48), what a `peer` listener shares and keeps (P49) | `tests/test_gpu_router.py:GP_CASES` |
 | Q-http | departed clients, the disconnect loop, the over-cap race, racing unloads; a client that leaves a stream kills nothing (QH6) | `tests/test_gpu_router.py:GQH_CASES` |
 | U | `/v1/unload`, `?force=1`, `/v1/models`; every id listed (U19), unload through any id (U20), a force mid-stream (U21) | `tests/test_gpu_router.py:GU_CASES` |
 | G | the injected front policy (ADR 0029) | `tests/test_gpu_router.py:GG_CASES` |
@@ -775,7 +784,8 @@ and the three stage commits to 239 (2a), 251 (2b) and 252 (stage 3, E6); the
 several listeners on one port to 259 (L49, P47-P49), and the child output and
 zombie diagnostics (`5de1f34`) to 271 (S23-S31, QS17-QS19), and the opt-in
 `embed_capable` key (`8e8638c`) to 276 (L 50, D 27, Q-sched 22: L50, D27,
-QS20-QS22). P47 and P48 bind
+QS20-QS22). The chat cap raise (`9d8cfa7`) left it at 276: it widened P42 by a
+second block on the real table and R21's expected caps, adding no case. P47 and P48 bind
 `127.0.0.2` only where the host can (Linux, where all of 127/8 is up); on macOS
 they exercise `127.0.0.1` alone and say so in their detail, and P48 then fails
 on the unbindable second address instead of a held port. P49 needs no second

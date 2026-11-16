@@ -1548,3 +1548,28 @@ A client of an image route could not tell which `/v1/images/edits` body form the
 ### Tests
 
 U4 (new): `edit_formats` read from the adapter flags in-process for codex, openai and sdcpp, `[]` for a kind class with both flags off, the key order after `sizes` and `default_size`, and absent on a chat route. U2 now expects `edit_formats` at the end of every image entry under each `?modality` filter; U3 checks it over HTTP on the list and the single-model path; Q9 expects it on the openai image entry. The llm_router suite moved from 495 to 496 cases; the live count is declared once in `tests/run.py:SUITES`.
+
+## Addendum (2026-11-16): An upstream 413 on a broken pipe is the client's 413; the rawllm chat cap is 32 MiB (9d8cfa7)
+
+**Trigger, observed.** On 2026-11-16 at 12:45:18 a 23.5 MB `/v1/messages` (images embedded by an ai-soul bug, since fixed on their side) went through a `rawllm` route to a gpu-router, which refused it `413 body_too_large` from the head alone and closed the connection. llm-router was still writing the body, the write ended in `BrokenPipeError`, its log showed `status=502` with that exception as the reason, and the client reported "model server unreachable" - a size refusal had become an outage.
+
+### Decisions
+
+- When the request write in the one sender ends in `BrokenPipeError` or `ConnectionResetError`, the router reads the one response head that may already be waiting. If it is a 413, the client gets the router's own 413: an `UpstreamError` of code `request_too_large` with the fixed message "the request body is over the upstream body limit", in the endpoint's shape (the Anthropic error on `/v1/messages`, the OpenAI envelope on the raw endpoints) `Scripts/llm-router.py:_rt_send`. None of the upstream's headers or body is read or kept, so no upstream text reaches the client.
+- No readable head, or any status other than 413, re-raises the original error: the same 502 as before. Nothing is retried.
+- The structure-only `upstream failed:` line carries `reason='upstream_413'` (the error's `cause`), never a body or a key.
+- The `rawllm` `/v1/chat/completions` cap is raised from 16 MiB to 32 MiB `Scripts/llm-router.py:_RT_RAW_BODY_CAPS`, still `min(cap, --body-limit)`. `/v1/messages` already had the plain `--body-limit`, 32 MiB by default, so both chat families now share one ceiling; embeddings and rerank stay at 4 MiB.
+
+### Alternatives rejected
+
+- *Retrying the request.* The upstream has refused this body on its size; a resend fails the same way and doubles the bytes sent.
+- *Relaying the upstream's 413 head and body.* The raw relay copies no upstream header, and the body of an early refusal is upstream text; the router's fixed message carries the one fact the client needs.
+- *Reading the body only after it is fully sent.* That is the existing path for a plain 413 and it stays; it cannot help when the upstream closes before the write completes.
+
+### Declared limit
+
+Best effort. The 413 is recovered only when the head is still readable after the broken pipe; this was found and measured on macOS. On Linux a reset can discard an unread response head, so some early 413s may still end as the 502.
+
+### Tests
+
+V16 (new): an upstream in the scripted peer's new `head_only` mode answers 413 on the head and closes while a 12 MiB body is being written - the client's 413 on chat and messages with the rule in the message and no upstream text; an early 500 and an early close with no answer stay the 502; a plain 413 after the whole body is relayed as 413; the log says `reason='upstream_413'` and carries no body or key; a clean request afterwards answers 200 `tests/test_llm_router.py:gv_v16`. V3 now expects the 32 MiB chat cap. The llm_router suite moved from 496 to 497 cases; the live count is declared once in `tests/run.py:SUITES`. The component page is [[llm-router]].
