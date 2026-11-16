@@ -37,7 +37,8 @@ GET /v1/models/{id} list the config's route keys (with an optional route
 display_name and the route's optional advertised max_input_tokens / max_tokens,
 plus context_window) in the Anthropic model-list shape, never contacting a backend; each entry
 also carries the OpenAI model fields (object, created, owned_by) and the route's modality; an image
-route's optional `sizes` and `default_size` are advertised there too, never enforced or injected.
+route's optional `sizes` and `default_size` are advertised there too, never enforced or injected,
+followed by its `edit_formats` (["json"], ["multipart"] or both, read from the backend kind's adapter flags).
 Every answer the client sees is Anthropic-shaped: a JSON body, an SSE stream
 that always closes its envelope, or the {"type":"error","error":{...}}
 envelope -- except on the image endpoints. A route with `"modality": "image"` (an openai
@@ -2028,7 +2029,18 @@ def _rt_route_named(cfg: RouterConfig, model: str) -> RouteSpec:
     return route
 
 
-def _rt_model_entry(route: RouteSpec, created_at: str, created_epoch: int) -> dict:
+def _rt_edit_formats(adapter_cls: Any) -> List[str]:
+    """The /v1/images/edits body formats a kind accepts, read from its adapter's flags and never
+    from a kind name: "json" first when IMAGE_EDIT_JSON, then "multipart" when IMAGE_EDIT_MULTIPART."""
+    formats: List[str] = []
+    if adapter_cls.IMAGE_EDIT_JSON:
+        formats.append("json")
+    if adapter_cls.IMAGE_EDIT_MULTIPART:
+        formats.append("multipart")
+    return formats
+
+
+def _rt_model_entry(route: RouteSpec, created_at: str, created_epoch: int, adapter_cls: Any) -> dict:
     """One model object for a named route: the route key is the id, display_name
     falls back to it. *created_at* (ISO) and *created_epoch* (whole seconds) are the
     router's start time (the front owns the clock; this unit never reads one). The
@@ -2036,7 +2048,9 @@ def _rt_model_entry(route: RouteSpec, created_at: str, created_epoch: int) -> di
     backend name -- and the route's modality), then the route's token limits, null when
     unset: Anthropic's max_input_tokens and max_tokens, plus the non-standard
     context_window (= max_input_tokens) some clients read. An image route's sizes (a list) and
-    default_size follow, each only when configured."""
+    default_size follow, each only when configured, then its edit_formats (a list: "json" and/or
+    "multipart", from the backend kind's adapter class *adapter_cls*; [] when it takes neither). A
+    route of any other modality has no edit_formats."""
     entry = {"type": "model", "id": route.name, "display_name": route.display_name or route.name,
              "created_at": created_at, "object": "model", "created": created_epoch,
              "owned_by": "llm-router", "modality": route.modality,
@@ -2046,6 +2060,8 @@ def _rt_model_entry(route: RouteSpec, created_at: str, created_epoch: int) -> di
         entry["sizes"] = list(route.sizes)
     if route.default_size is not None:
         entry["default_size"] = route.default_size
+    if route.modality == "image":
+        entry["edit_formats"] = _rt_edit_formats(adapter_cls)
     return entry
 
 
@@ -2053,7 +2069,8 @@ def _rt_models_list(cfg: RouterConfig, created_at: str, created_epoch: int, moda
     """GET /v1/models: one entry per route key in config order, never the default
     (it has no name); *modality* ("chat" | "image" | "all") keeps only that kind of route.
     No pagination: always the whole (filtered) list, has_more false."""
-    data = [_rt_model_entry(route, created_at, created_epoch) for route in cfg.routes.values()
+    data = [_rt_model_entry(route, created_at, created_epoch, KIND_CLASSES[cfg.backends[route.backend].kind])
+            for route in cfg.routes.values()
             if modality == "all" or route.modality == modality]
     return {"data": data, "has_more": False,
             "first_id": data[0]["id"] if data else None,
@@ -10190,7 +10207,8 @@ class _RouterHandler(BaseHTTPRequestHandler):
         if route is None:
             self._send_json(404, _rt_error_body("not_found_error", "model not found"))
             return
-        self._send_json(200, _rt_model_entry(route, self.server.started_at, self.server.started_epoch))
+        self._send_json(200, _rt_model_entry(route, self.server.started_at, self.server.started_epoch,
+                                             KIND_CLASSES[cfg.backends[route.backend].kind]))
 
     def do_GET(self) -> None:  # noqa: N802 -- stdlib name
         # No `req` summary line: only a POST gets one (deviation 8).
@@ -10390,6 +10408,8 @@ example config (chmod 600; token: python3 -c 'import secrets;print(secrets.token
   An image route's optional "sizes" (a list of up to 32 unique strings, each "auto" or WIDTHxHEIGHT
   such as "1024x1024") and "default_size" (one such string, in sizes when both are set) are only
   advertised by GET /v1/models, never enforced and never added to a request; a chat route refuses them.
+  GET /v1/models also gives every image route "edit_formats", the /v1/images/edits body formats its
+  backend kind takes ("json", "multipart", or both), read from the kind and not configurable.
   A rawllm route may also be "embedding" (served by /v1/embeddings only) or "rerank" (/v1/rerank
   only); /v1/chat/completions and /v1/messages serve "chat" routes only.
   A route's optional "modality" ("chat", the default, or "image"): an image route is served by

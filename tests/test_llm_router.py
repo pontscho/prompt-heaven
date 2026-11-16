@@ -19398,9 +19398,13 @@ def group_q(suite, fixture_root):
 
                 def check_entry(label, entry, key, modality):
                     out = []
-                    if not isinstance(entry, dict) or list(entry) != entry_keys:
+                    # an image route (openai kind here) ends with edit_formats; a chat route never has it
+                    keys_want = entry_keys + (["edit_formats"] if modality == "image" else [])
+                    if not isinstance(entry, dict) or list(entry) != keys_want:
                         return ["%s: keys %r, expected %r" % (label, list(entry) if isinstance(entry, dict) else entry,
-                                                              entry_keys)]
+                                                              keys_want)]
+                    if modality == "image" and entry["edit_formats"] != ["json", "multipart"]:
+                        out.append("%s: edit_formats %r, expected ['json', 'multipart']" % (label, entry["edit_formats"]))
                     if entry["id"] != key or entry["type"] != "model" or entry["object"] != "model":
                         out.append("%s: type/id/object %r/%r/%r" % (label, entry["type"], entry["id"], entry["object"]))
                     if entry["owned_by"] != "llm-router":
@@ -22530,8 +22534,9 @@ GU_CASES = (
     "sizes config",                      # U1
     "models entry",                      # U2
     "declarative only, bodies intact",   # U3
+    "edit formats",                      # U4
 )
-GU_IDS = ("U1", "U2", "U3")
+GU_IDS = ("U1", "U2", "U3", "U4")
 GU_KEY = "tf-u-img"
 GU_SIZES = ["1024x1024", "1536x1024", "auto"]
 GU_BAD_SIZE = "tf-bad-size"
@@ -22651,6 +22656,7 @@ def gu_u2(fixture_root, mod):
             "max_input_tokens", "max_tokens", "context_window"]
     want = {"tf-u-both": (GU_SIZES, "1024x1024"), "tf-u-only-sizes": (["512x512"], None),
             "tf-u-only-default": (None, "auto"), "tf-u-plain": (None, None), "tf-u-chat": (None, None)}
+    # edit_formats rides every image route after default_size (U4 checks its value); a chat route has none.
     for query, ids in (("all", list(want)), ("image", [k for k in want if k != "tf-u-chat"]),
                        ("chat", ["tf-u-chat"])):
         listing = mod._rt_models_list(cfg, "2026-01-01T00:00:00Z", 1767225600, query)
@@ -22660,6 +22666,8 @@ def gu_u2(fixture_root, mod):
         for entry in listing["data"]:
             sizes, default = want[entry["id"]]
             expect = base + (["sizes"] if sizes is not None else []) + (["default_size"] if default is not None else [])
+            if entry["modality"] == "image":
+                expect = expect + ["edit_formats"]
             if list(entry) != expect:
                 problems.append("%s [%s]: keys %r, expected %r" % (query, entry["id"], list(entry), expect))
                 continue
@@ -22672,8 +22680,55 @@ def gu_u2(fixture_root, mod):
         except (TypeError, ValueError):
             problems.append("modality %s: the listing is not JSON-serialisable" % query)
     return problems, ["entries     : sizes (list) and default_size (string) after context_window, only when "
-                      "configured",
+                      "configured, then edit_formats on image routes",
                       "filter      : ?modality=all|image|chat keeps the same entries"]
+
+
+def gu_u4(fixture_root, mod):
+    """U4: an image route's entry carries edit_formats, derived from the adapter's IMAGE_EDIT_JSON and
+    IMAGE_EDIT_MULTIPART flags (json first): codex ["json"], openai ["json", "multipart"], sdcpp
+    ["multipart"], a kind with neither []; a chat route never carries the key."""
+    if mod is None or not hasattr(mod, "load_config") or not hasattr(mod, "_rt_models_list"):
+        return ["cannot import the router (load_config, _rt_models_list)"], []
+    box = new_sandbox(fixture_root, "u4")
+    cfg_obj = {"auth_token": TF_ROUTER_TOKEN, "backends": gu_backends(),
+               "routes": {"tf-u4-cx": {"backend": "cx", "model": "tf-u4-cx", "modality": "image"},
+                          "tf-u4-oa": {"backend": "oa", "model": "tf-u4-oa", "modality": "image"},
+                          "tf-u4-sd": {"backend": "sd", "model": "tf-u4-sd", "modality": "image",
+                                       "sizes": ["512x512"], "default_size": "512x512"},
+                          "tf-u4-chat": {"backend": "oa", "model": "gpt-5"}}}
+    cfg, problems = ga_accepted(mod, write_config(box, cfg_obj, filename="u4.json"), "the U4 config")
+    if cfg is None:
+        return problems, []
+    want = {"tf-u4-cx": ["json"], "tf-u4-oa": ["json", "multipart"], "tf-u4-sd": ["multipart"], "tf-u4-chat": None}
+    stamp = ("2026-01-01T00:00:00Z", 1767225600)
+
+    def check(label, entry):
+        got = entry.get("edit_formats", "<absent>")
+        expected = want[entry["id"]]
+        if expected is None:
+            if "edit_formats" in entry:
+                problems.append("%s [%s]: a chat route carries edit_formats %r" % (label, entry["id"], got))
+        elif got != expected:
+            problems.append("%s [%s]: edit_formats %r, expected %r" % (label, entry["id"], got, expected))
+
+    for entry in mod._rt_models_list(cfg, *stamp, "all")["data"]:
+        check("list", entry)
+    keys = [k for k in mod._rt_models_list(cfg, *stamp, "all")["data"][2]]
+    if keys[-3:] != ["sizes", "default_size", "edit_formats"]:
+        problems.append("tf-u4-sd: key order ends %r, expected sizes, default_size, edit_formats" % (keys[-3:],))
+    # A kind with neither flag: a copy of the openai adapter class with both flags off, swapped in for the call.
+    original = mod.KIND_CLASSES["openai"]
+    bare = type("BareOpenAI", (original,), {"IMAGE_EDIT_JSON": False, "IMAGE_EDIT_MULTIPART": False})
+    mod.KIND_CLASSES["openai"] = bare
+    try:
+        for entry in mod._rt_models_list(cfg, *stamp, "image")["data"]:
+            if entry["id"] == "tf-u4-oa" and entry.get("edit_formats") != []:
+                problems.append("neither flag: edit_formats %r, expected []" % (entry.get("edit_formats"),))
+    finally:
+        mod.KIND_CLASSES["openai"] = original
+    return problems, ["edit_formats: codex [json], openai [json, multipart], sdcpp [multipart], neither flag [], "
+                      "absent on a chat route, after default_size"]
 
 
 def gu_u3(ctx):
@@ -22704,6 +22759,13 @@ def gu_u3(ctx):
     problems += bad
     if entry is not None and (entry.get("sizes") != GU_SIZES or entry.get("default_size") != "1024x1024"):
         problems.append("GET /v1/models/{id}: sizes/default_size missing")
+    if entry is not None and entry.get("edit_formats") != ["json", "multipart"]:
+        problems.append("GET /v1/models/{id}: edit_formats %r, expected ['json', 'multipart'] (openai kind)"
+                        % (entry.get("edit_formats"),))
+    if obj is not None:
+        listed = next((e for e in obj["data"] if e.get("id") == GU_KEY), None)
+        if listed is None or listed.get("edit_formats") != ["json", "multipart"]:
+            problems.append("GET /v1/models: edit_formats missing on the image entry")
     return problems, ["relay       : a size outside sizes and a body without size reach the peer byte-identical",
                       "listing     : GET /v1/models and /v1/models/{id} advertise sizes and default_size"]
 
@@ -22720,7 +22782,7 @@ def group_u(suite, fixture_root):
     peer = ScriptedPeer(script=gq_script_default)
     proc = None
     try:
-        for cid, fn in zip(GU_CASES[:2], (gu_u1, gu_u2)):
+        for cid, fn in ((GU_CASES[0], gu_u1), (GU_CASES[1], gu_u2), (GU_CASES[3], gu_u4)):
             try:
                 results[cid] = fn(fixture_root, mod)
             except Exception as exc:  # noqa: BLE001 -- a broken case fails, never aborts the group
