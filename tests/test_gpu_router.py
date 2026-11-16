@@ -655,6 +655,7 @@ GL_CASES = (
     "L47 process key types refused",
     "L48 CLI beats config (process keys)",
     "L49 bind list, repeatable --bind",
+    "L50 embed_capable app key",
 )
 
 L_NAMES_CONFIG = ("ConfigError", "ModelSpec", "Settings", "parse_config", "load_config",
@@ -1805,9 +1806,54 @@ def l49(mod, sandbox):
                       "address; duplicates and an ephemeral port with several addresses refused"]
 
 
+def l50(mod, sandbox):
+    """`embed_capable`: an optional real boolean on an llm app (default false); refused on an sd
+    app and for any non-bool; listed in the unknown-key refusal; shown in the repr; round trip."""
+    problems = []
+    found, settings = _l_accepted(mod, "plain llm app", *_l_parse(mod, _l_llm_doc(sandbox)))
+    problems += found
+    if settings is not None:
+        problems += _l_same("llm default embed_capable", getattr(settings.models["q"], "embed_capable", "<absent>"),
+                            False)
+    found, settings = _l_accepted(mod, "plain sd app", *_l_parse(mod, _l_doc(sandbox)))
+    problems += found
+    if settings is not None:
+        problems += _l_same("sd default embed_capable", getattr(settings.models["m1"], "embed_capable", "<absent>"),
+                            False)
+    for want in (True, False):
+        found, settings = _l_accepted(mod, "embed_capable=%r" % want,
+                                      *_l_parse(mod, _l_llm_doc(sandbox, embed_capable=want)))
+        problems += found
+        if settings is not None:
+            problems += _l_same("round trip embed_capable=%r" % want,
+                                getattr(settings.models["q"], "embed_capable", "<absent>"), want)
+    for bad in (1, 0, "true", "", None, [], {}, 1.0):
+        problems += _l_refused(mod, "embed_capable=%r" % (bad,),
+                               *_l_parse(mod, _l_llm_doc(sandbox, embed_capable=bad)),
+                               needles=("embed_capable",), absent=(TF_TOKEN,))
+    for value in (True, False):
+        problems += _l_refused(mod, "embed_capable=%r on an sd app" % value,
+                               *_l_parse(mod, _l_doc(sandbox, embed_capable=value)),
+                               needles=("embed_capable", "llm"), absent=(TF_TOKEN,))
+    problems += _l_refused(mod, "unknown key lists embed_capable",
+                           *_l_parse(mod, _l_llm_doc(sandbox, tf_unknown_model=L_UNKNOWN_VALUE)),
+                           needles=("tf_unknown_model", "embed_capable"), absent=(L_UNKNOWN_VALUE, TF_TOKEN))
+    doc = _l_two_apps(sandbox, {}, {"embed_capable": True})
+    found, settings = _l_accepted(mod, "sd and llm side by side", *_l_parse(mod, doc))
+    problems += found
+    if settings is not None:
+        problems += _l_same("sd app beside a capable llm app",
+                            getattr(settings.models["a"], "embed_capable", "<absent>"), False)
+        problems += _l_same("capable llm app", getattr(settings.models["q"], "embed_capable", "<absent>"), True)
+        if "embed_capable=True" not in repr(settings.models["q"]) + str(settings.models["q"]):
+            problems.append("repr(ModelSpec) does not show embed_capable=True")
+    return problems, ["embed_capable: optional real bool, default false, kind llm only (an sd app refuses the "
+                      "key), any non-bool refused by key, listed in the unknown-key refusal, in the repr"]
+
+
 GL_FUNCS = (l1, l2, l3, l4, l5, l6, l7, l8, l9, l10, l11, l12, l13, l14, l15, l16, l17, l18,
             l19, l20, l21, l22, l23, l24, l25, l26, l27, l28, l29, l30, l31, l32,
-            l33, l34, l35, l36, l37, l38, l39, l40, l41, l42, l43, l44, l45, l46, l47, l48, l49)
+            l33, l34, l35, l36, l37, l38, l39, l40, l41, l42, l43, l44, l45, l46, l47, l48, l49, l50)
 GL_CLI = frozenset(("L23", "L25", "L26", "L27", "L28", "L32", "L37", "L38", "L39", "L44", "L48", "L49"))
 
 
@@ -4057,6 +4103,7 @@ GD_CASES = (
     "D24 strict de-chunker (R12)",
     "D25 stream head parser (R20)",
     "D26 bounded stream queue (R11)",
+    "D27 embed retarget, pure",
 )
 
 D_NAMES = ("ModelState", "ModelView", "TicketView", "Decision", "decide", "_SD_ACTIONS",
@@ -4764,8 +4811,69 @@ def d26(mod):
                       "'aborted'"]
 
 
+def d27(mod):
+    """The embed retarget, pure.  For /v1/embeddings and /v1/rerank ONLY, an embed_capable target
+    is served by the resident app when that is another embed_capable app, READY, not disabled and
+    not a zombie; every other combination answers None (today's decision stands)."""
+    absent = missing_names(mod, ("_sd_embed_retarget", "decide", "ModelView", "ModelState", "TicketView"))
+    if absent:
+        return absent, []
+    problems = []
+    S = mod.ModelState
+    spec = lambda capable: types.SimpleNamespace(kind="llm", embed_capable=capable)  # noqa: E731
+    models = {"X": spec(True), "Y": spec(True), "N": spec(False), "Z": spec(True)}
+
+    def views(**by_name):
+        out = {name: mod.ModelView(S.STOPPED) for name in models}
+        for name, view in by_name.items():
+            out[name] = view
+        return out
+
+    ready = mod.ModelView(S.READY)
+    count = 0
+
+    def check(label, path, target, states, resident, want, specs=None):
+        nonlocal count
+        count += 1
+        got = mod._sd_embed_retarget(path, target, states, resident, specs if specs is not None else models)
+        if got != want:
+            problems.append("%s: retargeted to %r, expected %r" % (label, got, want))
+
+    for path in ("/v1/embeddings", "/v1/rerank"):
+        check("%s resident Y READY, addressed X" % path, path, "X", views(Y=ready), "Y", "Y")
+        check("%s addressed app resident" % path, path, "X", views(X=ready), "X", None)
+        check("%s nothing resident" % path, path, "X", views(), None, None)
+        check("%s addressed X not capable" % path, path, "N", views(Y=ready), "Y", None)
+        check("%s resident N not capable" % path, path, "X", views(N=ready), "N", None)
+        check("%s resident STARTING" % path, path, "X", views(Y=mod.ModelView(S.STARTING)), "Y", None)
+        check("%s resident STOPPING" % path, path, "X", views(Y=mod.ModelView(S.STOPPING)), "Y", None)
+        check("%s resident DEAD zombie" % path, path, "X", views(Y=mod.ModelView(S.DEAD, group_alive=True)),
+              "Y", None)
+        check("%s resident READY but disabled" % path, path, "X", views(Y=mod.ModelView(S.READY, False, True)),
+              "Y", None)
+        check("%s unknown addressed app" % path, path, "nope", views(Y=ready), "Y", None)
+        check("%s resident absent from the table" % path, path, "X", views(Y=ready), "ghost", None)
+    for path in ("/v1/chat/completions", "/v1/messages", "/v1/images/generations", "/sdapi/v1/txt2img",
+                 "/v1/embeddings/", "/v1/embedding", "/m/Y/v1/embeddings", ""):
+        check("path %r" % path, path, "X", views(Y=ready), "Y", None)
+    check("a spec without the attribute", "/v1/embeddings", "X", views(Y=ready), "Y", None,
+          specs={"X": types.SimpleNamespace(kind="llm"), "Y": spec(True)})
+    # the decision after the retarget: no swap, a plain run on the resident app
+    head = mod.TicketView("request", "Y", False, False, 0)
+    decision = mod.decide(head, views(Y=ready), "Y", 0.0)
+    if (decision.action, decision.model) != ("run", "Y"):
+        problems.append("decide on the retargeted head is %r, expected run on Y" % (tuple(decision),))
+    head = mod.TicketView("request", "X", False, False, 0)
+    decision = mod.decide(head, views(Y=ready), "Y", 0.0)
+    if (decision.action, decision.model) != ("swap", "X"):
+        problems.append("decide on the un-retargeted head is %r, expected today's swap to X" % (tuple(decision),))
+    return problems, ["%d retarget decisions: only the two embed paths, only an embed_capable pair, only a "
+                      "READY non-disabled resident; STARTING, STOPPING, a zombie and every other path keep "
+                      "today's decision" % count]
+
+
 GD_FUNCS = (d1, d2, d3, d4, d5, d6, d7, d8, d9, d10, d11, d12, d13, d14, d15, d16, d17,
-            d18, d19, d20, d21, d22, d23, d24, d25, d26)
+            d18, d19, d20, d21, d22, d23, d24, d25, d26, d27)
 
 
 def group_d(suite, fixture_root):
@@ -4945,6 +5053,9 @@ GQS_CASES = (
     "QS17 zombie WARNING rate-limited",
     "QS18 crash after a send dumps the tail",
     "QS19 failed start, surviving group",
+    "QS20 embed retarget to the resident",
+    "QS21 embed: itself, or today's start",
+    "QS22 embed swap as today, chat not retargeted",
 )
 
 GT_CASES = (
@@ -5888,8 +5999,141 @@ def qs19(mod, sandbox, names, optional):
                                    "spawn, unload_failed for requests, an unload clears it"]
 
 
+Q_EMBED = "/v1/embeddings"
+Q_RERANK = "/v1/rerank"
+Q_CHAT = "/v1/chat/completions"
+
+
+def _q_llm(sandbox, name, ids, **keys):
+    """An llm app serving *ids* (the stub lists the same ids); stop_grace and start_timeout as _q_entry."""
+    keys.setdefault("stop_grace", Q_GRACE_S)
+    keys.setdefault("start_timeout", Q_START_TIMEOUT_S)
+    return llm_model(sandbox, name, "--ids", ",".join(ids), model_ids=list(ids), **keys)
+
+
+def _q_starts(sandbox, name):
+    return len(read_starts(sandbox, name))
+
+
+@_q_live
+def qs20(mod, sandbox, names, optional):
+    """An embed_capable app addressed on /v1/embeddings or /v1/rerank is served by the RESIDENT
+    embed_capable app: nothing starts, nothing stops, the body (model field included) reaches the
+    resident child byte-exact, and one structure-only INFO line names both apps."""
+    names.append("O")
+    optional.append("I")
+    problems = []
+    b0, b1, b2 = (_q_body("qs20-%d" % i, extra=" SECRET-PROMPT") for i in range(3))
+    with _s_logged(mod, logging.INFO) as cap:
+        with _q_world(mod, {"I": _q_llm(sandbox, "I", ["inf-a"], embed_capable=True),
+                            "O": _q_llm(sandbox, "O", ["orn-a"], embed_capable=True)}) as w:
+            r0 = w.request("O", b0, Q_EMBED)
+            problems += _q_ok("O addressed, nothing resident (today's start)", r0, b0)
+            w.release(r0)
+            pids = read_starts(sandbox, "O")
+            r1 = w.request("I", b1, Q_EMBED)
+            problems += _q_ok("I addressed, O resident (embeddings)", r1, b1)
+            w.release(r1)
+            r2 = w.request("I", b2, Q_RERANK)
+            problems += _q_ok("I addressed, O resident (rerank)", r2, b2)
+            w.release(r2)
+            if _q_starts(sandbox, "I") or read_events(sandbox, "I"):
+                problems.append("I was started or reached although O was resident and embed_capable")
+            if read_starts(sandbox, "O") != pids or len(pids) != 1:
+                problems.append("O was restarted: starts %r then %r" % (pids, read_starts(sandbox, "O")))
+            if pids and not pid_alive(pids[0]):
+                problems.append("O's process was stopped by the retargeted requests")
+            if w.state("O") != "READY" or w.state("I") != "STOPPED":
+                problems.append("states O=%s I=%s, expected READY and STOPPED" % (w.state("O"), w.state("I")))
+            for body, path in ((b1, Q_EMBED), (b2, Q_RERANK)):
+                sends = _q_sends(sandbox, "O", body)
+                if len(sends) != 1 or sends[0].get("path") != path:
+                    problems.append("O saw %r for the retargeted %s, expected one send on that path"
+                                    % ([ev.get("path") for ev in sends], path))
+                elif read_body(sandbox, sends[0]["pid"], sends[0]["seq"], "O") != body:
+                    problems.append("the retargeted body did not reach O byte-exact (model field included)")
+            if r1.model != "O" or r2.model != "O":
+                problems.append("the tickets carry %r / %r, expected the serving app O" % (r1.model, r2.model))
+    rows = _s_rows(cap, "embed retarget")
+    if len(rows) != 2 or not all("requested='I' serving='O'" in r for r in rows):
+        problems.append("expected two 'embed retarget' rows naming requested='I' serving='O', found %r" % (rows,))
+    if any("SECRET-PROMPT" in r or "inf-a" in r or Q_EMBED in r for r in rows):
+        problems.append("a retarget row carries body or path content: %r" % (rows,))
+    return problems + w.problems, ["I addressed while O (also embed_capable) is resident: both embed paths "
+                                   "served by O, no spawn, no stop, bytes unchanged, two structure-only rows"]
+
+
+@_q_live
+def qs21(mod, sandbox, names, optional):
+    """An addressed app that is itself resident serves its own embeddings; with no resident app
+    the addressed one starts as today, and a non-capable addressed app never borrows the resident."""
+    names.extend(("I", "N"))
+    optional.append("O")
+    problems = []
+    b0, b1, b2 = (_q_body("qs21-%d" % i) for i in range(3))
+    with _s_logged(mod, logging.INFO) as cap:
+        with _q_world(mod, {"I": _q_llm(sandbox, "I", ["inf-a"], embed_capable=True),
+                            "O": _q_llm(sandbox, "O", ["orn-a"], embed_capable=True),
+                            "N": _q_llm(sandbox, "N", ["plain-a"])}) as w:
+            r0 = w.request("I", b0, Q_EMBED)
+            problems += _q_ok("nothing resident: I starts", r0, b0)
+            w.release(r0)
+            r1 = w.request("I", b1, Q_EMBED)
+            problems += _q_ok("I resident and addressed", r1, b1)
+            w.release(r1)
+            if _q_starts(sandbox, "I") != 1 or len(_q_sends(sandbox, "I")) != 2 or read_events(sandbox, "O"):
+                problems.append("I starts %d, sends %d, O events %d; expected 1, 2, 0"
+                                % (_q_starts(sandbox, "I"), len(_q_sends(sandbox, "I")),
+                                   len(read_events(sandbox, "O"))))
+            # an addressed app that is NOT capable is today's swap even with a capable resident
+            r2 = w.request("N", b2, Q_EMBED)
+            problems += _q_ok("N addressed, I resident (N is not embed_capable)", r2, b2)
+            w.release(r2)
+            if _q_starts(sandbox, "N") != 1 or w.state("N") != "READY" or w.state("I") != "STOPPED":
+                problems.append("N did not replace I: N starts %d, states N=%s I=%s"
+                                % (_q_starts(sandbox, "N"), w.state("N"), w.state("I")))
+    if _s_rows(cap, "embed retarget"):
+        problems.append("a retarget row was logged where nothing was retargeted: %r"
+                        % (_s_rows(cap, "embed retarget"),))
+    return problems + w.problems, ["resident addressed app serves itself; nothing resident starts the "
+                                   "addressed app; a non-capable addressed app swaps as today; no row logged"]
+
+
+@_q_live
+def qs22(mod, sandbox, names, optional):
+    """A resident app that is not embed_capable is replaced as today; the same prefix on a CHAT path is
+    never retargeted even with a capable resident app."""
+    names.extend(("C", "I", "O"))
+    problems = []
+    b0, b1, b2 = (_q_body("qs22-%d" % i) for i in range(3))
+    with _q_world(mod, {"C": _q_llm(sandbox, "C", ["chat-a"]),
+                        "I": _q_llm(sandbox, "I", ["inf-a"], embed_capable=True),
+                        "O": _q_llm(sandbox, "O", ["orn-a"], embed_capable=True)}) as w:
+        r0 = w.request("C", b0, Q_CHAT)
+        problems += _q_ok("C chat (not capable, resident)", r0, b0)
+        w.release(r0)
+        cpids = read_starts(sandbox, "C")
+        r1 = w.request("I", b1, Q_EMBED)
+        problems += _q_ok("I embeddings with a non-capable resident", r1, b1)
+        w.release(r1)
+        if w.state("C") != "STOPPED" or (cpids and not pid_dead(cpids[0])):
+            problems.append("C (not embed_capable) was not stopped for I: state %s" % w.state("C"))
+        if _q_starts(sandbox, "I") != 1 or len(_q_sends(sandbox, "I", b1)) != 1:
+            problems.append("I did not start and serve its own request")
+        r2 = w.request("O", b2, Q_CHAT)
+        problems += _q_ok("O chat with a capable resident I", r2, b2)
+        w.release(r2)
+        if w.state("O") != "READY" or w.state("I") != "STOPPED" or _q_starts(sandbox, "O") != 1:
+            problems.append("chat on O was retargeted or not swapped: O=%s I=%s O starts %d"
+                            % (w.state("O"), w.state("I"), _q_starts(sandbox, "O")))
+        if len(_q_sends(sandbox, "O", b2)) != 1 or _q_sends(sandbox, "I", b2):
+            problems.append("the chat request did not go to O alone")
+    return problems + w.problems, ["a non-capable resident is swapped out for the capable addressed app; chat "
+                                   "on a capable app's prefix swaps as today even beside a capable resident"]
+
+
 GQS_FUNCS = (qs1, qs2, qs3, qs4, qs5, qs6, qs7, qs8, qs9, qs10, qs11, qs12, qs13, qs14, qs15, qs16,
-             qs17, qs18, qs19)
+             qs17, qs18, qs19, qs20, qs21, qs22)
 
 
 def _t_retry(mod, sandbox, names, retries, tag):

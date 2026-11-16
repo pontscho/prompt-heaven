@@ -1141,8 +1141,8 @@ SUITES = [
      "/v1/rerank and /v1/messages relayed untouched), "
      "secret leaks, static rules, "
      "hygiene", 496),
-    # TYPED: a fixed case table (A 18, L 49, R 23, D 26, S 31, Q-sched 19,
-    # Q-http 6, T 17, P 49, U 21, G 6, E2E 6 = 271), so a count that moves is
+    # TYPED: a fixed case table (A 18, L 50, R 23, D 27, S 31, Q-sched 22,
+    # Q-http 6, T 17, P 49, U 21, G 6, E2E 6 = 276), so a count that moves is
     # the alarm.
     ("gpu_router", run_gpu_router,
      "gpu-router, the supervisor and proxy for stable-diffusion.cpp "
@@ -1155,7 +1155,7 @@ SUITES = [
      "allow-listed head, no kill on a client abort, a truncated end that "
      "never looks complete), OpenAI-shaped refusals, bearer auth, "
      "structure-only logs, static rules, end-to-end through llm-router "
-     "(sdcpp and rawllm routes) and across the two app kinds", 271),
+     "(sdcpp and rawllm routes) and across the two app kinds", 276),
     # TYPED: a fixed case table (A 7, B 1, E 3), so a count that moves is the alarm.
     ("tshark_fields", run_tshark_fields,
      "mcp-tshark analyze's `fields` parameter, in-process with tshark "

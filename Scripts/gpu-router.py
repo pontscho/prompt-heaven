@@ -43,8 +43,15 @@ Config grammar (one 0600 JSON file owned by you, read through --config)
         "ready_status": 200,              optional; ready only on exactly this status
                                           (default: sd any but 503, llm 200)
         "head_timeout": 1800,             llm only; "idle_timeout": 1800, llm only
-        "child_port": 9000                optional; a fixed child port (no pick, no
+        "child_port": 9000,               optional; a fixed child port (no pick, no
                                           collision retry); never the listener's port
+        "embed_capable": false            optional; a real bool, llm only (an sd app
+                                          refuses the key), default false: the app was
+                                          started with the embedding and rerank models, so
+                                          while ANOTHER embed_capable app is resident and
+                                          READY, a /v1/embeddings or /v1/rerank request
+                                          addressed to this one is served by that resident
+                                          app instead of swapping (see Routes)
       }
     },
     "bind": "127.0.0.1",                  optional; an IP literal or hostname, as --bind; or a
@@ -83,6 +90,12 @@ Routes (every route requires the bearer)
        byte-exact (sd_cpp_extra_args too); chat/messages bodies are capped at
        16 MiB and embeddings/rerank at 4 MiB (min with body_limit); the chat
        kind also forwards one anthropic-version / anthropic-beta header each.
+       Exception, /v1/embeddings and /v1/rerank only: a request addressed to an
+       embed_capable app is served by ANOTHER embed_capable app when that one is
+       resident and READY at the moment the request reaches the head of the queue
+       (decided on the scheduler thread, so no swap); the body, `model` included,
+       is forwarded unchanged, and one structure-only INFO line names both apps.
+       Every other route, and every other state, keeps the prefix authoritative.
   GET  /v1/models -- every configured model id (static, nothing is started) with
        its app's state; modality image (sd) or chat (llm).
   POST /v1/unload[?model=<id>][&force=1], /m/<id>/v1/unload -- the target is the
@@ -320,7 +333,7 @@ _SD_DEFAULT_BIND = "127.0.0.1"
 _SD_DEFAULT_PORT = 0
 _SD_MODEL_KEYS = ("command", "args", "env", "cwd", "start_timeout", "stop_grace", "retries",
                   "request_timeout", "kind", "model_ids", "ready_path", "ready_status",
-                  "head_timeout", "idle_timeout", "child_port")
+                  "head_timeout", "idle_timeout", "child_port", "embed_capable")
 # key -> (default, low, high): the range is (low, high], low exclusive, high inclusive.
 # request_timeout is NOT here: its default and ceiling are per kind (_SD_KIND_DEFAULTS).
 _SD_MODEL_FLOATS = {
@@ -395,16 +408,19 @@ class ModelSpec:
     head_timeout: Optional[float] = None  # llm only: no response head within this
     idle_timeout: Optional[float] = None  # llm only: no byte within this
     child_port: Optional[int] = None  # a fixed child port; None = a free port is picked
+    # llm only: this app was started with the embedding and rerank models, so another resident
+    # embed_capable app may answer its /v1/embeddings and /v1/rerank (_sd_embed_retarget).
+    embed_capable: bool = False
 
     def __repr__(self) -> str:
         env_keys = ", ".join("%s=<redacted>" % key for key, _value in self.env)
         return ("ModelSpec(name=%r, command=%r, args=<%d items>, env={%s}, cwd=%r, start_timeout=%r, "
                 "stop_grace=%r, retries=%r, request_timeout=%r, kind=%r, model_ids=%r, ready_path=%r, "
-                "ready_status=%r, head_timeout=%r, idle_timeout=%r, child_port=%r)"
+                "ready_status=%r, head_timeout=%r, idle_timeout=%r, child_port=%r, embed_capable=%r)"
                 % (self.name, self.command, len(self.args), env_keys, self.cwd, self.start_timeout,
                    self.stop_grace, self.retries, self.request_timeout, self.kind, self.model_ids,
                    self.ready_path, self.ready_status, self.head_timeout, self.idle_timeout,
-                   self.child_port))
+                   self.child_port, self.embed_capable))
 
     __str__ = __repr__
 
@@ -633,12 +649,17 @@ def _sd_cfg_model(name: str, entry: Any, where: str) -> ModelSpec:
     child_port = None
     if "child_port" in entry:
         child_port = _sd_cfg_int_range(entry["child_port"], f"{where}.child_port", *_SD_CHILD_PORT_RANGE)
+    embed_capable = False
+    if "embed_capable" in entry:
+        if kind != "llm":
+            raise ConfigError(f"{where}.embed_capable: only for kind llm")
+        embed_capable = _sd_cfg_bool(entry["embed_capable"], f"{where}.embed_capable")
     return ModelSpec(name=name, command=command, args=args, env=env, cwd=cwd,
                      start_timeout=floats["start_timeout"], stop_grace=floats["stop_grace"],
                      retries=retries, request_timeout=floats["request_timeout"], kind=kind,
                      model_ids=model_ids, ready_path=ready_path, ready_status=ready_status,
                      head_timeout=floats.get("head_timeout"), idle_timeout=floats.get("idle_timeout"),
-                     child_port=child_port)
+                     child_port=child_port, embed_capable=embed_capable)
 
 
 def _sd_cfg_model_ids(value: Any, where: str) -> Tuple[str, ...]:
@@ -1516,6 +1537,29 @@ def decide(head: Optional[TicketView], states: Mapping[str, ModelView],
     if now < view.restart_at:
         return Decision("idle", target)  # backoff before an automatic restart
     return Decision("start", target)
+
+
+def _sd_embed_retarget(path: Optional[str], target: Optional[str], states: Mapping[str, ModelView],
+                       resident: Optional[str], models: Mapping[str, Any]) -> Optional[str]:
+    """The app that serves an embeddings or rerank request instead of *target*, or None (PURE).
+
+    Only for the paths of the `embed` route token (/v1/embeddings, /v1/rerank): when *target* is
+    embed_capable and the RESIDENT app is ANOTHER embed_capable app that is READY (not STARTING,
+    STOPPING or a DEAD zombie) and not disabled, the resident app serves it and no swap happens.
+    Any other combination returns None and decide() runs unchanged on *target*."""
+    if path is None or ROUTES.get(path) != "embed":
+        return None
+    if target is None or resident is None or resident == target:
+        return None
+    wanted, serving = models.get(target), models.get(resident)
+    view = states.get(resident)
+    if wanted is None or serving is None or view is None:
+        return None
+    if getattr(wanted, "embed_capable", False) is not True or getattr(serving, "embed_capable", False) is not True:
+        return None
+    if view.state is not ModelState.READY or view.disabled or view.group_alive:
+        return None
+    return resident
 
 
 # ---- unit 4 ----
@@ -3092,6 +3136,7 @@ class Scheduler:
         decision, e.g. a restart backoff, waits one tick with the head left queued)."""
         dropped: List[Ticket] = []
         taken: Optional[Tuple[Ticket, Decision]] = None
+        retargeted: Optional[Tuple[str, str]] = None  # (requested app, serving app), logged after the lock
         with self.cond:
             if self.closing:
                 return None
@@ -3109,6 +3154,17 @@ class Scheduler:
                 self.cond.wait(_SD_SCHED_TICK_S)
             else:
                 candidate = self.force_slots[0] if source == "force" else self.queue[0]
+                # An embeddings / rerank head addressed to an embed_capable app is served by the
+                # resident embed_capable app when that one is READY: the ticket is retargeted HERE,
+                # on the scheduler thread, under the lock, from the same snapshot decide() reads,
+                # so nothing can change between the check and the decision and no swap is planned.
+                requested = candidate.model
+                if source != "force" and candidate.kind == "request":
+                    serving = _sd_embed_retarget(candidate.path, requested, views, resident,
+                                                 self.settings.models)
+                    if serving is not None and requested is not None:
+                        candidate.model = serving
+                        retargeted = (requested, serving)
                 decision = decide(candidate.view(), views, resident, _sd_now())
                 if decision.action == "idle":
                     self.cond.wait(_SD_SCHED_TICK_S)
@@ -3121,6 +3177,9 @@ class Scheduler:
                     taken = (head, decision)
         for ticket in dropped:
             ticket.finish(None)
+        if retargeted is not None and taken is not None:
+            log.info("sd embed retarget: requested=%s serving=%s",
+                     _log_value(retargeted[0]), _log_value(retargeted[1]))
         return taken
 
     def _finish(self, ticket: Ticket, result: Optional[TicketResult]) -> None:
