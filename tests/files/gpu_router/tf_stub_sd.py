@@ -70,6 +70,19 @@ Behaviour flags
 --ignore-term               SIGTERM is ignored (only SIGKILL ends the stub).
 --spawn-grandchild          at start, ``sleep 600`` in the stub's own process
                             group, all streams DEVNULL; its pid goes to .pids.
+--spawn-output-grandchild   like --spawn-grandchild, but the ``sleep 600`` leads its OWN
+                            session and keeps the stub's stdout and stderr: it holds the
+                            write end of the router's output pipe after the group is dead.
+--emit WORD                 (repeatable) write a fixed text to stdout or stderr right
+                            after the state files and before anything else, so a
+                            supervisor that reads the child's output sees it: ``hello``
+                            (stdout line), ``err`` (stderr line), ``ansi`` (colour
+                            escapes), ``cr`` (a bare CR), ``forge`` (a second line shaped
+                            like a router log record, one after a bare CR too),
+                            ``badutf8``, ``long`` (7000 bytes, NO newline), ``long-nl``
+                            (7000 bytes, newline, then ``tf after long``), ``flood``
+                            (5000 lines, ~500 KiB: more than a pipe holds) and ``many``
+                            (30000 short lines).  Fixed texts only, never a secret.
 --hang                      bind and listen, never accept: the port takes
                             connections and no request is ever answered, not even
                             GET / (a child that never becomes ready).
@@ -414,6 +427,52 @@ def tf_spawn_grandchild(state):
     state.record({"event": "grandchild", "pid": os.getpid(), "child": proc.pid})
 
 
+def tf_spawn_output_grandchild(state):
+    """A sleeper in its own session that inherits stdout and stderr (the router's pipe)."""
+    proc = subprocess.Popen(["sleep", "600"], stdin=subprocess.DEVNULL,
+                            start_new_session=True)
+    if state.prefix:
+        tf_append(state.prefix + ".pids", "%d\n" % proc.pid)
+    state.record({"event": "grandchild", "pid": os.getpid(), "child": proc.pid})
+
+
+def tf_write_fd(fd, data):
+    """Write *data* whole to *fd* (a pipe write blocks while the reader is not draining)."""
+    view = memoryview(data)
+    while view:
+        n = os.write(fd, view)
+        view = view[n:]
+
+
+TF_EMIT_WORDS = ("hello", "err", "ansi", "cr", "forge", "badutf8", "long", "long-nl", "flood",
+                 "many")
+
+
+def tf_emit(word):
+    if word == "hello":
+        tf_write_fd(1, b"tf out hello\n")
+    elif word == "err":
+        tf_write_fd(2, b"tf err hello\n")
+    elif word == "ansi":
+        tf_write_fd(1, b"tf \x1b[31mred\x1b[0m end\n")
+    elif word == "cr":
+        tf_write_fd(1, b"tf one\rtf two\n")
+    elif word == "forge":
+        tf_write_fd(1, b"tf fake\n2099-01-01 00:00:00,000 gpu-router WARNING forged-lf\n"
+                       b"tf cr\r2099-01-01 00:00:00,000 gpu-router WARNING forged-cr\n")
+    elif word == "badutf8":
+        tf_write_fd(1, b"tf bad \xff\xfe\xc3 end\n")
+    elif word == "long":
+        tf_write_fd(1, b"tf long " + b"B" * 7000)
+    elif word == "long-nl":
+        tf_write_fd(1, b"tf long " + b"C" * 7000 + b"\ntf after long\n")
+    elif word == "flood":
+        for i in range(5000):
+            tf_write_fd(1, ("tf flood %05d " % i).encode("ascii") + b"x" * 80 + b"\n")
+    elif word == "many":
+        tf_write_fd(1, b"".join(b"tf many %d\n" % i for i in range(30000)))
+
+
 def tf_dump_env(state):
     if not state.prefix:
         return
@@ -441,6 +500,8 @@ def tf_parse_args(argv):
     ap.add_argument("--crash-on-marker", default=None)
     ap.add_argument("--ignore-term", action="store_true")
     ap.add_argument("--spawn-grandchild", action="store_true")
+    ap.add_argument("--spawn-output-grandchild", action="store_true")
+    ap.add_argument("--emit", action="append", default=[], choices=TF_EMIT_WORDS)
     ap.add_argument("--hang", action="store_true")
     ap.add_argument("--hang-after-accept", action="store_true")
     ap.add_argument("--keep-generating", action="store_true")
@@ -461,6 +522,10 @@ def tf_main(argv=None):
         tf_dump_env(state)
     if args.spawn_grandchild:
         tf_spawn_grandchild(state)
+    if args.spawn_output_grandchild:
+        tf_spawn_output_grandchild(state)
+    for word in args.emit:
+        tf_emit(word)
     if args.crash_on_start or (args.crash_on_start_first is not None
                                and state.prior < args.crash_on_start_first):
         sys.stderr.write("tf crash on start\n")

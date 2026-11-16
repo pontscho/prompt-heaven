@@ -1542,6 +1542,20 @@ _SD_CHILD_LANG = "C.UTF-8"
 # the first start after an unload or an idle model is immediate (D-8).
 _SD_BACKOFF_S = (1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 60.0)
 _SD_BACKOFF_JITTER = 0.2
+# The child's output (stdout and stderr, merged) goes into the router log. Sizes and cadence:
+_SD_OUT_LINE_MAX = 2048  # bytes kept of one line; the rest of that line is discarded
+_SD_OUT_TAIL_LINES = 50  # sanitized lines kept per child for the crash dump
+_SD_OUT_LINES_PER_S = 200  # live DEBUG rows per second per child (a token bucket of this size)
+_SD_OUT_LOG_BYTES = 1024 * 1024  # live DEBUG bytes per child over its whole life
+_SD_OUT_TICK_S = 0.05  # reader select tick: how soon a stop flag is seen
+_SD_OUT_READ = 64 * 1024  # largest single os.read on the pipe
+_SD_OUT_FINAL_BYTES = 1024 * 1024  # most the final drain reads after the stop flag
+_SD_OUT_JOIN_S = 1.0  # longest finish() waits for the reader thread
+_SD_OUT_MARKER = "[truncated]"
+_SD_ZOMBIE_WARN_S = 60.0  # one "zombie still holds the GPU" WARNING per app per this long
+_SD_OUT_UNSAFE = re.compile("[\\x00-\\x1f\\x7f-\\x9f\\u2028\\u2029]")
+_SD_OUT_ESCAPES = {"\t": "\\t", "\r": "\\r", "\n": "\\n"}
+_SD_GROUP_MEMBERS_SHOWN = 16
 
 
 def _sd_now() -> float:
@@ -1723,11 +1737,202 @@ def _sd_probe_status(port: int, deadline: float, stop: threading.Event,
         sock.close()
 
 
+def _sd_out_escape_char(match: Any) -> str:
+    char = match.group(0)
+    named = _SD_OUT_ESCAPES.get(char)
+    if named is not None:
+        return named
+    code = ord(char)
+    return "\\x%02x" % code if code <= 0xFF else "\\u%04x" % code
+
+
+def _sd_out_text(data: bytes, cut: bool) -> str:
+    """One child output line made safe for the log (CWE-117): decoded as UTF-8 with
+    errors=replace, then every C0 control (CR and ESC included), C1 control, DEL and
+    U+2028/U+2029 escaped repr-style, so no byte of child text can end the log line or start
+    another. *cut* marks a line that was capped: the visible marker follows the text.
+    Deliberately NOT _log_value: that cuts at 80 characters, this must keep a line."""
+    text = _SD_OUT_UNSAFE.sub(_sd_out_escape_char, data.decode("utf-8", "replace"))
+    return text + " " + _SD_OUT_MARKER if cut else text
+
+
+class _SdOutput:
+    """The reader of ONE child's merged stdout+stderr pipe, on its own daemon thread.
+
+    It reads the fd with os.read under a select tick (so a stop flag is seen within
+    _SD_OUT_TICK_S and EOF is never the only way out: a grandchild in another session can
+    hold the write end open after the group is dead), splits on \\n, keeps at most
+    _SD_OUT_LINE_MAX bytes of a line, sanitizes it (_sd_out_text), keeps the last
+    _SD_OUT_TAIL_LINES in a ring under a lock of its own and logs it at DEBUG, rate-capped.
+    It ALWAYS keeps draining the pipe -- a full pipe would block the child -- whether it logs
+    or drops a line. It never touches the scheduler's `cond`, and it is never joined under one.
+
+    The reader logs from its own thread: a log sink that blocks stalls the reader, and so,
+    once the pipe is full, the child (declared: no second queue thread per child). Readiness is
+    never read from this output (ADR 0035): nothing here feeds the supervisor."""
+
+    def __init__(self, app: str, pid: int, stream: Any) -> None:
+        self.app = app
+        self.pid = pid
+        self.stream = stream
+        self.thread: Optional[threading.Thread] = None
+        self._halt = threading.Event()
+        self._lock = threading.Lock()  # guards _ring only
+        self._ring: Any = collections.deque(maxlen=_SD_OUT_TAIL_LINES)
+        self._buf = bytearray()
+        self._cut = False
+        self._tokens = float(_SD_OUT_LINES_PER_S)
+        self._refilled = _sd_now()
+        self._logged_bytes = 0
+        self._dropped = 0
+
+    def start(self) -> None:
+        self.thread = threading.Thread(target=self._run, name="sd-output-%s" % self.app, daemon=True)
+        self.thread.start()
+
+    def finish(self, timeout: float) -> None:
+        """Set the stop flag, then wait at most *timeout* for the reader to drain what is
+        readable now and close the stream. Never waits for EOF; never raises."""
+        self._halt.set()
+        thread = self.thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout)
+            if thread.is_alive():
+                return
+        if thread is None or not thread.is_alive():
+            try:
+                self.stream.close()
+            except (OSError, ValueError):
+                pass
+
+    def tail(self) -> List[str]:
+        with self._lock:
+            return list(self._ring)
+
+    def _run(self) -> None:
+        eof = False
+        try:
+            fd = self.stream.fileno()
+            while not self._halt.is_set():
+                ready, _w, _x = select.select([fd], [], [], _SD_OUT_TICK_S)
+                if ready and not self._read(fd):
+                    eof = True
+                    break
+            if not eof:
+                self._drain(fd)
+            self._emit()  # a last line without its newline
+            self._report_dropped()
+        except (OSError, ValueError):
+            pass  # the stream was closed under us, or the fd is gone: nothing more to read
+        finally:
+            try:
+                self.stream.close()
+            except (OSError, ValueError):
+                pass
+
+    def _read(self, fd: int) -> bool:
+        """One os.read; False at EOF or on a read error."""
+        try:
+            data = os.read(fd, _SD_OUT_READ)
+        except OSError:
+            return False
+        if not data:
+            return False
+        self._feed(data)
+        return True
+
+    def _drain(self, fd: int) -> None:
+        """After the stop flag: read what is readable NOW (bounded), never wait."""
+        total = 0
+        while total < _SD_OUT_FINAL_BYTES:
+            ready, _w, _x = select.select([fd], [], [], 0)
+            if not ready:
+                return
+            try:
+                data = os.read(fd, _SD_OUT_READ)
+            except OSError:
+                return
+            if not data:
+                return
+            self._feed(data)
+            total += len(data)
+
+    def _feed(self, data: bytes) -> None:
+        for index, piece in enumerate(data.split(b"\n")):
+            if index:
+                self._emit()  # a \n ended the line gathered so far
+            room = _SD_OUT_LINE_MAX - len(self._buf)
+            if room > 0:
+                self._buf += piece[:room]
+            if len(piece) > room:
+                self._cut = True  # the rest of this line is discarded
+
+    def _emit(self) -> None:
+        if not self._buf and not self._cut:
+            return
+        text = _sd_out_text(bytes(self._buf), self._cut)
+        self._buf = bytearray()
+        self._cut = False
+        with self._lock:
+            self._ring.append(text)
+        self._live(text)
+
+    def _live(self, text: str) -> None:
+        """The DEBUG row of one sanitized line, inside the rate cap; else counted and dropped."""
+        if not log.isEnabledFor(logging.DEBUG):
+            return
+        now = _sd_now()
+        self._tokens = min(float(_SD_OUT_LINES_PER_S),
+                           self._tokens + (now - self._refilled) * _SD_OUT_LINES_PER_S)
+        self._refilled = now
+        if self._tokens < 1.0 or self._logged_bytes + len(text) > _SD_OUT_LOG_BYTES:
+            self._dropped += 1
+            return
+        self._report_dropped()
+        self._tokens -= 1.0
+        self._logged_bytes += len(text)
+        log.debug("child output: app=%s pid=%d: %s", self.app, self.pid, text)
+
+    def _report_dropped(self) -> None:
+        if self._dropped:
+            count, self._dropped = self._dropped, 0
+            log.debug("child output dropped: app=%s pid=%d lines=%d", self.app, self.pid, count)
+
+
+def _sd_group_members(pgid: int, proc_root: str = "/proc") -> List[Tuple[int, str]]:
+    """(pid, state letter) of the processes of group *pgid*, from <proc_root>/<pid>/stat
+    (Linux). [] where there is no such tree (macOS) or nothing readable: the caller only
+    reports them. The command name is skipped up to the LAST ')' (it may hold anything)."""
+    try:
+        names = os.listdir(proc_root)
+    except OSError:
+        return []
+    found: List[Tuple[int, str]] = []
+    for name in names:
+        if not name.isdigit():
+            continue
+        try:
+            with open(os.path.join(proc_root, name, "stat"), "rb") as fh:
+                text = fh.read(4096).decode("utf-8", "replace")
+        except OSError:
+            continue
+        close = text.rfind(")")
+        fields = text[close + 1:].split() if close >= 0 else []
+        if len(fields) < 3 or not fields[2].lstrip("-").isdigit():
+            continue
+        if int(fields[2]) == pgid:
+            found.append((int(name), fields[0][:1]))
+    return sorted(found)
+
+
 class Child:
     """One spawned sd-server: the Popen, its pid and pgid (== pid, start_new_session), the
-    port it was told to listen on and the argv it was spawned with."""
+    port it was told to listen on and the argv it was spawned with; `output` is the reader of
+    its merged stdout+stderr (None for a Popen without a pipe)."""
 
     def __init__(self, spec: ModelSpec, proc: Any, port: int, argv: List[str]) -> None:
+        self.output: Optional[_SdOutput] = None
+        self.tail_dumped = False
         self.spec = spec
         self.proc = proc
         self.pid: int = proc.pid
@@ -1749,21 +1954,48 @@ class Supervisor:
 
     def __init__(self) -> None:
         self.registry: set = set()
+        # The Child whose group survived the ladder of the LAST launch() (a failed, timed-out
+        # or stopped start), else None. The scheduler turns it into a zombie (DEAD, group_alive).
+        self.survivor: Optional[Child] = None
 
     def start(self, spec: ModelSpec) -> Child:
         """ONE spawn -- the only Popen in the file -- on the app's fixed child_port, else on a
         fresh loopback port. argv is a list (never a shell); the child leads a new session;
-        stdio is DEVNULL."""
+        stdin is DEVNULL and stdout is a pipe with stderr merged into it, read by one daemon
+        thread per child into the router log (_SdOutput; ADR 0034 D-2 as amended)."""
         port = spec.child_port if spec.child_port is not None else _sd_free_port()
         argv = [spec.command] + render_args(spec, _SD_CHILD_HOST, port)
         proc = subprocess.Popen(argv, shell=False, start_new_session=True,
-                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL, env=_sd_child_env(spec),
-                                cwd=spec.cwd, close_fds=True)
+                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, env=_sd_child_env(spec),
+                                cwd=spec.cwd, close_fds=True, bufsize=0)
         child = Child(spec, proc, port, argv)
         self.registry.add(child.pgid)
+        stream = getattr(proc, "stdout", None)
+        if stream is not None:
+            child.output = _SdOutput(spec.name, child.pid, stream)
+            try:
+                child.output.start()
+            except RuntimeError:  # no thread to read with: do not run a child nobody drains
+                self.stop(child)
+                raise OSError(errno.EAGAIN, "output reader thread")
         log.info("sd child spawned: model=%s pid=%d port=%d", spec.name, child.pid, port)
         return child
+
+    def dump_tail(self, child: Child) -> None:
+        """The child's last output lines at WARNING, once per child, after the reader drained
+        what the dead child left in the pipe (finish() is bounded and never waits for EOF)."""
+        out = child.output
+        if out is None or child.tail_dumped:
+            return
+        child.tail_dumped = True
+        out.finish(_SD_OUT_JOIN_S)
+        for line in out.tail():
+            log.warning("child output tail: app=%s pid=%d: %s", child.spec.name, child.pid, line)
+
+    def _finish_output(self, child: Child) -> None:
+        if child.output is not None:
+            child.output.finish(_SD_OUT_JOIN_S)
 
     def _poll(self, child: Child) -> Optional[int]:
         """child.proc.poll(); a non-None answer REAPED the leader (M14, S-L6), so the group
@@ -1805,7 +2037,11 @@ class Supervisor:
         collision and respawns on a new port, at most _SD_PORT_TRIES spawns -- unless the app
         has a fixed child_port: there is no collision to retry, so an early exit is ONE spawn
         and "failed". Outcome "ready" (the live Child), "failed", "timeout" or "stopped"
-        (child None, every group spawned here stopped)."""
+        (child None, every group spawned here stopped). A group that SURVIVED its ladder is
+        never respawned beside: it is recorded on `survivor` (cleared at every launch) and the
+        outcome is still failed / timeout / stopped. A failed or timed-out start dumps the
+        child's output tail at WARNING."""
+        self.survivor = None
         tries = 1 if spec.child_port is not None else _SD_PORT_TRIES
         for attempt in range(1, tries + 1):
             try:
@@ -1820,15 +2056,19 @@ class Supervisor:
                 return "ready", child
             code = self._poll(child)
             early = code is not None and _sd_now() - child.spawned < _SD_EARLY_EXIT_S
-            self.stop(child)
+            gone = self.stop(child)
+            if not gone:
+                self.survivor = child  # the group holds on: the caller makes it a zombie
             if stop.is_set():
                 return "stopped", None
             if code is None:
                 log.warning("sd child start timed out: model=%s", spec.name)
+                self.dump_tail(child)
                 return "timeout", None
             log.warning("sd child exited before ready: model=%s exit=%s attempt=%d",
                         spec.name, code, attempt)
-            if not early or _sd_now() >= deadline:
+            self.dump_tail(child)
+            if not gone or not early or _sd_now() >= deadline:
                 return "failed", None
         return "failed", None
 
@@ -1866,6 +2106,7 @@ class Supervisor:
         the full grace from a signal-0 watch before its SIGKILL, and none once empty."""
         pgid = child.pgid
         if pgid not in self.registry:
+            self._finish_output(child)
             return True
         grace = child.spec.stop_grace or _SD_STOP_GRACE_S
         t0 = _sd_now()
@@ -1885,11 +2126,20 @@ class Supervisor:
             pass
         gone = self._confirm_gone(pgid)
         if gone:
+            # The reader ends on its stop flag, never on EOF: a grandchild in another session
+            # can keep the pipe's write end open.
+            self._finish_output(child)
             log.info("sd child stopped: model=%s pid=%d exit=%s seconds=%.2f", child.spec.name,
                      child.pid, child.proc.returncode, _sd_now() - t0)
         else:
+            # The reader keeps draining: the survivors may still be writing and a full pipe would
+            # block them; it ends at EOF or at the stop() that finally clears the group.
             log.warning("sd child group survived the stop ladder: model=%s pgid=%d",
                         child.spec.name, pgid)
+            members = _sd_group_members(pgid)
+            if members:
+                log.warning("sd child group survivors: model=%s pgid=%d members=%s", child.spec.name,
+                            pgid, " ".join("%d:%s" % member for member in members[:_SD_GROUP_MEMBERS_SHOWN]))
         return gone
 
     def kill_all(self) -> None:
@@ -2597,6 +2847,8 @@ class Scheduler:
         self._disabled: Dict[str, bool] = {name: False for name in settings.models}
         self._restart_at: Dict[str, float] = {name: 0.0 for name in settings.models}
         self._restarts: Dict[str, int] = {name: 0 for name in settings.models}
+        # When the zombie WARNING of an app was last logged (the scheduler thread only).
+        self._zombie_warned: Dict[str, float] = {}
 
     # -- helpers; the caller holds `cond` ------------------------------------------------
 
@@ -2954,6 +3206,8 @@ class Scheduler:
         """Execute one decide() outcome for the popped *head* (lock NOT held)."""
         action, target = decision.action, decision.model
         if action == "fail":
+            if decision.code == "unload_failed":
+                self._warn_zombie()  # report only: the refusal itself is decide()'s
             self._finish(head, _sd_ticket_error(decision.code or "model_unknown"))
             return
         if action == "stop":
@@ -2969,6 +3223,22 @@ class Scheduler:
         if action == "start" and not self._exec_start(head, target):
             return
         self._exec_send(head, target)
+
+    def _warn_zombie(self) -> None:
+        """ONE WARNING per app per _SD_ZOMBIE_WARN_S naming the zombie app and its pgid: every
+        request behind a surviving group answers unload_failed, and without this nothing in
+        the log says why. Scheduler thread only; the log call is outside `cond`."""
+        with self.cond:
+            zombie = self._zombie_locked()
+        if zombie is None:
+            return
+        name, pgid = zombie
+        now = _sd_now()
+        last = self._zombie_warned.get(name)
+        if last is not None and now - last < _SD_ZOMBIE_WARN_S:
+            return
+        self._zombie_warned[name] = now
+        log.warning("sd zombie group still holds the GPU: model=%s pgid=%d", name, pgid)
 
     def _exec_unload(self, head: Ticket, decision: Decision) -> None:
         """An unload at the head: a non-resident target answers {"unloaded": false} at once
@@ -3058,10 +3328,20 @@ class Scheduler:
             return True
         forced: List[Ticket] = []
         tripped = False
+        survivor = getattr(self.supervisor, "survivor", None)
         with self.cond:
             reason = head.abort_reason
             crash = not (reason in ("force", "shutdown") or self.closing)
-            if crash:
+            if survivor is not None:
+                # launch() ran the ladder and the group SURVIVED it: a zombie, exactly as
+                # _ladder leaves one (DEAD, group_alive, resident) -- nothing spawns beside it,
+                # a forced unload stays queued and re-runs the ladder.
+                self.child = survivor
+                self._state[target] = ModelState.DEAD
+                self._group_alive[target] = True
+                if crash:
+                    tripped = self._charge_locked(target)
+            elif crash:
                 self._state[target] = ModelState.DEAD  # launch() already ran the ladder
                 self._group_alive[target] = False
                 tripped = self._charge_locked(target)
@@ -3170,6 +3450,7 @@ class Scheduler:
         ticket is finished 502 upstream_failed after that one send (closed table, P28)."""
         tripped = False
         with self.cond:
+            sent_to = self.child  # the child this send went to, for its output tail
             head.sock = None
             reason = head.abort_reason
             if reason is None and exc.kind == "timeout":
@@ -3197,6 +3478,9 @@ class Scheduler:
             ok = self._ladder(target)
         else:
             ok = True  # a no-kill abort: the socket is closed, the child stays resident and READY
+        if (crash or (reason == "timeout" and plan.ladder)) and sent_to is not None \
+                and sent_to.spec.name == target:
+            self.supervisor.dump_tail(sent_to)  # the ladder drained the pipe: why did it die?
         retry = False
         with self.cond:
             late = head.abort_reason

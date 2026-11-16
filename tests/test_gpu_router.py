@@ -1877,8 +1877,10 @@ def group_l(suite, fixture_root):
 #   Supervisor.start(spec) -> Child: ONE spawn on a fresh _sd_free_port(),
 #     through subprocess.Popen (looked up on the subprocess module at call
 #     time) with argv = [spec.command] + render_args(spec, "127.0.0.1", port)
-#     as a LIST, shell False, start_new_session=True, stdin/stdout/stderr
-#     DEVNULL, close_fds True, cwd=spec.cwd, env = a minimal fixed environment
+#     as a LIST, shell False, start_new_session=True,
+#     stdin DEVNULL, stdout PIPE with stderr merged into it (STDOUT; the router
+#     log carries the child's output, one reader thread per child, S23-S31),
+#     close_fds True, cwd=spec.cwd, env = a minimal fixed environment
 #     (PATH, HOME, LANG; D-1) plus dict(spec.env) -- never os.environ.  The
 #     pgid is registered at once.  Child carries: spec, proc (the Popen),
 #     pid, pgid (== pid, start_new_session; no os.getpgid call), port, argv.
@@ -1930,6 +1932,15 @@ GS_CASES = (
     "S20 early-reaped leader: grace",
     "S21 probe path and status",
     "S22 fixed child_port, one spawn",
+    "S23 child output in the log (DEBUG)",
+    "S24 tail at WARNING on a failed start",
+    "S25 output sanitized and capped",
+    "S26 a flood never blocks the child",
+    "S27 grandchild holds the pipe",
+    "S28 reader gone after stop",
+    "S29 survivors listed, /proc fake",
+    "S30 live lines rate-capped",
+    "S31 launch records a surviving group",
 )
 
 S_NAMES_SUP = ("ModelSpec", "parse_config", "render_args", "Supervisor", "_signal_group",
@@ -2124,6 +2135,7 @@ class _SFakeProc:
         self.kwargs = kwargs
         self.pid = pid
         self.returncode = None
+        self.stdout = None  # a fake spawns nothing: there is no pipe, so no output reader runs
 
     def _reapable(self):
         return (self.pid in self.world.exited or (self.pid, KILL) in self.world.rec.calls)
@@ -2497,9 +2509,12 @@ def s15(mod, sandbox):
             problems.append("Popen shell=%r" % kw.get("shell"))
         if kw.get("start_new_session") is not True:
             problems.append("Popen start_new_session=%r, expected True" % kw.get("start_new_session"))
-        for stream in ("stdin", "stdout", "stderr"):
-            if kw.get(stream) != subprocess.DEVNULL:
-                problems.append("Popen %s=%r, expected DEVNULL" % (stream, kw.get(stream)))
+        # The child's output goes into the router log (ADR 0034 D-2 amended): stdin stays DEVNULL,
+        # stdout is a pipe and stderr is merged into it.
+        for stream, want_stream in (("stdin", subprocess.DEVNULL), ("stdout", subprocess.PIPE),
+                                    ("stderr", subprocess.STDOUT)):
+            if kw.get(stream) != want_stream:
+                problems.append("Popen %s=%r, expected %r" % (stream, kw.get(stream), want_stream))
         if kw.get("close_fds") is False:
             problems.append("Popen close_fds=False")
         if kw.get("cwd") != cwd:
@@ -2517,7 +2532,8 @@ def s15(mod, sandbox):
             problems.append("child.spec / child.proc are not the spec and the Popen")
         problems += _s_direct_problems(world)
         sup.registry.discard(child.pgid)
-    return problems, ["argv a list from render_args, no shell, new session, DEVNULL, spec cwd"]
+    return problems, ["argv a list from render_args, no shell, new session, stdin DEVNULL, stdout "
+                      "PIPE with stderr merged, spec cwd"]
 
 
 def s16(mod, sandbox):
@@ -2821,8 +2837,376 @@ def s22(mod, sup, sandbox, names):
                       "spawn and 'failed'"]
 
 
+# ---- S23-S31: the child's output in the router log (ADR 0034 D-2 amended), and a surviving
+# group after a failed start ----
+#
+# Contract (all in unit 4 of Scripts/gpu-router.py):
+#   _SdOutput(app, pid, stream): the reader of ONE child's merged stdout+stderr pipe.
+#     start() runs a daemon thread (`.thread`, named sd-output-<app>) that reads the stream's
+#     fd with os.read under a short select tick, splits on \n, caps a line at
+#     _SD_OUT_LINE_MAX bytes (the rest of that line is discarded, the text ends in the marker
+#     "[truncated]"), decodes UTF-8 with errors=replace and escapes C0 (CR and ESC too), C1,
+#     DEL and U+2028/2029 repr-style, so child text can never forge a log line.  A sanitized
+#     line is kept in a ring of the last _SD_OUT_TAIL_LINES (`.tail()`, oldest first) and,
+#     within a rate cap (_SD_OUT_LINES_PER_S lines per second, _SD_OUT_LOG_BYTES per child),
+#     logged at DEBUG as `child output: app=<app> pid=<pid>: <line>`; a line over the cap is
+#     only counted and `child output dropped: app=<app> pid=<pid> lines=<n>` DEBUG rows
+#     (n = lines dropped since the previous such row) report the count.  The reader always keeps draining.  finish(timeout) sets the stop
+#     flag, lets the reader drain what is already readable, closes the stream and joins for at
+#     most *timeout* seconds: it never relies on EOF (a grandchild may hold the write end).
+#   Child.output is its _SdOutput (None for a Popen without a stdout).
+#   Supervisor.dump_tail(child): the ring at WARNING, one row per line,
+#     `child output tail: app=<app> pid=<pid>: <line>`, once per child.  launch() calls it for a
+#     failed or timed-out start, the scheduler for a crash after a send.
+#   _sd_group_members(pgid, proc_root="/proc") -> [(pid, state)] of the live members of a
+#     process group read from <proc_root>/<pid>/stat; [] when there is no such tree.
+#   Supervisor.survivor: the Child whose group survived the ladder of the LAST launch() (a
+#     failed, timed-out or stopped start), else None.
+
+S_NAMES_OUT = ("_SdOutput", "_sd_group_members", "_SD_OUT_LINE_MAX", "_SD_OUT_TAIL_LINES",
+               "_SD_OUT_LINES_PER_S", "Supervisor", "ModelSpec", "parse_config", "_SD_KILL_STEP_S")
+GS_OUT = frozenset(("S23", "S24", "S25", "S26", "S27", "S28", "S29", "S30", "S31"))
+S_MARKER = "[truncated]"
+
+
+class _SCap(logging.Handler):
+    """Collects (levelno, message) of every record the router logger lets through."""
+
+    def __init__(self, level):
+        logging.Handler.__init__(self, level)
+        self.rows = []
+
+    def emit(self, record):
+        self.rows.append((record.levelno, record.getMessage()))
+
+
+@contextlib.contextmanager
+def _s_logged(mod, level):
+    """The router logger at *level*, unpropagated, into a _SCap; restored after."""
+    cap = _SCap(level)
+    logger = mod.log
+    saved = (logger.level, logger.propagate)
+    logger.addHandler(cap)
+    logger.setLevel(level)
+    logger.propagate = False
+    try:
+        yield cap
+    finally:
+        logger.removeHandler(cap)
+        logger.setLevel(saved[0])
+        logger.propagate = saved[1]
+
+
+def _s_rows(cap, needle, level=None):
+    return [msg for lv, msg in list(cap.rows) if needle in msg and (level is None or lv == level)]
+
+
+def _s_bad_chars(text):
+    """The characters of *text* a log line must never carry raw."""
+    return sorted(set(ch for ch in text if ord(ch) < 0x20 or 0x7f <= ord(ch) <= 0x9f
+                      or ord(ch) in (0x2028, 0x2029)))
+
+
+@_s_live
+def s23(mod, sup, sandbox, names):
+    spec = _s_spec(mod, sandbox, "s23", "--emit", "hello", "--emit", "err", stop_grace=2.0)
+    problems = []
+    with _s_logged(mod, logging.DEBUG) as cap:
+        found, child = _s_ready(sup, spec, names)
+        problems += found
+        if child is None:
+            return problems, []
+        for text in ("tf out hello", "tf err hello"):
+            want = "child output: app=s23 pid=%d: %s" % (child.pid, text)
+            if not wait_until(lambda: _s_rows(cap, want, logging.DEBUG), 5.0):
+                problems.append("no DEBUG row %r (rows %r)" % (want, [m for _l, m in cap.rows
+                                                                      if "child output" in m][:4]))
+        problems += _s_stopped(mod, sup, child, "stop")[0]
+    tails = _s_rows(cap, "child output tail")
+    if tails:
+        problems.append("a clean start and stop dumped a tail: %r" % tails[:3])
+    return problems, ["stdout and stderr of the child (merged) are DEBUG rows with the app name and "
+                      "pid prefix; a clean run dumps no tail"]
+
+
+@_s_live
+def s24(mod, sup, sandbox, names):
+    spec = _s_spec(mod, sandbox, "s24", "--crash-on-start", stop_grace=1.0)
+    names.append("s24")
+    problems = []
+    with _s_logged(mod, logging.WARNING) as cap:
+        outcome, child, _took = _s_launch(sup, spec, 20.0)
+    if outcome != "failed" or child is not None:
+        problems.append("launch answered (%r, %r), expected ('failed', None)" % (outcome, child))
+    starts = read_starts(sandbox, "s24")
+    rows = _s_rows(cap, "tf crash on start", logging.WARNING)
+    for pid in starts:
+        want = "child output tail: app=s24 pid=%d: tf crash on start" % pid
+        if rows.count(want) != 1:
+            problems.append("expected exactly one WARNING row %r, found %d (rows %r)"
+                            % (want, rows.count(want), rows[:3]))
+    if len(rows) != len(starts):
+        problems.append("%d tail row(s) for %d spawn(s)" % (len(rows), len(starts)))
+    return problems, ["a crash on start with no --debug: the child's last output is in the log at "
+                      "WARNING, once per spawn, with the app name and pid"]
+
+
+def _s_feed(mod, chunks, name="o"):
+    """(_SdOutput, _SCap) after *chunks* were written to a pipe the reader owns, EOF and finish."""
+    rfd, wfd = os.pipe()
+    stream = os.fdopen(rfd, "rb", buffering=0)
+    out = mod._SdOutput(name, 4242, stream)
+    with _s_logged(mod, logging.DEBUG) as cap:
+        out.start()
+        try:
+            for chunk in chunks:
+                os.write(wfd, chunk)
+                time.sleep(0.02)
+        finally:
+            os.close(wfd)
+        out.finish(5.0)
+    return out, cap
+
+
+def s25(mod, sandbox):
+    problems = []
+    cap_bytes = mod._SD_OUT_LINE_MAX
+    chunks = [b"tf \x1b[31mred\x1b[0m\n",
+              b"tf one\rtf two\n",
+              b"tf fake\n2099-01-01 00:00:00,000 gpu-router WARNING forged-lf\n",
+              b"tf cr\r2099-01-01 00:00:00,000 gpu-router WARNING forged-cr\n",
+              b"tf bad \xff\xfe\xc3 end\n",
+              b"tf c1 \xc2\x85 del\x7f nul\x00 sep \xe2\x80\xa8 end\n",
+              b"tf spl", b"it\n",
+              b"tf long " + b"C" * (3 * cap_bytes) + b"\ntf after long\n",
+              b"tf long " + b"B" * (3 * cap_bytes)]
+    out, cap = _s_feed(mod, chunks)
+    tail = out.tail()
+    prefix = "child output: app=o pid=4242: "
+    expect = ("tf \\x1b[31mred\\x1b[0m", "tf one\\rtf two", "tf fake",
+              "2099-01-01 00:00:00,000 gpu-router WARNING forged-lf",
+              "tf cr\\r2099-01-01 00:00:00,000 gpu-router WARNING forged-cr", "tf split", "tf after long")
+    for want in expect:
+        if want not in tail:
+            problems.append("the tail lacks the sanitized line %r (tail %r)" % (want, [t[:60] for t in tail]))
+    bad = [t for t in tail if "tf bad" in t]
+    if len(bad) != 1 or chr(0xfffd) not in bad[0] or _s_bad_chars(bad[0]):
+        problems.append("invalid UTF-8 was not replaced cleanly: %r" % bad)
+    c1 = [t for t in tail if t.startswith("tf c1")]
+    if c1 != ["tf c1 \\x85 del\\x7f nul\\x00 sep \\u2028 end"]:
+        problems.append("C1, DEL, NUL and U+2028 were not escaped repr-style: %r" % c1)
+    longs = [t for t in tail if t.startswith("tf long")]
+    if len(longs) != 2:
+        problems.append("%d over-cap lines in the tail, expected 2" % len(longs))
+    for text in longs:
+        if not text.endswith(S_MARKER) or len(text) > cap_bytes + len(S_MARKER) + 8:
+            problems.append("an over-cap line is not capped at %d bytes with the marker: len %d, tail end %r"
+                            % (cap_bytes, len(text), text[-20:]))
+    for text in tail:
+        if _s_bad_chars(text) or "\n" in text:
+            problems.append("a tail line carries a raw control character: %r" % _s_bad_chars(text))
+            break
+    rows = [m for lv, m in cap.rows if "child output" in m]
+    if len(rows) != len(tail):
+        problems.append("%d DEBUG rows for %d lines" % (len(rows), len(tail)))
+    for msg in rows:
+        if not msg.startswith(prefix) or _s_bad_chars(msg) or "\n" in msg:
+            problems.append("a log row is not one clean prefixed line: %r" % msg[:80])
+            break
+    forged = [m for _l, m in cap.rows if m.startswith("2099-") or m.startswith("tf cr")]
+    if forged:
+        problems.append("child text started a log row of its own: %r" % forged[:2])
+    return problems, ["ESC, bare CR, a forged log line, invalid UTF-8, C1/DEL/NUL/U+2028 and an over-cap line "
+                      "without a newline are escaped, replaced or capped with a marker; every row is one "
+                      "prefixed line"]
+
+
+@_s_live
+def s26(mod, sup, sandbox, names):
+    spec = _s_spec(mod, sandbox, "s26", "--emit", "flood", stop_grace=2.0, start_timeout=20.0)
+    problems = []
+    with _s_logged(mod, logging.WARNING):
+        found, child = _s_ready(sup, spec, names, timeout=20.0)
+        problems += found
+        if child is None:
+            return problems, []
+        out = child.output
+        if out is None:
+            problems.append("the child has no output reader")
+        else:
+            if not wait_until(lambda: any(t.endswith("tf flood 04999 " + "x" * 80) for t in out.tail()), 10.0):
+                problems.append("the last flood line never reached the ring: the reader fell behind")
+            if len(out.tail()) > mod._SD_OUT_TAIL_LINES:
+                problems.append("the ring holds %d lines, bound %d" % (len(out.tail()), mod._SD_OUT_TAIL_LINES))
+        problems += _s_stopped(mod, sup, child, "stop")[0]
+    return problems, ["500 KiB written before the bind (more than a pipe holds): the child still became "
+                      "ready, the ring kept the last %d lines" % mod._SD_OUT_TAIL_LINES]
+
+
+@_s_live
+def s27(mod, sup, sandbox, names):
+    spec = _s_spec(mod, sandbox, "s27", "--spawn-output-grandchild", "--emit", "hello", stop_grace=2.0)
+    problems, grand = [], []
+    found, child = _s_ready(sup, spec, names)
+    problems += found
+    if child is None:
+        return problems, []
+    try:
+        if not wait_until(lambda: len(read_pids(sandbox, "s27")) >= 2):
+            problems.append("control: the stub recorded no output grandchild")
+        grand = [pid for pid in read_pids(sandbox, "s27") if pid != child.pid]
+        t0 = time.monotonic()
+        ok = sup.stop(child)
+        took = time.monotonic() - t0
+        if ok is not True:
+            problems.append("stop() returned %r, expected True (the leader's group is gone)" % ok)
+        if took > _s_ladder_bound(mod, spec) + 1.0:
+            problems.append("stop() took %.2fs with a grandchild holding the pipe, bound %.2fs"
+                            % (took, _s_ladder_bound(mod, spec) + 1.0))
+        if grand and not all(pid_alive(pid) for pid in grand):
+            problems.append("control: the grandchild did not outlive the group, so no pipe was held")
+        out = child.output
+        if out is None or out.thread is None or out.thread.is_alive():
+            problems.append("the reader thread is still alive after stop() although EOF never came")
+    finally:
+        kill_pids(grand)
+    return problems, ["a grandchild in another session kept the write end open: stop() returned in %.2fs and "
+                      "the reader ended on its stop flag, not on EOF" % took]
+
+
+@_s_live
+def s28(mod, sup, sandbox, names):
+    spec = _s_spec(mod, sandbox, "s28", "--emit", "hello", stop_grace=2.0)
+    problems = []
+    found, child = _s_ready(sup, spec, names)
+    problems += found
+    if child is None:
+        return problems, []
+    out = child.output
+    problems += _s_stopped(mod, sup, child, "stop")[0]
+    if out is None or out.thread is None:
+        return problems + ["the child has no running output reader"], []
+    if out.thread.is_alive():
+        problems.append("the reader thread outlived stop()")
+    if not out.stream.closed:
+        problems.append("the child's stdout pipe is still open after stop()")
+    if "tf out hello" not in out.tail():
+        problems.append("the final drain lost the child's output (tail %r)" % (out.tail()[:3],))
+    names.append("s28b")
+    spec = _s_spec(mod, sandbox, "s28b", "--crash-on-start", stop_grace=1.0)
+    _s_launch(sup, spec, 20.0)
+    if not wait_until(lambda: not [t for t in threading.enumerate()
+                                   if t.name.startswith("sd-output-s28b") and t.is_alive()], 3.0):
+        problems.append("a failed start left an output reader thread running")
+    return problems, ["after stop() the reader thread is gone, the pipe closed and the last output kept; a "
+                      "failed start leaves no reader"]
+
+
+def s29(mod, sandbox):
+    problems = []
+    root = new_sandbox(sandbox, "proc")
+    rows = (("100", "100 (tf cmd) S 1 100 100 0 -1 4194560"),
+            ("101", "101 (a b) c) Z 100 100 100 0 -1 4194560"),
+            ("102", "102 (other) S 1 7 7 0 -1 4194560"),
+            ("103", "garbage"),
+            ("self", "1 (x) S 1 100 100 0"))
+    for name, text in rows:
+        os.makedirs(os.path.join(root, name))
+        write_file(os.path.join(root, name, "stat"), text + "\n")
+    got = sorted(mod._sd_group_members(100, root))
+    if got != [(100, "S"), (101, "Z")]:
+        problems.append("members of group 100 are %r, expected [(100, 'S'), (101, 'Z')]" % (got,))
+    if mod._sd_group_members(100, os.path.join(root, "absent")) != []:
+        problems.append("a missing /proc tree is not an empty list")
+    pid = _s_free_pids(1)[0]
+    with _s_fake_world(mod, [pid]) as world, \
+            patched(mod, [("_sd_group_members", lambda pgid, *a, **k: [(4242, "Z"), (4243, "S")])]):
+        sup = mod.Supervisor()
+        child = sup.start(_s_fake_spec(mod))
+        with _s_logged(mod, logging.WARNING) as cap:
+            ok = sup.stop(child)
+        if ok is not False:
+            problems.append("control: stop() returned %r for a group that survives" % ok)
+        rows = _s_rows(cap, "survivors", logging.WARNING)
+        if len(rows) != 1 or "4242:Z" not in rows[0] or "4243:S" not in rows[0] or "pgid=%d" % pid not in rows[0]:
+            problems.append("the survived-the-ladder report does not list the members: %r" % rows)
+        sup.registry.discard(child.pgid)
+    return problems, ["_sd_group_members reads pid:state of a group from /proc/<pid>/stat (comm with a ')' "
+                      "included, other groups and garbage skipped, [] without /proc); the WARNING after a "
+                      "failed ladder lists them"]
+
+
+@_s_live
+def s30(mod, sup, sandbox, names):
+    spec = _s_spec(mod, sandbox, "s30", "--emit", "many", stop_grace=2.0, start_timeout=20.0)
+    problems = []
+    with _s_logged(mod, logging.DEBUG) as cap:
+        t0 = time.monotonic()
+        found, child = _s_ready(sup, spec, names, timeout=20.0)
+        problems += found
+        if child is None:
+            return problems, []
+        out = child.output
+        if out is None or not wait_until(lambda: any(t.endswith("tf many 29999") for t in out.tail()), 15.0):
+            problems.append("the reader did not drain the 30000 lines (tail %r)" % ((out.tail()[-1:] if out else None),))
+        problems += _s_stopped(mod, sup, child, "stop")[0]
+        took = time.monotonic() - t0
+    live = [m for _l, m in cap.rows if m.startswith("child output: app=s30")]
+    bound = mod._SD_OUT_LINES_PER_S * (took + 1.0) + 1
+    if len(live) > bound:
+        problems.append("%d live rows in %.1fs, the cap allows about %d" % (len(live), took, bound))
+    dropped = _s_rows(cap, "child output dropped: app=s30 pid=%d lines=" % child.pid, logging.DEBUG)
+    if not dropped:
+        problems.append("no 'dropped N lines' summary row")
+    else:
+        count = sum(int(row.rsplit("lines=", 1)[1]) for row in dropped)  # each row: since the last
+        if count + len(live) != 30000:
+            problems.append("%d logged + %d dropped != 30000 lines" % (len(live), count))
+    return problems, ["30000 lines in a burst: at most %d live rows, the rest counted and reported once; "
+                      "the ring still holds the last line" % len(live)]
+
+
+@_s_live
+def s31(mod, sup, sandbox, names):
+    held = []
+
+    class Keep(mod.Supervisor):
+        def stop(self, child):
+            if not held:
+                held.append(child)  # the group "survives" the first ladder: nothing is signalled
+                return False
+            return super().stop(child)
+
+    sup = Keep()
+    problems = []
+    if not hasattr(sup, "survivor") or sup.survivor is not None:
+        return ["Supervisor.survivor is %r before any launch, expected None" % (getattr(sup, "survivor", "absent"),)], []
+    spec = _s_spec(mod, sandbox, "s31", "--hang", stop_grace=1.0)
+    names.append("s31")
+    outcome, child, _took = _s_launch(sup, spec, 1.0)
+    if outcome != "timeout" or child is not None:
+        problems.append("launch answered (%r, %r), expected ('timeout', None)" % (outcome, child))
+    if not held or sup.survivor is not held[0]:
+        problems.append("launch did not record the child whose group survived (survivor %r)" % (sup.survivor,))
+    if len(read_starts(sandbox, "s31")) != 1:
+        problems.append("%d spawns: a surviving group must not be followed by a respawn" % len(read_starts(sandbox, "s31")))
+    if held and held[0].pgid not in sup.registry:
+        problems.append("the surviving group left the registry")
+    if held:
+        problems += _s_stopped(mod, sup, held[0], "cleanup stop")[0]
+    spec = _s_spec(mod, sandbox, "s31b", stop_grace=2.0)
+    found, child = _s_ready(sup, spec, names)
+    problems += found
+    if sup.survivor is not None:
+        problems.append("a later clean launch kept the old survivor %r" % (sup.survivor,))
+    if child is not None:
+        problems += _s_stopped(mod, sup, child, "stop")[0]
+    return problems, ["a timed-out start whose group survived the ladder is recorded on Supervisor.survivor "
+                      "(no respawn, still registered); the next launch clears it"]
+
+
 GS_FUNCS = (s1, s2, s3, s4, s5, s6, s7, s8, s9, s10, s11, s12, s13, s14, s15, s16, s17,
-            s18, s19, s20, s21, s22)
+            s18, s19, s20, s21, s22, s23, s24, s25, s26, s27, s28, s29, s30, s31)
 GS_BUDGET = frozenset(("S11", "S12", "S13"))
 
 
@@ -2833,7 +3217,8 @@ def group_s(suite, fixture_root):
         if mod is None:
             suite.record(GS, cid, [why])
             continue
-        absent = missing_names(mod, S_NAMES_BUDGET if tag in GS_BUDGET else S_NAMES_SUP)
+        absent = missing_names(mod, S_NAMES_BUDGET if tag in GS_BUDGET
+                               else S_NAMES_OUT if tag in GS_OUT else S_NAMES_SUP)
         if not absent and tag not in GS_BUDGET:
             lacking = [m for m in S_METHODS if not callable(getattr(mod.Supervisor, m, None))]
             if lacking:
@@ -4557,6 +4942,9 @@ GQS_CASES = (
     "QS14 STARTING before spawn",
     "QS15 admission race",
     "QS16 repeated unloads coalesce",
+    "QS17 zombie WARNING rate-limited",
+    "QS18 crash after a send dumps the tail",
+    "QS19 failed start, surviving group",
 )
 
 GT_CASES = (
@@ -5385,7 +5773,123 @@ def qs16(mod, sandbox, names, optional):
                                    "ticket, every caller answered from it" % QS16_REPEATS]
 
 
-GQS_FUNCS = (qs1, qs2, qs3, qs4, qs5, qs6, qs7, qs8, qs9, qs10, qs11, qs12, qs13, qs14, qs15, qs16)
+def _q_keep_first(mod, held):
+    """A Supervisor whose FIRST stop() reports the group survived without signalling anything
+    (the child really stays alive); later stops are the real ladder."""
+    class Keep(mod.Supervisor):
+        def stop(self, child):
+            if not held:
+                held.append(child)
+                return False
+            return super().stop(child)
+    return Keep()
+
+
+@_q_live
+def qs17(mod, sandbox, names, optional):
+    """A sticky unload_failed is diagnosable: ONE WARNING naming the zombie app and its pgid per
+    _SD_ZOMBIE_WARN_S, however many requests fail behind it (no state change)."""
+    names.append("A")
+    held, problems = [], []
+    sup = _q_keep_first(mod, held)
+    bodies = [_q_body("qs17-%d" % i) for i in range(5)]
+    with _s_logged(mod, logging.WARNING) as cap:
+        with _q_world(mod, {"A": _q_entry(sandbox, "A"), "B": _q_entry(sandbox, "B")}, supervisor=sup,
+                      patches=(("_SD_ZOMBIE_WARN_S", 0.8),)) as w:
+            r0 = w.request("A", bodies[0])
+            problems += _q_ok("first", r0, bodies[0])
+            w.release(r0)
+            problems += _q_code("unload with a surviving group", w.sched.submit_unload(None, False),
+                                "unload_failed")
+            pgid = held[0].pgid if held else None
+            rows = lambda: _s_rows(cap, "sd zombie group still holds the GPU", logging.WARNING)  # noqa: E731
+            behind = [w.request("B", bodies[1]), w.request("A", bodies[2]), w.request("B", bodies[3])]
+            for i, ticket in enumerate(behind):
+                problems += _q_code("request %d behind the zombie" % i, ticket, "unload_failed")
+            w.release(*behind)
+            if len(rows()) != 1 or "model=A pgid=%s" % pgid not in rows()[0]:
+                problems.append("three refused requests logged %r, expected ONE row naming model=A pgid=%s"
+                                % (rows(), pgid))
+            time.sleep(1.0)
+            late = w.request("B", bodies[4])
+            problems += _q_code("request after the interval", late, "unload_failed")
+            w.release(late)
+            if len(rows()) != 2:
+                problems.append("after the interval %d rows, expected 2" % len(rows()))
+            if held:
+                try:
+                    os.killpg(held[0].pgid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                held[0].proc.wait(KILL_TIMEOUT_S)
+    return problems + w.problems, ["three requests behind a zombie: one WARNING (app and pgid); the next "
+                                   "after _SD_ZOMBIE_WARN_S: a second"]
+
+
+@_q_live
+def qs18(mod, sandbox, names, optional):
+    """A crash after a send leaves its diagnosis in the log without --debug: the child's last output at
+    WARNING, with the app name and pid prefix."""
+    names.append("A")
+    problems = []
+    body = _q_body("qs18")
+    with _s_logged(mod, logging.WARNING) as cap:
+        with _q_world(mod, {"A": _q_entry(sandbox, "A", "--emit", "hello", "--crash-after", "0",
+                                          retries=0)}) as w:
+            r1 = w.request("A", body)
+            problems += _q_code("the crashing request", r1, "model_crashed")
+            w.release(r1)
+            pids = read_starts(sandbox, "A")
+    if len(pids) != 1:
+        problems.append("%d spawns, expected 1" % len(pids))
+    want = "child output tail: app=A pid=%d: tf out hello" % pids[0] if pids else "child output tail"
+    rows = _s_rows(cap, want, logging.WARNING)
+    if len(rows) != 1:
+        problems.append("expected one WARNING row %r, found %r" % (want, rows))
+    return problems + w.problems, ["a child that crashes on its first POST: its output is dumped at "
+                                   "WARNING with the app name and pid"]
+
+
+@_q_live
+def qs19(mod, sandbox, names, optional):
+    """A failed start whose group survived the ladder is a ZOMBIE (DEAD, group_alive), like the _ladder
+    path: nothing spawns beside it, requests get unload_failed, and an unload re-runs the ladder."""
+    names.extend(("A", "B"))
+    held, problems = [], []
+    sup = _q_keep_first(mod, held)
+    b0, b1, b2, b3 = (_q_body("qs19-%d" % i) for i in range(4))
+    with _q_world(mod, {"A": _q_entry(sandbox, "A", "--hang", start_timeout=1.5),
+                        "B": _q_entry(sandbox, "B")}, supervisor=sup) as w:
+        r0 = w.request("A", b0)
+        problems += _q_code("the start that timed out", r0, "model_start_timeout")
+        w.release(r0)
+        view = w.states()["A"]
+        if view.state.name != "DEAD" or not view.group_alive:
+            problems.append("A is %s group_alive=%s after a failed start whose group survived, expected a "
+                            "DEAD zombie" % (view.state.name, view.group_alive))
+        r1, r2 = w.request("B", b1), w.request("A", b2)
+        problems += _q_code("B behind the zombie", r1, "unload_failed")
+        problems += _q_code("A behind the zombie", r2, "unload_failed")
+        w.release(r1, r2)
+        if len(read_starts(sandbox, "A")) != 1 or read_starts(sandbox, "B"):
+            problems.append("a second child was spawned beside the surviving group (A %d, B %d)"
+                            % (len(read_starts(sandbox, "A")), len(read_starts(sandbox, "B"))))
+        problems += _q_unloaded("the unload", w.sched.submit_unload("A", False), True, "A")
+        view = w.states()["A"]
+        if view.state.name != "STOPPED" or view.group_alive:
+            problems.append("A is %s group_alive=%s after the unload, expected STOPPED"
+                            % (view.state.name, view.group_alive))
+        if held and not pid_dead(held[0].pid):
+            problems.append("the surviving child is still alive after the unload")
+        r3 = w.request("B", b3)
+        problems += _q_ok("after the unload", r3, b3)
+        w.release(r3)
+    return problems + w.problems, ["a timed-out start whose group survived: DEAD+group_alive, no second "
+                                   "spawn, unload_failed for requests, an unload clears it"]
+
+
+GQS_FUNCS = (qs1, qs2, qs3, qs4, qs5, qs6, qs7, qs8, qs9, qs10, qs11, qs12, qs13, qs14, qs15, qs16,
+             qs17, qs18, qs19)
 
 
 def _t_retry(mod, sandbox, names, retries, tag):
