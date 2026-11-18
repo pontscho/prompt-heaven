@@ -462,3 +462,7 @@ The readiness section declined the `[serve] Ready` log line partly because readi
 **Consequence.** A buffered chat ticket may now hold up to 32 MiB, so the queue's memory worst case (`max_connections` buffered bodies, each at most its route's cap) doubles for chat bodies; it was already bounded by `body_limit` for the image routes.
 
 **Tests.** R21 now expects 32 MiB for chat; P42 gained a second block on the real table at the default `body_limit`: a 20 MiB chat body (the production size class) relayed, chat 32 MiB + 1 and embed 4 MiB + 1 refused 413 from the head alone. No case was added; `gpu_router` stays at 276 `tests/run.py:SUITES`. The component page is [[gpu-router]].
+
+## Addendum (2026-11-18): An llm app's slow exit no longer leaves a zombie behind the ladder (26f6b20)
+
+An inferNO-style llm app was observed on production (2026-11-15 to 2026-11-18) to take about 6.5-7 s to exit after SIGTERM, longer than the reaping wait of the default 5 + 2 + 2 s stop ladder. On Linux its unreaped leader kept the group answering signal 0, so every ladder row of the abort matrix above could leave the app a DEAD zombie answering `unload_failed` until a restart. The ladder's confirm step and the zombie re-probe now `poll()` the leader before each signal-0 probe `Scripts/gpu-router.py:reap_dead_leader`. The abort matrix, `stop_grace` and its default are unchanged. The decision and its tests (QS23, QS24; `gpu_router` 276 to 278) are recorded in ADR 0034's addendum of 2026-11-18. The component page is [[gpu-router]].

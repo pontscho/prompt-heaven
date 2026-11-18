@@ -315,3 +315,7 @@ Each site now calls the `_strict_loads` its host already carried, for example `S
 - the proxy operator's config.
 
 Group H no longer only reads the thirteen converted sites; it drives them. Each one gets a finite, a `NaN` and an over-long-integer body, with 3.11+'s digit limit lifted so that the lax code cannot pass on the interpreter's own refusal `tests/test_generated_region.py:group_strict_sites`. `generated_region` went from 118 to 131 cases, and `inspect_validate` from 269 to 272. [[generated-regions]] carries the current description.
+
+## Addendum (2026-11-18): WHOLE_SOURCES now holds six names (spool is the fifteenth domain)
+
+The earlier statement that `WHOLE_SOURCES` still holds five names is out of date: `Scripts/amalgamate.py:WHOLE_SOURCES` now holds six, `_mcp_brotli.py`, `_mcp_chrome.py`, `_mcp_codesearch.py`, `_mcp_spool.py`, `_mcp_websearch.py` and `_mcp_zstd.py`. `_mcp_spool.py` is the fifteenth canonical source (commit 2191df6), carried whole by `Scripts/mcp-messagebox.py` and `Scripts/messagebox-hook.py`; the domain argument is on [[generated-regions]].

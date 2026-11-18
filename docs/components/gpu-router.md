@@ -10,8 +10,8 @@ sources:
   - tests/files/gpu_router/tf_stub_sd.py
   - tests/files/gpu_router/tf_stub_llm.py
 verified:
-  commit: 9d8cfa7
-  date: 2026-11-16
+  commit: 26f6b20
+  date: 2026-11-18
 links:
   - llm-router
   - mcp-proxy
@@ -423,8 +423,12 @@ time (QS13 pins it), whatever its kind.
   nothing is charged, retried or stopped.
 - A group that survives SIGKILL leaves the app `DEAD` with `group_alive` set.
   While such a zombie exists every request that reaches the head fails 500
-  `unload_failed`, and the group is re-probed with signal 0 before each pop
-  until it is gone `Scripts/gpu-router.py:_reprobe`. Each such refusal is
+  `unload_failed`, and the group is re-probed before each pop until it is gone
+  `Scripts/gpu-router.py:_reprobe`: the held child's leader is `poll()`ed first,
+  outside the lock, so a leader that died after its ladder gave up is reaped
+  `Scripts/gpu-router.py:reap_dead_leader`, and only then is the group probed
+  with signal 0 (QS23). A reaped leader does not mask a live member: the group
+  stays a zombie while any member answers signal 0 (QS24). Each such refusal is
   reported, rate-limited to one WARNING per app per
   `Scripts/gpu-router.py:_SD_ZOMBIE_WARN_S` (60 s), as `sd zombie group still
   holds the GPU: model=<app> pgid=<pgid>`, so a sticky 500 names its cause in
@@ -437,8 +441,12 @@ child group survived the stop ladder: model=... pgid=...`, followed on Linux by
 nothing on macOS) `Scripts/gpu-router.py:_sd_group_members`, then `sd model
 zombie` from the send path or `sd model start failed` from a failed start, and
 from there `sd zombie group still holds the GPU` once a minute while requests
-fail. The zombie clears by itself once the signal-0 re-probe finds the group
-gone (`sd zombie group gone`). To retry the kill, `POST /v1/unload` for the app:
+fail. The zombie clears by itself once the re-probe, which reaps a late-dead
+leader first, finds the group gone (`sd zombie group gone`); a leader reaped
+that way logs one DEBUG row, `sd leader reaped late: app=<app> pid=<pid>`
+`Scripts/gpu-router.py:reap_dead_leader`. The re-probe runs only when the
+scheduler has work at the head, so a zombie clears on the next request or
+unload, not in the background `Scripts/gpu-router.py:_run`. To retry the kill, `POST /v1/unload` for the app:
 a resident target, a zombie included, re-runs the ladder and answers 200 only
 once the group is confirmed gone, else 500 `unload_failed` again
 `Scripts/gpu-router.py:decide` `Scripts/gpu-router.py:_exec_unload`; `?force=1`
@@ -504,8 +512,20 @@ else picked by binding port 0 on loopback and closing it
 **The stop ladder: kill before reap.** SIGTERM to the group, a wait of
 `stop_grace` for the leader WITHOUT reaping it, SIGKILL to the group while the
 leader is still an unreaped zombie (so its pid and the pgid cannot be recycled),
-reap, then confirm the group gone with signal 0 within
-`Scripts/gpu-router.py:_SD_KILL_STEP_S` `Scripts/gpu-router.py:stop`. The
+a reaping wait of `Scripts/gpu-router.py:_SD_KILL_STEP_S`, then confirm the
+group gone with signal 0 within another `_SD_KILL_STEP_S`
+`Scripts/gpu-router.py:stop`. The confirm loop takes the child, not only its
+pgid, and `poll()`s the leader on every tick before the signal-0 probe
+`Scripts/gpu-router.py:_confirm_gone`: on Linux an unreaped zombie leader keeps
+`killpg(pgid, 0)` answering alive, so a leader that died after the reaping
+wait timed out would otherwise keep a group whose only member it was looking
+alive for ever, and nothing else would ever wait on it. Before `26f6b20` the
+confirm was signal 0 only, and a leader whose exit outlasted the reaping wait
+left the app a `DEAD` zombie answering `unload_failed` to every request until
+the router restarted (seen on production, an inferNO exit of about 6.5-7 s
+against the 5 + 2 + 2 s default ladder). The late reap shares `_poll`'s M14
+bookkeeping, so it marks the child reaped and drops an emptied group from the
+registry `Scripts/gpu-router.py:reap_dead_leader`. The
 unreaped wait is a declared adapted copy of sbx's, chosen by `sys.platform`: a
 kqueue `NOTE_EXIT` on darwin, `os.waitid(..., WNOWAIT)` elsewhere
 `Scripts/gpu-router.py:_sd_wait_exit_unreaped`. A leader that a readiness
@@ -755,7 +775,7 @@ The groups, in run order `tests/test_gpu_router.py:GROUP_ORDER`:
 | R | routing and the sniffer (pure); the llm routes' tokens, caps, ids and kind check, the neutral refusal wording (R21-R23) | `tests/test_gpu_router.py:GR_CASES` |
 | D | the pure FIFO decision; the abort matrix (D23), the strict de-chunker (D24), the stream head parser (D25), the bounded stream queue (D26), the pure embed retarget: only the two embed paths, only an embed_capable pair, only a READY non-disabled resident (D27) | `tests/test_gpu_router.py:GD_CASES` |
 | S | spawn, readiness, the stop ladder, the group sweep, the budget; the probe path and status (S21), a fixed `child_port` and one spawn (S22), the child's output in the log: DEBUG rows, the sanitizer and caps, the WARNING tail, a reader that ends on its stop flag, the `/proc` member listing, a surviving group recorded on `survivor` (S23-S31) | `tests/test_gpu_router.py:GS_CASES` |
-| Q-sched | one in flight, queued and forced unloads, cancel (QS8: cancelling a running request kills nothing), the admission race; the rate-limited zombie WARNING (QS17), the output tail after a crash (QS18), a failed start whose group survived left a zombie (QS19); embeddings and rerank served by the resident embed_capable app with no spawn, no stop and the body byte-exact (QS20), an addressed resident, an empty GPU and a non-capable addressed app as before (QS21), a non-capable resident swapped out and a chat path never retargeted (QS22) | `tests/test_gpu_router.py:GQS_CASES` |
+| Q-sched | one in flight, queued and forced unloads, cancel (QS8: cancelling a running request kills nothing), the admission race; the rate-limited zombie WARNING (QS17), the output tail after a crash (QS18), a failed start whose group survived left a zombie (QS19); embeddings and rerank served by the resident embed_capable app with no spawn, no stop and the body byte-exact (QS20), an addressed resident, an empty GPU and a non-capable addressed app as before (QS21), a non-capable resident swapped out and a chat path never retargeted (QS22); a leader that exits after the whole ladder is reaped by the re-probe, the zombie clears and the next request starts the app (QS23), a reaped leader beside a live group member stays a zombie until the member is gone (QS24) | `tests/test_gpu_router.py:GQS_CASES` |
 | T | retries, `request_timeout`, the poison prompt, the restart budget; a squatter never sees a request (T14), the llm timeouts abort without a kill (T15, T17), shutdown mid-stream (T16) | `tests/test_gpu_router.py:GT_CASES` |
 | P | auth, routing, framing, the byte-exact relay, startup lines, the error table; the config `port` and `bind` (P39, P40), the llm routes (P41), the per-kind caps with 411 first, and the real table at the default `body_limit`: a 20 MiB chat body relayed, chat 32 MiB + 1 and embed 4 MiB + 1 refused 413 unread (P42), the `anthropic-*` headers (P43), the stream head allow-list (P44), an incremental chunked stream (P45), a mid-stream EOF never replayed (P46), several listeners: every address answers (P47), one bind failure aborts startup (P48), what a `peer` listener shares and keeps (P49) | `tests/test_gpu_router.py:GP_CASES` |
 | Q-http | departed clients, the disconnect loop, the over-cap race, racing unloads; a client that leaves a stream kills nothing (QH6) | `tests/test_gpu_router.py:GQH_CASES` |
@@ -785,7 +805,8 @@ several listeners on one port to 259 (L49, P47-P49), and the child output and
 zombie diagnostics (`5de1f34`) to 271 (S23-S31, QS17-QS19), and the opt-in
 `embed_capable` key (`8e8638c`) to 276 (L 50, D 27, Q-sched 22: L50, D27,
 QS20-QS22). The chat cap raise (`9d8cfa7`) left it at 276: it widened P42 by a
-second block on the real table and R21's expected caps, adding no case. P47 and P48 bind
+second block on the real table and R21's expected caps, adding no case. The
+late leader reap (`26f6b20`) moved it to 278 (Q-sched 24: QS23, QS24). P47 and P48 bind
 `127.0.0.2` only where the host can (Linux, where all of 127/8 is up); on macOS
 they exercise `127.0.0.1` alone and say so in their detail, and P48 then fails
 on the unbindable second address instead of a held port. P49 needs no second
