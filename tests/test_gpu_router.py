@@ -5056,6 +5056,8 @@ GQS_CASES = (
     "QS20 embed retarget to the resident",
     "QS21 embed: itself, or today's start",
     "QS22 embed swap as today, chat not retargeted",
+    "QS23 late leader exit clears the zombie",
+    "QS24 live member stays a survivor",
 )
 
 GT_CASES = (
@@ -6132,8 +6134,130 @@ def qs22(mod, sandbox, names, optional):
                                    "on a capable app's prefix swaps as today even beside a capable resident"]
 
 
+class _QSlowProc:
+    """The real Popen of a stub whose exit is slow to be REAPED: poll() answers None and wait()
+    times out until `gate` is set (a CUDA teardown that outlasts the ladder), then both reach the
+    real Popen.  `reaped` becomes True once a poll() has reaped the real leader."""
+
+    def __init__(self, real, gate):
+        self._real = real
+        self.gate = gate
+        self.reaped = False
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+    def wait(self, timeout=None):
+        if not self.gate.is_set():
+            raise subprocess.TimeoutExpired(self._real.args, timeout or 0)
+        return self._real.wait(timeout)
+
+    def poll(self):
+        if not self.gate.is_set():
+            return None
+        code = self._real.poll()
+        if code is not None:
+            self.reaped = True
+        return code
+
+
+def _q_slow_exit_world(mod, sandbox, live_member):
+    """(Supervisor class, patches, state) for QS23/QS24: the child's proc is a _QSlowProc and the
+    signal-0 probe of its group answers like Linux does for an unreaped zombie (alive until the
+    leader is reaped).  With *live_member* the group answers alive for ever (a real survivor)
+    until state['live'] is cleared."""
+    real_signal = mod._signal_group
+    state = {"slow": None, "pgid": None, "live": live_member, "gate": threading.Event()}
+
+    class Slow(mod.Supervisor):
+        def start(self, spec):
+            child = super().start(spec)
+            if state["slow"] is None:  # only the FIRST child is the slow one
+                state["slow"] = child.proc = _QSlowProc(child.proc, state["gate"])
+                state["pgid"] = child.pgid
+            return child
+
+    def fake_signal(pgid, sig):
+        slow = state["slow"]
+        if sig == 0 and slow is not None and pgid == state["pgid"] and (state["live"] or not slow.reaped):
+            return True
+        return real_signal(pgid, sig)
+
+    return Slow, (("_signal_group", fake_signal),), state
+
+
+@_q_live
+def qs23(mod, sandbox, names, optional):
+    """The leader of a group dies after the whole ladder budget: stop() gives up (a zombie group,
+    unload_failed), but once the leader is reapable the reprobe reaps it, the group counts as gone
+    and the next request starts the app."""
+    names.append("A")
+    problems = []
+    slow, patches, state = _q_slow_exit_world(mod, sandbox, False)
+    sup = slow()
+    b0, b1, b2 = (_q_body("qs23-%d" % i) for i in range(3))
+    with _q_world(mod, {"A": _q_entry(sandbox, "A")}, supervisor=sup, patches=patches) as w:
+        r0 = w.request("A", b0)
+        problems += _q_ok("first", r0, b0)
+        w.release(r0)
+        unload = w.sched.submit_unload(None, False)
+        problems += _q_code("unload while the leader is still exiting", unload, "unload_failed")
+        view = w.states()["A"]
+        if view.state.name != "DEAD" or not view.group_alive:
+            return problems + ["A is %s group_alive=%s, expected a DEAD zombie"
+                               % (view.state.name, view.group_alive)], []
+        r1 = w.request("A", b1)
+        problems += _q_code("request while the exit is pending", r1, "unload_failed")
+        w.release(r1)
+        state["gate"].set()  # the slow exit is over: the leader is dead and reapable
+        r2 = w.request("A", b2)
+        problems += _q_ok("request after the late exit", r2, b2)
+        w.release(r2)
+        if state["slow"] is None or not state["slow"].reaped:
+            problems.append("the dead leader was never reaped by a poll()")
+        if w.states()["A"].group_alive or state["pgid"] in sup.registry:
+            problems.append("the zombie was not cleared (or its pgid is still registered)")
+        if len(read_starts(sandbox, "A")) != 2:
+            problems.append("A was started %d time(s), expected 2" % len(read_starts(sandbox, "A")))
+    return problems + w.problems, ["a leader that exits after the ladder is reaped by the reprobe: the "
+                                   "zombie clears to STOPPED and the next request starts the app"]
+
+
+@_q_live
+def qs24(mod, sandbox, names, optional):
+    """A reaped leader does not mask a LIVE surviving member: the group stays a zombie (every request
+    unload_failed, pgid registered) for as long as the member answers signal 0."""
+    names.append("A")
+    problems = []
+    slow, patches, state = _q_slow_exit_world(mod, sandbox, True)
+    sup = slow()
+    b0, b1, b2 = (_q_body("qs24-%d" % i) for i in range(3))
+    with _q_world(mod, {"A": _q_entry(sandbox, "A")}, supervisor=sup, patches=patches) as w:
+        r0 = w.request("A", b0)
+        problems += _q_ok("first", r0, b0)
+        w.release(r0)
+        state["gate"].set()  # the leader is reapable at once; a member of the group lives on
+        unload = w.sched.submit_unload(None, False)
+        problems += _q_code("unload with a live member", unload, "unload_failed")
+        r1 = w.request("A", b1)
+        problems += _q_code("request behind the live member", r1, "unload_failed")
+        w.release(r1)
+        view = w.states()["A"]
+        if view.state.name != "DEAD" or not view.group_alive or state["pgid"] not in sup.registry:
+            problems.append("the live member was masked: A is %s group_alive=%s registered=%s"
+                            % (view.state.name, view.group_alive, state["pgid"] in sup.registry))
+        if len(read_starts(sandbox, "A")) != 1:
+            problems.append("a second child was started beside a surviving member")
+        state["live"] = False  # the member dies: the next request clears the zombie
+        r2 = w.request("A", b2)
+        problems += _q_ok("after the member is gone", r2, b2)
+        w.release(r2)
+    return problems + w.problems, ["a reaped leader with a live group member stays a survivor; once the "
+                                   "member is gone the zombie clears"]
+
+
 GQS_FUNCS = (qs1, qs2, qs3, qs4, qs5, qs6, qs7, qs8, qs9, qs10, qs11, qs12, qs13, qs14, qs15, qs16,
-             qs17, qs18, qs19, qs20, qs21, qs22)
+             qs17, qs18, qs19, qs20, qs21, qs22, qs23, qs24)
 
 
 def _t_retry(mod, sandbox, names, retries, tag):

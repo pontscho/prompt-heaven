@@ -2129,11 +2129,26 @@ class Supervisor:
                 return False
             time.sleep(_SD_WAITID_POLL_S)
 
-    def _confirm_gone(self, pgid: int) -> bool:
-        """Probe signal 0 until ESRCH/EPERM within _SD_KILL_STEP_S; on that the pgid leaves
-        the registry at once (M3) and is never signalled again."""
+    def reap_dead_leader(self, child: Child) -> None:
+        """poll() the leader so a leader that died AFTER the ladder's wait gave up is reaped:
+        an unreaped zombie keeps the group answering signal 0 on Linux for ever and nothing
+        else would ever wait on it. The M14 bookkeeping is _poll's (child.reaped, the registry
+        entry dropped when the group is then empty); a poll that reaps here is one DEBUG row."""
+        if child.reaped:
+            return
+        unreaped = child.proc.returncode is None
+        self._poll(child)
+        if unreaped and child.reaped:
+            log.debug("sd leader reaped late: app=%s pid=%d", child.spec.name, child.pid)
+
+    def _confirm_gone(self, child: Child) -> bool:
+        """Probe signal 0 until ESRCH/EPERM within _SD_KILL_STEP_S, reaping a dead leader on
+        each tick first (a group whose only member was the leader is then empty); on gone the
+        pgid leaves the registry at once (M3) and is never signalled again."""
+        pgid = child.pgid
         end = _sd_now() + _SD_KILL_STEP_S
         while True:
+            self.reap_dead_leader(child)
             if not _signal_group(pgid, 0):
                 self.registry.discard(pgid)
                 return True
@@ -2170,7 +2185,7 @@ class Supervisor:
             child.proc.wait(timeout=_SD_KILL_STEP_S)
         except subprocess.TimeoutExpired:
             pass
-        gone = self._confirm_gone(pgid)
+        gone = self._confirm_gone(child)
         if gone:
             # The reader ends on its stop flag, never on EOF: a grandchild in another session
             # can keep the pipe's write end open.
@@ -3116,7 +3131,15 @@ class Scheduler:
 
     def _reprobe(self, name: str, pgid: int) -> None:
         """Re-probe a zombie group with signal 0 (outside the lock, M2): once it is gone
-        (ESRCH, or EPERM: no longer ours) the zombie clears and the model is STOPPED."""
+        (ESRCH, or EPERM: no longer ours) the zombie clears and the model is STOPPED. The
+        leader is poll()ed first (outside the lock too): one that died after the ladder gave
+        up is an unreaped zombie that keeps the group answering signal 0 until reaped."""
+        with self.cond:
+            held = self.child
+            if held is not None and held.pgid != pgid:
+                held = None
+        if held is not None:
+            self.supervisor.reap_dead_leader(held)
         if _signal_group(pgid, 0):
             return
         self.supervisor.registry.discard(pgid)
