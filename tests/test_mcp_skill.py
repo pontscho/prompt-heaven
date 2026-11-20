@@ -195,7 +195,8 @@ part says so; the text part never carries the base64. Written RED first.
      file that is UTF-8 (the runner flips quote-heavy text to base64 by cost)
      is shown as text like a utf8 one, M13 a binary or invalid base64 keeps
      `content not shown`, M14 a base64 text over the base64 of the answer
-     ceiling is not decoded.
+     ceiling is not decoded, M15 a .docx (any case) is a blob resource with
+     the Word MIME beside the unchanged .pdf and .md.
 
 Group N pins the optional run parameter `inputs` (ADR 0032, 2026-11-09
 inputs addendum): up to 8 {name, content, encoding} items staged into the
@@ -4200,6 +4201,33 @@ def _run_documents(suite, fx):
         return problems, []
     _guard(suite, GRP_M, "M14 base64-text-over-the-cap-not-decoded",
            b64_oversize_not_decoded)
+
+    def docx_resource():
+        """M15: a .docx (any case) is a blob resource with the Word MIME,
+        bytes untouched whatever they hold; .pdf and .md are unchanged."""
+        problems = []
+        docx_mime = ("application/vnd.openxmlformats-officedocument"
+                     ".wordprocessingml.document")
+        docx_bytes = b"PK\x03\x04\xff\xfe\x00\x80 not inspected"
+        result = _doc_wire([
+            {"path": "b.md", "encoding": "utf8", "content": "# b\n"},
+            {"path": "a.DOCX", "encoding": "base64",
+             "content": _b64(docx_bytes)},
+            {"path": "c.pdf", "encoding": "base64",
+             "content": _b64(PDF_BYTES)}])
+        res = [c.get("resource") or {} for c in _resources(result)]
+        want = [{"uri": "skill-out://doc/a.DOCX", "mimeType": docx_mime,
+                 "blob": _b64(docx_bytes)},
+                {"uri": "skill-out://doc/b.md", "mimeType": "text/markdown",
+                 "text": "# b\n"},
+                {"uri": "skill-out://doc/c.pdf", "mimeType": "application/pdf",
+                 "blob": _b64(PDF_BYTES)}]
+        if res != want:
+            problems.append("resources %r, want %r" % (res, want))
+        if _b64(docx_bytes) in _doc_text(result):
+            problems.append("the base64 is in the text part")
+        return problems, []
+    _guard(suite, GRP_M, "M15 docx-is-a-blob-resource", docx_resource)
 
 
 # ---------------------------------------------------------------------------

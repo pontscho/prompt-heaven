@@ -386,16 +386,17 @@ say `Scripts/mcp-skill.py:_sanitize_run_result`:
   (`Scripts/mcp-skill.py:_B64_SHOW_MAX`, `Scripts/mcp-skill.py:_b64_text`); any other
   `base64` file (a binary, invalid base64, over that length) or an unknown
   encoding is one `encoding: <kind>, N encoded chars (content not shown)` line,
-  never its base64 in the text part (a `.pdf`, `.typ` or `.md` additionally travels as a
+  never its base64 in the text part (a `.pdf`, `.typ`, `.md` or `.docx` additionally travels as a
   resource block, below).
 - **`(no output)`** when none of the above has anything to show
   `Scripts/mcp-skill.py:_render_sections`.
 
 **Produced documents are resource blocks.** An out file whose extension is
-`.pdf`, `.typ` or `.md` (`Scripts/mcp-skill.py:_DOC_TYPES`) is also added to the tool
+`.pdf`, `.typ`, `.md` or `.docx` (`Scripts/mcp-skill.py:_DOC_TYPES`) is also added to the tool
 result as an MCP `EmbeddedResource` content block after the text block —
 `{type: "resource", resource: {uri, mimeType, blob}}` for a PDF
-(`application/pdf`), `{..., text}` for a Typst source (`text/x-typst`) or a
+(`application/pdf`) or a Word file
+(`application/vnd.openxmlformats-officedocument.wordprocessingml.document`, nothing inspected), `{..., text}` for a Typst source (`text/x-typst`) or a
 Markdown file (`text/markdown`) — chosen
 by extension and never by UTF-8 validity `Scripts/mcp-skill.py:_doc_block`
 `Scripts/mcp-skill.py:McpServer._handle_tool_call`. The `uri` is

@@ -692,6 +692,8 @@ Rows `mcp_skill:M1`-`M8` (new group M, run red first: 5 of 8 failed against the 
 
 Addendum (2026-11-10): `.md` joins `.pdf` and `.typ` in `_DOC_TYPES` as a text resource (`text/markdown`) under exactly the `.typ` rules (case-insensitive extension, strict UTF-8, no control character besides LF, CR and TAB), added at ai-soul's request for PDF-to-Markdown reading output; rows `mcp_skill:M9`-`M10` (run red first: 2 of 2 failed) took the suite from 115 to 117 cases.
 
+Addendum (2026-11-20): `.docx` joins the allowlist as a blob resource (`application/vnd.openxmlformats-officedocument.wordprocessingml.document`) under exactly the `.pdf` rule (case-insensitive extension, the file's bytes re-encoded, nothing inspected), because ai-soul accepts a Word file as a generated document (ai-soul 7d8c098) and a `.docx` out file had fallen to the metadata line (`encoding: base64, N encoded chars (content not shown)`). The allowlist is now four entries; row `mcp_skill:M15` pins it beside the unchanged `.pdf` and `.md`.
+
 ## Addendum (2026-11-09): run takes optional `inputs`, files staged beside the script
 
 Decided by Zoltán on 2026-11-09, agreed with the ai-soul side as a frozen interface. It adds one optional parameter to `run` and changes nothing else: the runner, the proxy, the bundle, the sanitizer, the answer and the document blocks are as before.
