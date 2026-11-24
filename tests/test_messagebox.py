@@ -1627,6 +1627,108 @@ def _run_e(suite, fx):
         return problems, ()
     _guard(suite, GRP_E, "E16 enqueued is acked only for a .delivered that has rested: a rejection after the claim is never preceded by it", rejected_after_delivered)
 
+    def _not_json_object(text):
+        try:
+            return not isinstance(json.loads(text), dict)
+        except ValueError:
+            return True
+
+    def _md_check(label, text, wants):
+        out = []
+        if not _not_json_object(text):
+            out.append("%s text parses as a JSON object: %r" % (label, text[:80]))
+        for want in wants:
+            if want not in text:
+                out.append("%s text lacks %r: %r" % (label, want, text[:300]))
+        if "pe_" in text or "{" in text:
+            out.append("%s text carries a brace or a peer id: %r" % (label, text[:200]))
+        return out
+
+    def md_info_list():
+        w = World(fx, "e17")
+        c = w.server()
+        w.other()
+        registered(w, c)
+        problems = []
+        is_error, text, d = c.call("info")
+        problems += _md_check("info", text, ["**name**: proj", "**active**: true",
+                                              "**registered**: true"])
+        if is_error or not isinstance(d, dict) or d.get("name") != "proj" \
+                or d.get("hub", {}).get("registered") is not True:
+            problems.append("info structuredContent changed: %r" % (d,))
+        is_error, text, d = c.call("list")
+        problems += _md_check("list", text, ["**name**: other", "**name**: proj",
+                                              "**self**: true", "**self**: false"])
+        if is_error or sorted(p["name"] for p in (d or {}).get("peers", [])) != ["other", "proj"]:
+            problems.append("list structuredContent changed: %r" % (d,))
+        return problems, ()
+    _guard(suite, GRP_E, "E17 info and list: the text is Markdown fields, structuredContent is unchanged", md_info_list)
+
+    def md_send_ack_status():
+        w = World(fx, "e18")
+        c = w.server()
+        other = w.other()
+        registered(w, c)
+        me = c.info()["name"]
+        problems = []
+        is_error, text, d = c.call("send", {"to": "other", "text": "ping"})
+        mid = (d or {}).get("msgId", "")
+        problems += _md_check("send", text, ["**msgId**: " + mid, "**to**: other"])
+        if is_error or not SH.ID_RE.match(mid) or d.get("to") != "other":
+            problems.append("send structuredContent changed: %r" % (d,))
+        is_error, text, s = c.call("status", {"msg_ids": [mid]})
+        problems += _md_check("status", text, ["**msgId**: " + mid, "**state**: queued"])
+        if is_error or s["messages"][0]["state"] != "queued":
+            problems.append("status structuredContent changed: %r" % (s,))
+        inc = other.send(me, "question?")[1]["msgId"]
+        wait_for(lambda: os.path.exists(spool_json_path(w, inc)))
+        is_error, text, d = c.call("reply", {"msg_id": inc, "text": "answer"})
+        problems += _md_check("reply", text, ["**msgId**: " + (d or {}).get("msgId", "?"),
+                                               "**to**: other", "**acked**: true"])
+        if is_error or d.get("acked") is not True or d.get("to") != "other":
+            problems.append("reply structuredContent changed: %r" % (d,))
+        inc2 = other.send(me, "second")[1]["msgId"]
+        wait_for(lambda: os.path.exists(spool_json_path(w, inc2)))
+        is_error, text, d = c.call("ack", {"msg_id": inc2})
+        problems += _md_check("ack", text, ["**msgId**: " + inc2, "**state**: read"])
+        if is_error or d != {"msgId": inc2, "state": "read"}:
+            problems.append("ack structuredContent changed: %r" % (d,))
+        return problems, ()
+    _guard(suite, GRP_E, "E18 send, reply, ack and status: the text is Markdown fields, structuredContent is unchanged", md_send_ack_status)
+
+    def md_refusal():
+        w = World(fx, "e19")
+        c = w.server()
+        registered(w, c)
+        problems = []
+        is_error, text, d = c.call("send", {"to": "ghost", "txt": "x"})
+        msg = ((d or {}).get("error") or {}).get("message", "?")
+        if is_error is not True or not text.startswith("error (invalid_params): " + msg):
+            problems.append("refusal text %r, structured message %r" % (text[:200], msg))
+        if "Unknown params for 'send': txt." not in text or not _not_json_object(text):
+            problems.append("refusal text lost the sentence or is JSON: %r" % (text[:200],))
+        is_error, text, d = c.call("send", {"to": "ghost", "text": "x"})
+        if is_error is not True or not text.startswith("error (no_such_peer): ") or "ghost" not in text \
+                or _err_code(d) != "no_such_peer":
+            problems.append("no_such_peer text %r" % (text[:200],))
+        return problems, ()
+    _guard(suite, GRP_E, "E19 a refusal reads `error (<code>): <message>`, structuredContent keeps the error object", md_refusal)
+
+    def summary_dropped():
+        w = World(fx, "e20")
+        c = w.server()
+        w.other()
+        registered(w, c)
+        problems = []
+        is_error, text, d = c.call("send", {"to": "other", "text": "hi", "summary": "a label"})
+        if is_error or not SH.ID_RE.match((d or {}).get("msgId", "")):
+            problems.append("send with summary: %r %r" % (is_error, text[:200]))
+        sent = w.hub.bodies("send")
+        if len(sent) != 1 or "summary" in sent[-1] or "a label" in json.dumps(sent[-1]):
+            problems.append("the hub saw %r" % (sent,))
+        return problems, ()
+    _guard(suite, GRP_E, "E20 a summary param on send is accepted and never reaches the hub", summary_dropped)
+
 
 # ---------------------------------------------------------------------------
 # F. secrets and redirects

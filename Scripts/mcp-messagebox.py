@@ -253,6 +253,9 @@ ACCEPTED: Dict[str, frozenset] = {
     "status": frozenset({"msg_ids"}),
 }
 
+# Functions that tolerate (and drop) a `summary` param until the hub carries it.
+SUMMARY_FUNCTIONS = frozenset({"send", "reply"})
+
 _SYMLINK_ERRNOS = frozenset({errno.ELOOP, getattr(errno, "EMLINK", errno.ELOOP)})
 
 _SPOOL_FILE_RE = re.compile(r"(ms_[A-Za-z0-9_-]{22})\.(json|delivered|read|seen|rejected)\Z")
@@ -1595,6 +1598,55 @@ def _tool_refusal(code: str, message: str, **extra: Any) -> dict:
     return {"error": dict({"code": code, "message": message}, **extra)}
 
 
+def _md_scalar(value: Any) -> str:
+    """One value as Markdown text: bool as true/false, newlines collapsed to a
+    space so a free-ish string (lastError, inactiveReason, a message) can never
+    start a second field line. A hand copy of the fleet idiom (mcp-jenkins)."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return re.sub(r"[\r\n]+", " ", str(value))
+
+
+def _md_empty(value: Any) -> bool:
+    return value is None or (isinstance(value, (str, list, dict)) and len(value) == 0)
+
+
+def _md_fields(obj: dict, depth: int = 0) -> List[str]:
+    """`**key**: value` lines; None, "" and [] are dropped, a nested dict is
+    indented, a list of dicts is one bullet per item. No tables."""
+    pad = "  " * depth
+    lines: List[str] = []
+    for key, value in obj.items():
+        if _md_empty(value):
+            continue
+        if isinstance(value, dict):
+            lines.append("%s**%s**:" % (pad, key))
+            lines.extend(_md_fields(value, depth + 1))
+        elif isinstance(value, list):
+            lines.append("%s**%s**:" % (pad, key))
+            for item in value:
+                if isinstance(item, dict):
+                    lines.append("%s- %s" % (pad, ", ".join(
+                        "**%s**: %s" % (k, _md_scalar(v)) for k, v in item.items()
+                        if not _md_empty(v))))
+                else:
+                    lines.append("%s- %s" % (pad, _md_scalar(item)))
+        else:
+            lines.append("%s**%s**: %s" % (pad, key, _md_scalar(value)))
+    return lines
+
+
+def _result_markdown(result: dict) -> str:
+    """The text of a tool result: a refusal is `error (<code>): <message>`
+    (plus any extra fields), everything else is the field lines."""
+    error = result.get("error")
+    if isinstance(error, dict):
+        extra = {k: v for k, v in error.items() if k not in ("code", "message")}
+        head = "error (%s): %s" % (_md_scalar(error.get("code", "")), _md_scalar(error.get("message", "")))
+        return "\n".join([head] + _md_fields(extra))
+    return "\n".join(_md_fields(result)) or "(no fields)"
+
+
 def _status_text() -> str:
     """The unflagged reply to a call with no function. Never a path, a token,
     a peer id or any message text."""
@@ -1874,6 +1926,9 @@ def handle_messagebox_call(arguments: dict) -> dict:
     params = {key: value for key, value in params.items()
               if key not in SCHEMA_PARAMS
               or (key in accepted and not _is_schema_empty(key, value))}
+    if function in SUMMARY_FUNCTIONS:
+        # a one-line label models like to attach; the hub does not carry it yet
+        params = {key: value for key, value in params.items() if key != "summary"}
     unknown = _unknown_params_refusal(function, params, accepted)
     if unknown:
         return _tool_refusal("invalid_params", unknown)
@@ -2130,7 +2185,7 @@ class McpServer:
                 "isError": is_error,
             })
         return self._result(msg_id, {
-            "content": [{"type": "text", "text": _strict_dumps(result)}],
+            "content": [{"type": "text", "text": _result_markdown(result)}],
             "structuredContent": result,
             "isError": is_error,
         })

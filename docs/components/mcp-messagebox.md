@@ -183,6 +183,18 @@ caller. The server resolves it from its own registration state into
 `not_registered`, `sender_gone` (for a reply) or `no_such_peer`
 `Scripts/mcp-messagebox.py:send`.
 
+**The reply text is Markdown, the data is structured.** A function's answer
+carries `content[0].text` as `**key**: value` field lines (a nested object is
+indented, a list of objects is one bullet per item, booleans read `true` and
+`false`, `None`, empty strings and empty lists are dropped, a newline in a value
+collapses to a space) and `structuredContent` as the same data, unchanged
+`Scripts/mcp-messagebox.py:_result_markdown`
+`Scripts/mcp-messagebox.py:_md_fields`. There is no table, so no cell can forge
+a column. A refusal reads `error (<code>): <message>` on its first line, the
+message sentence verbatim, and `structuredContent` keeps the `error` object. The
+status banner of a function-less call stays plain text. The renderer returns only
+what the handlers already returned: no peer id, no token and no message body.
+
 ## The hub client
 
 Every hub call is one JSON `POST` built by one method
