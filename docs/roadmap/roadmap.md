@@ -31,6 +31,7 @@ WIP now: 0 of 3. Archive: 80 closed items (71 done, 9 dropped).
 | later | R-0107 | idea  | bash address-space trampoline, only if bash's effective budget exceeds 8 GiB                        | yes   |
 | later | R-0108 | idea  | Close the exec-to-spawned window on macOS (T11a)                                                    | yes   |
 | later | R-0109 | idea  | Unix-socket transport for the runner proxy so the runner token cannot leak to a port squatter       | yes   |
+| later | R-0115 | idea  | Google nano banana image generation from a script                                                   | yes   |
 | inbox | R-0063 | idea  | Harden --log-file open in the generated logging block (O_NOFOLLOW, owner check)                     | yes   |
 | inbox | R-0064 | idea  | mcp-proxy: per-session share of the global max-inflight budget                                      | yes   |
 | inbox | R-0065 | idea  | mcp-proxy: session table exhaustion holds slots for a full idle period                              | yes   |
@@ -335,6 +336,20 @@ Deferred item 14 of the Deferred to roadmap list in spec-sbx-restricted-runner, 
 ### Log
 
 - 2026-10-11 new->later: filed at close-out of spec-sbx-restricted-runner
+
+## R-0115 · Google nano banana image generation from a script
+
+state: idea
+horizon: later
+origin: user:2026-11-23:google-nano-banana-scripting
+blocked_by: []
+tags: [gdc, image, llm-router]
+
+Explored 2026-11-23 with gdc (Chrome DevTools MCP) on google.com. Signed out, Create images in AI Mode (udm=50) answers 'Sign in to create images'. Signed in with a throwaway account it works in about 2.5 s: plus menu, Create images, prompt, AI Mode arrow. The result is a 1408x768 JPEG, carried as an inline data URI and as a lens.usercontent.google.com/banana URL. The XHR list shows no dedicated generation endpoint, only the AI Mode framework: async/hpba, async/bgasy (jspb), AimThreadsService (ListThreads, ListJourneys, RefreshDatForAgenticUpdates with a per-load xsrf token), ValidationAsyncService/Validate with a signed reqpld, and waa-pa Waa/Create and Ping. The Waa pair is the BotGuard-style attestation that a stdlib HTTP client cannot satisfy, so the Chrome-emulating client alone will not do. The Fetch-type requests were not inspected; the generating call itself is not identified. Options left open: drive a real browser through gdc and save the image from the banana URL or data URI (fragile, and automating the consumer UI is against the Google ToS with an account-suspension risk), or use the official Gemini API image models with an API key, for example as a gemini kind in llm-router. Nothing was built. Decision to park it: the user, 2026-11-23.
+
+### Log
+
+- 2026-11-23 new->later: parked by user after exploration
 
 # inbox
 
