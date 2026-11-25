@@ -187,6 +187,7 @@ PULL_REQUEST = {
 CLEAN_MERGE = {"outcome": "CLEAN", "conflicted": False, "vetoes": []}
 
 USERNAME = "svc.bot"
+COMMENT_ID = 4242
 
 
 # ---------------------------------------------------------------------------
@@ -1070,6 +1071,8 @@ SUBCOMMAND_ARGV = {
     "pr-builds": ["pr-builds", str(PR_ID)],
     "pr-create": ["pr-create", "--from", "my-branch", "--title", "a title"],
     "pr-comment": ["pr-comment", str(PR_ID), "a comment body"],
+    "pr-comment-edit": ["pr-comment-edit", str(PR_ID), str(COMMENT_ID),
+                        "an edited body"],
     "pr-approve": ["pr-approve", str(PR_ID)],
     "pr-decline": ["pr-decline", str(PR_ID)],
     "pr-reopen": ["pr-reopen", str(PR_ID)],
@@ -1084,7 +1087,8 @@ UNSCOPED = ("version", "whoami")
 # The seven writes, spelled as main() sees them.  Used by the read-only table
 # below; the SWEEP deliberately does not read this -- it measures.
 READ_ONLY_INVOCATIONS = {name: SUBCOMMAND_ARGV[name]
-                         for name in ("pr-approve", "pr-comment", "pr-create",
+                         for name in ("pr-approve", "pr-comment",
+                                      "pr-comment-edit", "pr-create",
                                       "pr-decline", "pr-merge", "pr-reopen",
                                       "pr-update")}
 
@@ -1110,6 +1114,10 @@ def fleet_response(mod, method, url):
         if method == "GET":
             return response(mod, 200, dict(CLEAN_MERGE))
         return response(mod, 200, dict(PULL_REQUEST, state="MERGED"))
+    if re.search(r"/comments/\d+$", path):
+        return response(mod, 200, {"id": COMMENT_ID, "version": 3,
+                                   "text": "old",
+                                   "author": {"name": USERNAME}})
     if path.endswith("/comments"):
         return response(mod, 200, {"id": 9001, "version": 0,
                                    "author": {"name": USERNAME}})
@@ -1804,6 +1812,116 @@ REF_CASES = [
 ]
 
 
+def group_f_comment_edit(suite, mod, profile):
+    """pr-comment-edit: read comment, check the author is the token's user, PUT.
+
+    Stub transport only; nothing here has ever met a live server.
+    """
+    path = full(PR_BASE + "/%d/comments/%d" % (PR_ID, COMMENT_ID))
+    who = response(mod, 200, {"displayName": "Bitbucket"},
+                   headers={"X-AUSERNAME": USERNAME})
+
+    def comment(author="USERNAME", version=3):
+        name = USERNAME if author == "USERNAME" else author
+        return response(mod, 200, {"id": COMMENT_ID, "version": version,
+                                   "text": "old", "author": {"name": name}})
+
+    tail = ["pr-comment-edit", str(PR_ID), str(COMMENT_ID), "new text"]
+
+    code, exc, transport, _out, _err = drive(
+        mod, tail, [comment(), who,
+                    response(mod, 200, {"id": COMMENT_ID, "version": 4,
+                                        "author": {"name": USERNAME}})],
+        profile=profile)
+    problems = []
+    if exc is not None or code != 0:
+        problems.append("exit %r, raised %r" % (code, exc))
+    if transport.methods != ["GET", "GET", "PUT"]:
+        problems.append("requests %r, want GET GET PUT" % transport.methods)
+    else:
+        put = transport.calls[2]
+        if put.path != path:
+            problems.append("PUT went to %s, want %s" % (put.path, path))
+        if put.body != {"version": 3, "text": "new text"}:
+            problems.append("body %r" % (put.body,))
+    suite.record(GF, "pr-comment-edit-happy-path", problems,
+                 detail=["%s %s" % (c.method, c.path) for c in transport.calls])
+
+    code, exc, transport, _out, _err = drive(
+        mod, tail, [comment(version=11), who,
+                    response(mod, 200, {"id": COMMENT_ID, "version": 12,
+                                        "author": {"name": USERNAME}})],
+        profile=profile)
+    put = transport.calls[2] if len(transport.calls) == 3 else None
+    suite.record(GF, "pr-comment-edit-passes-the-read-version-through",
+                 problem_if(not put or put.body != {"version": 11,
+                                                    "text": "new text"},
+                            "body %r" % (put.body if put else None)),
+                 detail=["body: %r" % (put.body if put else None)])
+
+    code, exc, transport, _out, _err = drive(
+        mod, tail, [comment(author="someone.else"), who], profile=profile)
+    problems = []
+    if not isinstance(exc, mod.SetupError):
+        problems.append("a foreign comment was not refused (raised %r)" % exc)
+    elif "someone.else" not in str(exc) or "refusing" not in str(exc):
+        problems.append("the refusal does not name the author: %s" % exc)
+    if "PUT" in transport.methods:
+        problems.append("a PUT was sent for another user's comment")
+    suite.record(GF, "pr-comment-edit-refuses-a-foreign-author", problems,
+                 detail=[str(exc or "<accepted>"), "requests: %r"
+                         % transport.methods])
+
+    for cid, hdrs in (("no-username-header", {}),
+                      ("anonymous", {"X-AUSERNAME": "anonymous"})):
+        code, exc, transport, _out, _err = drive(
+            mod, tail,
+            [comment(), response(mod, 200, {"displayName": "Bitbucket"},
+                                 headers=hdrs)], profile=profile)
+        problems = []
+        if exc is None:
+            problems.append("an unknown current user was accepted")
+        if "PUT" in transport.methods:
+            problems.append("a PUT was sent with the user unknown")
+        suite.record(GF, "pr-comment-edit-fails-closed-%s" % cid, problems,
+                     detail=[str(exc or "<accepted>"),
+                             "requests: %r" % transport.methods])
+
+    code, exc, transport, out, _err = drive(
+        mod, tail + ["--dry-run"], [comment(), who], profile=profile)
+    problems = []
+    if exc is not None or code != 0:
+        problems.append("exit %r, raised %r" % (code, exc))
+    if transport.methods != ["GET", "GET"]:
+        problems.append("requests %r, want the two GETs only"
+                        % transport.methods)
+    for token in ("PUT ", path, '"version": 3', '"text": "new text"'):
+        if token not in out:
+            problems.append("the dry run does not print %r" % token)
+    suite.record(GF, "pr-comment-edit-dry-run-sends-no-put", problems,
+                 detail=[out.strip()])
+
+    saved = sys.stdin
+    sys.stdin = io.StringIO("from stdin\n")
+    try:
+        code, exc, transport, _out, _err = drive(
+            mod, ["pr-comment-edit", str(PR_ID), str(COMMENT_ID), "-"],
+            [comment(), who,
+             response(mod, 200, {"id": COMMENT_ID, "version": 4,
+                                 "author": {"name": USERNAME}})],
+            profile=profile)
+    finally:
+        sys.stdin = saved
+    put = transport.calls[2] if len(transport.calls) == 3 else None
+    suite.record(GF, "pr-comment-edit-reads-stdin-on-dash",
+                 problem_if(exc is not None or not put
+                            or put.body != {"version": 3,
+                                            "text": "from stdin\n"},
+                            "raised %r, body %r" % (
+                                exc, put.body if put else None)),
+                 detail=["body: %r" % (put.body if put else None)])
+
+
 def group_f(suite, mod, profile):
     banner = {"displayName": "Bitbucket", "version": "9.4.23",
               "buildNumber": "9004023"}
@@ -2014,6 +2132,8 @@ def group_f(suite, mod, profile):
                                                       "parent": {"id": 77}},
                             "body %r" % (call.body if call else None)),
                  detail=["body: %r" % (call.body if call else None)])
+
+    group_f_comment_edit(suite, mod, profile)
 
     code, exc, transport, _out, _err = drive(
         mod, ["pr-approve", str(PR_ID)],
@@ -2733,6 +2853,10 @@ def group_i(suite, mod, measured):
 UNVERIFIED_PATHS = [
     ("pr-comment-post", "POST .../pull-requests/{id}/comments",
      "the comment body shape is read from the published reference"),
+    ("pr-comment-edit-put",
+     "PUT .../pull-requests/{id}/comments/{commentId}",
+     "unit/stub tested only, never run live: endpoint and body are read from "
+     "the published reference"),
     ("pr-approve-participant-put",
      "PUT .../pull-requests/{id}/participants/{user}",
      "the endpoint AND the body are read from the published reference, on a "

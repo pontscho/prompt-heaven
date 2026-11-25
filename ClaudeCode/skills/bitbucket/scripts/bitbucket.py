@@ -62,6 +62,8 @@ the application-properties response, so a run that printed a real username IS th
 observation of that header.  `pr-update` followed on 2026-10-06: its PUT replaced
 a real pull request's description and is marked `# VERIFIED` with that date.
 
+`pr-comment-edit` is UNVERIFIED too: stub tested only, never run live.
+
 Still only READ, never accepted by a server: the comment POST, the participant PUT
 behind `pr-approve`, decline, reopen and merge.  Their bodies have been assembled
 against real pull-request data under `--dry-run`, so the URL and the payload are known
@@ -91,6 +93,7 @@ Usage:
 	bitbucket.py pr-create --from my-branch --title "..." --description-file -
 	bitbucket.py pr-update 1211 --description-file body.md
 	bitbucket.py pr-comment 1211 -
+	bitbucket.py pr-comment-edit 1211 4242 -
 	bitbucket.py pr-approve 1211
 	bitbucket.py pr-decline 1211 --comment "superseded"
 	bitbucket.py pr-reopen 1211
@@ -194,6 +197,7 @@ TRUTHY = ("1", "true", "yes")
 WRITE_COMMANDS = (
 	"pr-approve",
 	"pr-comment",
+	"pr-comment-edit",
 	"pr-create",
 	"pr-decline",
 	"pr-merge",
@@ -1505,6 +1509,72 @@ def cmd_pr_comment(args: argparse.Namespace, client: Bitbucket) -> int:
 	return OK
 
 
+def cmd_pr_comment_edit(args: argparse.Namespace, client: Bitbucket) -> int:
+	"""Edit a comment, but only one this token's user wrote.
+
+	The comment is read first: its `version` is the optimistic lock the PUT
+	must carry, and its `author` is checked against the user the token
+	authenticates as (the X-AUSERNAME header, through client.whoami()).  The
+	check fails closed: a foreign author, an author the response does not name,
+	or a current user that cannot be determined all refuse before any PUT.
+	"""
+	project, repo = _target(args)
+	text = _body_text(args.text)
+	if not text.strip():
+		raise SetupError("refusing to edit a comment to an empty text")
+
+	path = pr_path(project, repo, args.id, "/comments/%d" % args.comment_id)
+	current = client.request(
+		"GET", path,
+		subject="comment %d on pull request %d" % (args.comment_id, args.id))
+	if not isinstance(current, dict):
+		raise BitbucketError(
+			"comment %d did not come back as an object" % args.comment_id)
+
+	version = current.get("version")
+	if not isinstance(version, int) or isinstance(version, bool):
+		raise BitbucketError(
+			"comment %d did not report a numeric version — refusing to write "
+			"without an optimistic lock" % args.comment_id)
+
+	author = current.get("author")
+	author_name = ""
+	if isinstance(author, dict):
+		author_name = str(author.get("name") or author.get("slug") or "")
+	username = client.whoami()
+	if not username or username == ANONYMOUS:
+		raise SetupError(
+			"cannot tell which user the token is — refusing to edit comment %d"
+			% args.comment_id)
+	if not author_name or author_name.lower() != username.lower():
+		raise SetupError(
+			"comment %d was written by %s, not by %s — refusing to edit another "
+			"user's comment" % (args.comment_id, author_name or "an unknown author",
+				username))
+
+	body = {"version": version, "text": text}	# type: Dict[str, Any]
+	if args.dry_run:
+		return _dry_run("PUT", client.cfg.base_url, path, body)
+
+	# UNVERIFIED -- endpoint and body read from the published reference, never
+	# observed against a live instance.
+	payload = client.request(
+		"PUT", path, body=body,
+		subject="editing comment %d on pull request %d" % (
+			args.comment_id, args.id))
+	if args.json:
+		emit_json(payload)
+	else:
+		print(md_heading(2, "Comment edited"))
+		print(md_kv([
+			("id", payload.get("id")),
+			("author", _person(payload.get("author"))),
+			("version", payload.get("version")),
+		]))
+	summary("comment %d on pull request %d edited" % (args.comment_id, args.id))
+	return OK
+
+
 def cmd_pr_approve(args: argparse.Namespace, client: Bitbucket) -> int:
 	"""Set this token's review status on a pull request.
 
@@ -1943,6 +2013,7 @@ HANDLERS = {
 	"pr-builds": cmd_pr_builds,
 	"pr-create": cmd_pr_create,
 	"pr-comment": cmd_pr_comment,
+	"pr-comment-edit": cmd_pr_comment_edit,
 	"pr-approve": cmd_pr_approve,
 	"pr-decline": cmd_pr_decline,
 	"pr-reopen": cmd_pr_reopen,
@@ -2051,6 +2122,12 @@ def build_parser() -> argparse.ArgumentParser:
 	p.add_argument("id", type=int)
 	p.add_argument("text", help="comment body, or - to read stdin")
 	p.add_argument("--parent", type=int, help="reply to this comment id")
+
+	p = sub.add_parser("pr-comment-edit", parents=[common, scoped, dry],
+		help="edit one of your own comments on a pull request")
+	p.add_argument("id", type=int)
+	p.add_argument("comment_id", type=int, help="id of the comment to edit")
+	p.add_argument("text", help="new comment body, or - to read stdin")
 
 	p = sub.add_parser("pr-approve", parents=[common, scoped, dry],
 		help="set this token's review status")

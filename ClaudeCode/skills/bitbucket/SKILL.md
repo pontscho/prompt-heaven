@@ -89,6 +89,7 @@ pull request. `pr-merge` in particular needs repository write.
 | `pr-create` | Open a pull request from the profile's defaults plus the flags given. |
 | `pr-update` | Change the title (`--title`), description (`--description-file`, `-` for stdin) or draft state (`--draft` / `--no-draft`); re-reads the version first and keeps every field not given. |
 | `pr-comment` | Add a general comment, or a reply with `--parent`. |
+| `pr-comment-edit` | `pr-comment-edit <pr-id> <comment-id> <text\|->` — edit a comment's text (`-` reads stdin). Reads the comment for its `version` and `author`, then PUTs `{version, text}`. Refuses, with no PUT, when the author is not the token's user or the token's user cannot be determined. **UNVERIFIED**, see below. |
 | `pr-approve` | Set this token's review status: `APPROVED`, `NEEDS_WORK` or `UNAPPROVED`. |
 | `pr-decline` | Decline, at the version the server currently holds. |
 | `pr-reopen` | Reopen a declined pull request. |
@@ -136,6 +137,11 @@ the endpoint accepts them. Those sites keep their `# UNVERIFIED` marker. Use
 yet had. Do it on a pull request nobody needs: for `pr-merge` the verification and the
 consequence are the same event, so there is no order in which you learn the endpoint
 accepts the body before it has already merged the branch.
+
+`pr-comment-edit` is **UNVERIFIED**: unit/stub tested only, not run live. The offline
+suite proves the request shape and its refusals (foreign author, unknown current user,
+`BITBUCKET_READ_ONLY`, `--dry-run` sending no PUT); it cannot prove a server accepts
+the PUT. Its call site carries a `# UNVERIFIED` marker until its first live run.
 
 Two defects surfaced on that first live run, both worth knowing because they are the
 shape of mistake this kind of script makes:

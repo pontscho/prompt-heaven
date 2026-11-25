@@ -510,7 +510,7 @@ SUITES = [
      "boundary test calls located and compared on its own because it sits "
      "outside the slice -- then the boundary DRIVEN through a real symlinked "
      "$HOME, because identical text in a file is not the same claim as "
-     "identical behaviour in the loaded module", 133),
+     "identical behaviour in the loaded module", 142),
     # TYPED: a fixed case table, so a count that moves is the alarm.
     ("jenkins_job_cli", run_jenkins_job_cli,
      "Jenkins job CLI offline against a fake Jenkins on loopback: the "
