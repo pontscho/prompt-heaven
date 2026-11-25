@@ -1,7 +1,7 @@
 ---
 name: 0039-a-mounted-wiki-is-read-only-and-untrusted
 type: adr
-status: draft
+status: active
 title: A mounted wiki is read-only and untrusted -- named instances beside the official wiki in mcp-wiki
 description: Decision to let wiki_call read any absolute directory of wiki pages as a named, read-only, never-executed instance beside the official wiki -- mount, unmount and instances, a wiki param on the five read functions (search alone also takes * or a list of up to 5 names), measure, reindex, verify and freshness refused with one line, no git ever, a per-instance df/idf and 0.55 gate merged coverage-first, an fd-relative contained walk under page, byte, depth, entry and deadline caps, a per-reply nonce frame around every reply carrying mounted text, every echoed string escaped and clipped, a root that is not the official directory turned into an anonymous read-only instance (option B), and persistence that only the owner writes through --mounts-file; with the owner decisions, the alternatives rejected, the 42 plan-review dispositions, the deviations from the plan, the code-mode security review (APPROVE, one MEDIUM) and its two fix rounds, the owner-unconfirmed bounds and the declared limits -- among them that mount stays model-callable with no owner switch.
 sources:
@@ -24,6 +24,9 @@ sources:
   - Scripts/mcp-wiki.py:handle_wiki_call
   - tests/test_wiki_recall.py
   - tests/run.py:SUITES
+verified:
+  commit: 535ea8e
+  date: 2026-11-25
 links:
   - wiki-engine
   - scripts
