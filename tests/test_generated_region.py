@@ -142,6 +142,7 @@ import shutil
 import socket
 import stat
 import sys
+import tempfile
 import time
 import types
 from pathlib import Path
@@ -478,6 +479,12 @@ STRICT_JSON_EXCEPTIONS = {
         "the server's own cache entry, written by this server",
     ("mcp-wiki.py", "load_measurements", "loads"):
         "the repository's docs/measurements.json, a checked-in file",
+    ("mcp-wiki.py", "_load_mounts_file", "loads"):
+        "the owner's --mounts-file, read once at start after the owner-only "
+        "file checks; it passes the same three strict hooks _strict_loads does "
+        "(_json_no_constant, _json_finite_float, _json_bounded_int) plus an "
+        "object_pairs_hook refusing duplicate keys, which _strict_loads takes "
+        "none of; every failure, RecursionError included, disables persistence",
     ("mcp-proxy.py", "load_config", "loads"):
         "the operator's --config / --config-json, refused on any parse error "
         "including ValueError and RecursionError; not a peer's frame",
@@ -3347,6 +3354,31 @@ def _site_cuda_init(mod, body):
     return "refused" if seen[0] is None else "accepted"
 
 
+def _site_wiki_mounts(mod, body):
+    """mcp-wiki's `_load_mounts_file` (a STRICT_JSON_EXCEPTIONS row): the
+    owner's file passes the three strict hooks, so a NaN and a long integer
+    disable persistence with the hook's own reason, and a finite one loads. The
+    value sits in `version`, the one key a refusal and an acceptance can both
+    be read off: only the hook's reason tells the two refusals apart."""
+    parent = os.path.realpath(tempfile.mkdtemp(prefix="ph-r0092-mounts-"))
+    try:
+        path = os.path.join(parent, "mounts.json")
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(body)
+        registry = mod._MountRegistry()
+        with patched(mod, log=types.SimpleNamespace(warning=lambda *a, **k: None)):
+            mod._load_mounts_file(registry, path, STRICT_SITE_ROOT, "wiki")
+    finally:
+        shutil.rmtree(parent, ignore_errors=True)
+    got = registry.persistence
+    if got.startswith("loaded"):
+        return "accepted"
+    if got.startswith("disabled") and ("non-finite" in got or "exceeds" in got):
+        return "refused"
+    return got
+
+
 _LSP_BODY = '{"jsonrpc": "2.0", "id": 1, "result": {"v": %s}}'
 _CC_BODY = '[{"directory": "/d", "file": "a.cu", "command": "nvcc a.cu", "n": %s}]'
 
@@ -3370,6 +3402,8 @@ STRICT_SITES = (
     ("mcp-cuda.py", "_prepare_compile_commands", _site_prepare_cc, _CC_BODY),
     ("mcp-purity.py", "_prepare_compile_commands", _site_prepare_cc, _CC_BODY),
     ("mcp-cuda.py", "handle_init", _site_cuda_init, _CC_BODY),
+    ("mcp-wiki.py", "_load_mounts_file", _site_wiki_mounts,
+     '{"version": %s, "mounts": []}'),
 )
 
 

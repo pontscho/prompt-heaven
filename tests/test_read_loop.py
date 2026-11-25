@@ -238,7 +238,10 @@ FLEET = {
                         "converted here; blocking stdlib Chrome fetch needs a "
                         "thread, and its timeout is caller-supplied and unclamped"),
     "mcp-wiki.py":     ("wiki-stdin",     "pool",      "wiki-call",      "arg",
-                        "none -- its index is build-fresh-and-swap"),
+                        "the official index is build-fresh-and-swap; the mount "
+                        "registry takes one short lock (admission only), each "
+                        "mounted instance one build lock, and its memo is a "
+                        "single-tuple store"),
 }
 
 # Declared totals, so a silent re-classification of one server trips a case

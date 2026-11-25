@@ -1440,6 +1440,71 @@ def group_description_tax(suite, feet, group, scope):
     return good
 
 
+GW = "W. mcp-wiki description: the mount surface stays short and the trigger intact"
+
+# The one description size GATE in this suite, and it covers ONE server: the
+# wiki tool grew by the mount surface (mount/unmount/instances, the wiki param,
+# the untrusted-text rules) and this fixes how far it may grow. It was 10047
+# chars before the mount surface landed; the ceiling is a declared proposal, not
+# a measured optimum -- raise it only with a reason written next to the number.
+WIKI_DESC_FILE = "mcp-wiki.py"
+WIKI_DESC_CEILING = 12500
+
+# ADR 0003: the trigger paragraph travels with the tool. These are the sentences
+# whose loss would silently turn the rule back into a suggestion.
+WIKI_TRIGGER_PINS = (
+    "TRIGGER — ASK THE WIKI BEFORE YOU ANSWER, NOT AFTER",
+    "Call function=\"search\" IMMEDIATELY when ANY of these is true:",
+    "ONE call settles it, because the gate is allowed to say no: 'no page\n"
+    "passes the relevance gate' is a REAL ANSWER, not a failure",
+    "why this is a rule and not left to your judgement.",
+)
+
+
+def group_wiki_description(suite, feet_by_file):
+    """W: four GATED cases over mcp-wiki's live tools/list description."""
+    foot = feet_by_file.get(WIKI_DESC_FILE)
+    if foot is None or not foot.ok or not foot.descriptions:
+        reason = ("not in the SERVERS table" if foot is None
+                  else foot.error or "no description answered")
+        for cid in ("wiki-description-size-gate", "wiki-trigger-text-intact",
+                    "wiki-mount-functions-named", "wiki-escape-clause-present"):
+            suite.record(GW, cid, ["no description to judge: %s" % reason])
+        return
+    desc = foot.descriptions[0]
+
+    problems = []
+    if len(desc) > WIKI_DESC_CEILING:
+        problems.append("description is %d chars, ceiling %d (over by %d)"
+                        % (len(desc), WIKI_DESC_CEILING,
+                           len(desc) - WIKI_DESC_CEILING))
+    suite.record(GW, "wiki-description-size-gate", problems,
+                 detail=["chars       : %d" % len(desc),
+                         "ceiling     : %d" % WIKI_DESC_CEILING,
+                         "headroom    : %d chars (~%d tokens, estimated)"
+                         % (WIKI_DESC_CEILING - len(desc),
+                            tok(WIKI_DESC_CEILING - len(desc)))])
+
+    problems = ["trigger sentence missing: %r" % pin
+                for pin in WIKI_TRIGGER_PINS if pin not in desc]
+    suite.record(GW, "wiki-trigger-text-intact", problems)
+
+    problems = []
+    for name in ("mount", "unmount", "instances"):
+        if not any(ln.startswith("  %s " % name) for ln in desc.split("\n")):
+            problems.append("no `  %s ` function line in the description" % name)
+    for word in ("wiki=<instance", "wiki=\"*\"", "--mounts-file", "anonymous"):
+        if word not in desc:
+            problems.append("the description never says %r" % word)
+    suite.record(GW, "wiki-mount-functions-named", problems)
+
+    problems = [("the description never says %r" % word)
+                for word in ("READ-ONLY and UNTRUSTED", "nonce-framed",
+                             "backslash-escaped", "\\xNN")
+                if word not in desc]
+    suite.record(GW, "wiki-escape-clause-present", problems)
+
+
 def group_probe_floor(suite, answering, total):
     """A: the prober is not blind.  A FLOOR, not a count -- suite integrity."""
     problems = []
@@ -2475,6 +2540,7 @@ def run(opts=None):
 
         answering = group_description_tax(suite, live, GA, "REGISTERED")
         group_probe_floor(suite, len(answering), len(live))
+        group_wiki_description(suite, feet_by_file)
         group_description_tax(suite, inert, GB, "INERT")
 
         reports, census_rows, sources = [], [], {}

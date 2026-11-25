@@ -219,8 +219,26 @@ def iter_pages(root: str) -> Iterator[Tuple[str, Dict[str, Any], str]]:
 
 
 def extract_wikilinks(body: str) -> List[str]:
-	"""Return the slugs referenced as [[slug]] in a page body."""
-	return [m.strip() for m in _WIKILINK_RE.findall(body)]
+	"""Return the slugs referenced as [[slug]] in a page body.
+
+    A find() scan with the answers of `_WIKILINK_RE.findall`, in linear time: the
+    pattern retried every `[[` of a bracket flood against the whole rest of the
+    body. A start whose first `]` is not followed by another `]` fails, and so
+    does every start up to that `]`, so the scan resumes there."""
+	out = []
+	pos = 0
+	while True:
+		i = body.find("[[", pos)
+		if i < 0:
+			return out
+		j = body.find("]", i + 2)
+		if j < 0:
+			return out
+		if j > i + 2 and body.startswith("]]", j):
+			out.append(body[i + 2:j].strip())
+			pos = j + 2
+		else:
+			pos = j
 
 
 def as_list(value: Any) -> List[Any]:

@@ -21,6 +21,8 @@ links:
   - 0008-a-serialized-read-loop-looks-like-a-dead-server
   - 0018-the-totals-must-describe-the-scope
   - 0022-a-someday-maybe-is-a-roadmap-item
+  - 0016-a-cell-may-not-forge-a-boundary
+  - 0039-a-mounted-wiki-is-read-only-and-untrusted
 ---
 
 # Documentation Wiki Engine
@@ -50,7 +52,9 @@ factual claim about code carries an anchor a later lint pass can re-check.
 ## `wiki_call` functions
 
 `search`, `source_to_pages`, `get_page`, `list`, `freshness`, `reindex`,
-`stats`, `verify` and `measure` `Scripts/mcp-wiki.py:HANDLERS`. `verify` checks
+`stats`, `verify` and `measure`, plus the three registry functions `mount`,
+`unmount` and `instances` `Scripts/mcp-wiki.py:HANDLERS` (see [Mounted wiki
+instances](#mounted-wiki-instances-read-only-and-untrusted) below). `verify` checks
 every page's anchors, `[[slug]]` wikilinks and measured regions and reports what
 gates — a dead `sources:` path, a dead body anchor, a dead wikilink, a
 measured-region defect `Scripts/mcp-wiki.py:GATING_CLASSES` — except that a
@@ -78,6 +82,77 @@ through, a method's own locals are not `Scripts/mcp-wiki.py:_py_member_defined`.
 A file the interpreter cannot parse falls back to the last component under the
 bare-name rule and is reported weak, never as a proven member.
 
+## Mounted wiki instances: read-only and untrusted
+
+Besides the official wiki (`--wiki-root`), the server can read other
+directories of wiki pages as named instances. `mount` registers an absolute
+directory, `unmount` drops a session mount, and `instances` lists the official
+wiki and every mount with its counts and state
+`Scripts/mcp-wiki.py:_fn_mount`, `Scripts/mcp-wiki.py:_fn_unmount`,
+`Scripts/mcp-wiki.py:_fn_instances`. `search`, `get_page`, `list`, `stats` and
+`source_to_pages` take `wiki=<name>`. If `wiki` is absent, the call reads the
+official wiki and the reply is unchanged. `search` alone also takes `wiki:"*"`
+or a list of up to `MAX_WIKI_LIST` names `Scripts/mcp-wiki.py:_search_targets`.
+Every handler gets its instance from one resolver, which decides once whether
+the call means the official wiki, a mount or an anonymous root
+`Scripts/mcp-wiki.py:_resolve_instance`.
+
+The trust model is that a mounted wiki is **data, never code, and never
+instructions**:
+
+- **Never executed, never written, never run through git.** `measure`,
+  `reindex`, `verify` and `freshness` refuse a mounted or anonymous instance
+  with one line, before a persisted entry is activated or a root is stat'ed or
+  walked `Scripts/mcp-wiki.py:_resolve_instance`, and again before anything
+  else runs `Scripts/mcp-wiki.py:_refuse_mounted`. A mounted
+  hit shows the page's own editorial `status`, not a measured state. A `status`
+  filter excludes mounted hits and says so. `source_to_pages` compares a mount's
+  anchors as text.
+- **Read through a contained walk only.** The walk is fd-relative, with
+  `O_NOFOLLOW` at every component and the root's `(st_dev, st_ino)` pinned at
+  mount. It skips symlinked, hard-linked, irregular and other-device pages,
+  counts what it skipped, and reports it. Its caps on pages, bytes, depth and
+  entries seen, and its per-walk deadline, are re-checked on every walk
+  `Scripts/mcp-wiki.py:_mount_scan`. A single page is read the same way
+  `Scripts/mcp-wiki.py:_mount_page_text`.
+- **Scored on its own.** Each instance has its own df/idf space and its own
+  relevance gate, so a foreign wiki cannot move the official gate. Results are
+  merged by coverage, then rank inside the instance, then instance order with
+  official first. Every hit line starts with its instance tag,
+  `(wiki: <name>, mounted)` or `(wiki: official)`, before any text a page
+  wrote, and a mounted snippet line starts with `   · ` and the same tag
+  `Scripts/mcp-wiki.py:_render_search_merged`.
+- **Framed.** Every reply carrying mounted text sits between a banner and an
+  end marker that share a per-reply random nonce. The marker is appended after
+  truncation, so it survives a small `max_answer_chars`
+  `Scripts/mcp-wiki.py:_frame_reply`.
+- **Escaped.** Every string a mount makes the server echo is clipped,
+  backslash-escaped in the fleet's cell vocabulary
+  ([[0016-a-cell-may-not-forge-a-boundary]]), stripped of link and HTML
+  brackets, and shows its invisible characters as `\xNN`
+  `Scripts/mcp-wiki.py:_mount_text`.
+
+A `root` that is not the official directory, judged by identity and not by
+spelling, is an **anonymous** read-only instance under the same rules. Its tag
+is `root:<8 hex>`, taken from a SHA-256 of its resolved path, so no directory
+name reaches the banner. A `root` that is the official directory by identity
+reads the canonical wiki path. `root` is no longer a way to run `measure` or
+`reindex` somewhere else. The CLIs are
+unaffected: they pass the official wiki as `handle_wiki_call`'s `wiki_root`
+argument, which is always official `Scripts/mcp-wiki.py:handle_wiki_call`.
+
+A model `mount` lasts for the server process. Only the owner makes an entry
+outlive the process, by editing the JSON file named by `--mounts-file`, which
+the server only reads. The server checks the file's owner, mode, parent
+directory, symlinks and location, and parses it strictly. Any problem with it
+disables persistence and the server still starts
+`Scripts/mcp-wiki.py:_load_mounts_file`. A persisted entry is validated on
+first use and cannot be unmounted. `mount` itself stays model-callable with no
+owner switch, which is a declared limit.
+
+The owner decisions, the bounds and the memory model behind them, the
+alternatives rejected and every declared limit are in
+[[0039-a-mounted-wiki-is-read-only-and-untrusted]].
 ## One scope, one rule: `path_prefix`
 
 `search`, `list`, `freshness`, `verify` and `measure` all narrow to a subtree
@@ -121,35 +196,63 @@ description rather than a project `CLAUDE.md` is what makes it travel to every
 project the plugin is installed in; the reasoning, and the one question left
 open, are in [[0003-the-trigger-travels-with-the-tool]].
 
-## The search corpus: lazy, whole, and never evicted
+## The search corpus: lazy, whole, and memoized per instance
 
-There is **no startup index and no inverted index** in the server. The first
-`search` of a process reads and tokenizes every page into per-field token lists
-`Scripts/mcp-wiki.py:_build_corpus`; that result is memoized in a module-level
-dict keyed on the wiki root `Scripts/mcp-wiki.py:_build_corpus_cached`, whose
-only caller is the search handler. Nothing warms it, so the first query pays
-for the whole corpus and every later one pays nothing.
+The server keeps **no startup index and no inverted index**. The first `search`
+of the official wiki in a process reads every page and tokenizes it into
+per-field token lists `Scripts/mcp-wiki.py:_build_corpus`. The result is
+memoized in a module-level dict keyed on the wiki root
+`Scripts/mcp-wiki.py:_build_corpus_cached`, and the search scorer is its only
+caller `Scripts/mcp-wiki.py:_search_instance`. Nothing warms the memo, so the
+first query pays for the whole corpus and every later query pays nothing.
 
-Invalidation is by disk state alone — a stat-only walk over
+Invalidation depends on disk state alone: a stat-only walk over
 `(relpath, mtime_ns, size)` `Scripts/mcp-wiki.py:_corpus_signature`. No
-write-path hook is needed and the memo stays correct when a *different* process
-edits a page; only `INDEX.md` is skipped `Scripts/mcp-wiki.py:SKIP_FILES`, so a
-reindex never invalidates it spuriously. The memoization is keyed on the root and nothing
-else: no HEAD, no TTL, no eviction, so a long-lived server holds one tokenized
-copy of every root it has ever searched.
+write-path hook is needed, and the memo stays correct when a *different* process
+edits a page. Only `INDEX.md` is skipped `Scripts/mcp-wiki.py:SKIP_FILES`, so a
+reindex never invalidates the memo spuriously. The module memo is keyed on the
+root and nothing else: no HEAD, no TTL and no eviction.
 
-Nothing in that memo is mutated in place — `_build_corpus` returns fresh lists
-and `_build_corpus_cached` rebinds a single key — which is what lets the server
-run handlers concurrently with no lock over its index: a reader holding the
-previous corpus keeps a self-consistent snapshot while a rebuild installs the
-next one, and two cold misses cost duplicated work rather than a half-built
-index. Up to eight handlers run at once and further calls queue behind them
-`Scripts/mcp-wiki.py:MAX_INFLIGHT_REQUESTS` — never behind the reader, which
-owns a thread of its own — and `reindex` — the one writing
-function — writes only `INDEX.md`, which the signature walk skips, so it can
-neither invalidate this cache nor be half-read by a concurrent search. The
-per-server audit that had to establish all of this before the dispatch changed
-is [[0008-a-serialized-read-loop-looks-like-a-dead-server]].
+Only the official wiki enters the module memo. That includes a `root` that
+resolves to the official directory by identity, whatever spelling the caller
+used. A mounted or anonymous instance never enters it. Such an instance keeps
+its corpus in its own `memo`, one tuple replaced by one store
+`Scripts/mcp-wiki.py:_mounted_corpus`. That memo lives and dies with the
+`Instance`:
+
+- `unmount` frees a session mount's memo.
+- The anonymous `root` cache holds at most `MAX_ANON_ROOTS` instances, and a new
+  root evicts the oldest `Scripts/mcp-wiki.py:_MountRegistry.admit_anon`.
+- `MAX_LIVE_MOUNT_BYTES` bounds the raw bytes behind all live mounted memos
+  together.
+
+The never-evicted, one-copy-per-root behaviour is therefore limited to the
+official wiki and the spellings that reach it. A mounted memo has its own
+signature, an fd-relative stat walk that also keys on `st_ino` and
+`st_ctime_ns`, and its cold build is single-flight under the instance's own
+`build_lock`.
+
+Nothing in the official memo is mutated in place: `_build_corpus` returns fresh
+lists, and `_build_corpus_cached` rebinds a single key. That is what lets the
+server run handlers concurrently with no lock over its index. A reader holding
+the previous corpus keeps a self-consistent snapshot while a rebuild installs
+the next one, and two cold misses cost duplicated work, never a half-built
+index.
+
+Up to eight handlers run at once, and further calls queue behind them
+`Scripts/mcp-wiki.py:MAX_INFLIGHT_REQUESTS`. They never queue behind the stdin
+reader, which owns a thread of its own. `reindex` is the one writing function,
+and it writes only `INDEX.md`, which the signature walk skips. It therefore
+cannot invalidate this cache, and a concurrent search cannot half-read it.
+
+The mount registry is the one place where an invariant spans several
+operations: capacity, name, identity, overlap and the byte budget. So the
+registry takes a short lock for admission only, never across a walk or a build
+`Scripts/mcp-wiki.py:_MountRegistry.admit`. The per-server audit that had to
+establish all of this before the dispatch changed is
+[[0008-a-serialized-read-loop-looks-like-a-dead-server]]. The audit comment in
+the server's `run` now covers the registry, the instance memo and the
+ContextVar as well.
 
 The query side is not cached at all. `df`/`idf` are recomputed over the whole
 corpus per call, and a term is matched by scanning every token of every field
@@ -169,7 +272,8 @@ walking its keys anyway.
 
 Freshness is measured, never stored. One classifier serves both the corpus
 audit and the per-hit labels on `search` / `source_to_pages`
-`Scripts/mcp-wiki.py:_classify_page`. It returns eight states, and only
+`Scripts/mcp-wiki.py:_classify_page`. That covers the official wiki only: a
+mounted instance is never classified. It returns eight states, and only
 `current` means "compared against HEAD and clean" — `unverified`, `promotable`,
 `planned`, `untracked` and `no-sources` all mean *not checkable*, which is not
 the same as fresh.

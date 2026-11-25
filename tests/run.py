@@ -414,7 +414,11 @@ SUITES = [
      "the frontmatter aliases synonym field, "
      "the frozen-record advisory carve-out, "
      "the dead [[slug]] wikilink gate, roadmap pages as frozen records, "
-     "a function-less call carrying params refused", 173),
+     "a function-less call carrying params refused, "
+     "mounted wiki instances (mount/unmount/instances, `wiki=`, the contained "
+     "walk, one-line refusals, the nonce frame, the owner-edited mounts file, "
+     "the security fix round)",
+     363),
     ("wiki_index", run_wiki_index,
      "INDEX.md rendering and the page-type constants: the server's "
      "render_index never listing a roadmap-item and counting them in one "
@@ -581,7 +585,7 @@ SUITES = [
      "generated into, and called by, every server; and the unknown-params "
      "refusal unit-tested and called by every host that carries it; and the "
      "missing-function refusal (a function-less call that carries params or "
-     "another argument) unit-tested and called by every dispatcher", 147),
+     "another argument) unit-tested and called by every dispatcher", 148),
     ("mcp_websocket", run_mcp_websocket,
      "the stdlib WebSocket client: exact-match handshake, every frame length "
      "form, the refusals a frame header earns, fragments, ping/pong, close, "
