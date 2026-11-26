@@ -11,7 +11,7 @@ sources:
   - tests/test_pack.py
   - tests/_stub_pack_hub.py
 verified:
-  commit: 24bc918
+  commit: 0555d6b
   date: 2026-11-26
 links:
   - skills
