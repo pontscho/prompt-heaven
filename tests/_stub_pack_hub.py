@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""An in-memory stand-in for the ai-soul hub's POST /pack/sync route.
+"""An in-memory stand-in for the ai-soul hub's POST /pack/sync route (and,
+for Milestone B, minimal /pack/pull, /pack/claim and /pack/update).
 
 Used by tests/test_pack.py. Stdlib only; one ThreadingHTTPServer on
 127.0.0.1:0; every state lives in memory. It takes the pack-sync/1 body as
@@ -39,7 +40,11 @@ import threading
 import unicodedata
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-ROUTES = ("sync",)
+ROUTES = ("sync", "pull", "claim", "update")
+UPDATE_ACTIONS = ("assign", "plan-ready", "impl-ready", "ack")
+FAILURE_CODES = ("wip", "verify", "refused", "missing", "lane", "state", "dropped")
+EVENT_ID_RE = re.compile(r"pv_[A-Za-z0-9_-]{22}\Z")
+COMMIT_RE = re.compile(r"[0-9a-f]{7,64}\Z")
 MAX_BODY = 2 * 1048576
 ITEM_KEYS = {"id", "title", "state", "horizon", "rank", "ready", "blockedBy", "tags", "severity"}
 PLAN_KEYS = {"itemId", "file", "tasks"}
@@ -159,6 +164,7 @@ class StubPackHub:
             self.faults = []
             self.answers = []
             self.requests = []
+            self.pull_state = None
 
     def count(self, route="sync"):
         with self.lock:
@@ -219,6 +225,62 @@ class StubPackHub:
                     raise Bad(400, "task text")
         out = {"changed": True, "exportIgnored": False, "plansApplied": len(plans),
                "plansSkipped": 0, "plansPending": 0}
+        if self.answers:
+            out.update(self.answers.pop(0))
+        return out
+
+    # -- Milestone B: /pack/pull, /pack/claim, /pack/update ---------------------
+    # `pull_state` is the pull answer (set it per test); claim / update judge
+    # the body's exact keys and grammars like pack-routes.ts and answer the
+    # closed result (overridable through `answer`, like the sync).
+
+    pull_state = None
+
+    def _r_pull(self, body):
+        if not isinstance(body, dict) or set(body) != {"member"}:
+            raise Bad(400, "keys")
+        if not (isinstance(body["member"], str) and MEMBER_RE.match(body["member"])):
+            raise Bad(400, "member")
+        state = self.pull_state or {"member": {"name": body["member"], "role": "worker", "project": "proj"},
+                                    "cards": [], "events": [], "version": 1}
+        return state
+
+    def _r_claim(self, body):
+        if not isinstance(body, dict) or set(body) != {"member", "project", "itemId"}:
+            raise Bad(400, "keys")
+        if not (MEMBER_RE.match(str(body["member"])) and PROJECT_RE.match(str(body["project"]))
+                and ITEM_ID_RE.match(str(body["itemId"]))):
+            raise Bad(400, "grammar")
+        out = {"version": 2, "changed": True, "claimedAt": 1}
+        if self.answers:
+            out.update(self.answers.pop(0))
+        return out
+
+    def _r_update(self, body):
+        allowed = {"member", "project", "itemId", "action", "assignee", "eventId", "outcome", "code", "commit"}
+        if not isinstance(body, dict) or not {"member", "project", "action"} <= set(body) <= allowed:
+            raise Bad(400, "keys")
+        if body["action"] not in UPDATE_ACTIONS:
+            raise Bad(400, "action")
+        if "eventId" in body and not EVENT_ID_RE.match(str(body["eventId"])):
+            raise Bad(400, "eventId")
+        if "commit" in body and not COMMIT_RE.match(str(body["commit"])):
+            raise Bad(400, "commit")
+        if body["action"] == "ack":
+            # The board's ack rule: an eventId, applied (an optional commit, no
+            # code) or failed (a closed code, no commit), and nothing else.
+            if set(body) - {"member", "project", "action", "eventId", "outcome", "code", "commit"} or "eventId" not in body:
+                raise Bad(400, "ack keys")
+            if body.get("outcome") == "applied":
+                if "code" in body:
+                    raise Bad(400, "applied code")
+            elif body.get("outcome") == "failed":
+                if body.get("code") not in FAILURE_CODES or "commit" in body:
+                    raise Bad(400, "failed code")
+            else:
+                raise Bad(400, "outcome")
+        out = {"version": 2, "changed": True, "action": body["action"], "itemId": body.get("itemId"),
+               "column": None if body["action"] == "ack" else "planning", "plansDeleted": 0}
         if self.answers:
             out.update(self.answers.pop(0))
         return out

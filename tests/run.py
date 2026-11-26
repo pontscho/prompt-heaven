@@ -598,9 +598,13 @@ SUITES = [
      "digest's H1 rules with three mutations that must go red, the plan-set "
      "dedupe and cap, the 404 / 429 retries and Retry-After parsing through a "
      "recorded sleep seam, refusals, redirect, oversize answer, config and "
-     "token-file refusals, member precedence, _label parity, and the token "
-     "in no output",
-     48),
+     "token-file refusals, member precedence, _label parity, the token "
+     "in no output, and (Milestone B) the pull / claim / assign / plan-ready "
+     "/ impl-ready / ack bodies and exits, the fresh-nonce pack-data fence "
+     "with planted markers neutralised in every form, and apply's "
+     "validate -> apply -> ack with one --commit per close, with three "
+     "more mutations that must go red",
+     68),
     ("generated_region", run_generated_region,
      "generated regions match their canonical source, and the source named on "
      "a region's BEGIN line is the one its names resolve against; the "

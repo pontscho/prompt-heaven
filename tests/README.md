@@ -78,6 +78,8 @@ rationale lives in `docs/subsystems/tests.md`.
 | `checkpoint` | `test_checkpoint.py` | A–M |
 | `roadmap` | `test_roadmap.py` | A–M |
 | `roadmap_board` | `test_roadmap_board.py` | A–F |
+| `pack_apply` | `test_pack_apply.py` | apply, events, text, readers, digest, gates, hygiene |
+| `pack_cli` | `test_pack.py` | body, paths, digest, http, config, cli, commands, fence, apply, hygiene |
 | `generated_region` | `test_generated_region.py` | A–H |
 | `mcp_websocket` | `test_mcp_websocket.py` | A–F |
 | `read_loop` | `test_read_loop.py` | A–F |
@@ -122,6 +124,8 @@ python3 tests/test_bitbucket_cli.py
 python3 tests/test_checkpoint.py
 python3 tests/test_roadmap.py
 python3 tests/test_roadmap_board.py
+python3 tests/test_pack_apply.py
+python3 tests/test_pack.py
 python3 tests/test_generated_region.py
 python3 tests/test_mcp_websocket.py
 python3 tests/test_read_loop.py
