@@ -694,7 +694,7 @@ visible violation of the whole-or-nothing rule, not a presentation choice.
 | `_max_answer_chars` | `Scripts/_mcp_paging.py` | 7 | `Scripts/mcp-context7.py`, `Scripts/mcp-gd.py`, `Scripts/mcp-jenkins.py`, `Scripts/mcp-lldb.py`, `Scripts/mcp-postgres.py`, `Scripts/mcp-purity.py`, `Scripts/mcp-search.py` |
 | `_offset` | `Scripts/_mcp_paging.py` | 5 | `Scripts/mcp-context7.py`, `Scripts/mcp-lldb.py`, `Scripts/mcp-postgres.py`, `Scripts/mcp-purity.py`, `Scripts/mcp-tshark.py` |
 | `_rows_note` | `Scripts/_mcp_paging.py` | 5 | `Scripts/mcp-context7.py`, `Scripts/mcp-jenkins.py`, `Scripts/mcp-lldb.py`, `Scripts/mcp-postgres.py`, `Scripts/mcp-purity.py` |
-| `all 39 blocks (whole source)` | `Scripts/_mcp_spool.py` | 2 | `Scripts/mcp-messagebox.py`, `Scripts/messagebox-hook.py` |
+| `all 39 blocks (whole source)` | `Scripts/_mcp_spool.py` | 3 | `ClaudeCode/skills/pack/scripts/pack.py`, `Scripts/mcp-messagebox.py`, `Scripts/messagebox-hook.py` |
 | `all 37 blocks (whole source)` | `Scripts/_mcp_websearch.py` | 2 | `Scripts/mcp-search.py`, `Scripts/search_duckduckgo.py` |
 | `WS_MAX_FRAME_BYTES` | `Scripts/_mcp_websocket.py` | 1 | `Scripts/mcp-gdc.py` |
 | `WS_MAX_HANDSHAKE_BYTES` | `Scripts/_mcp_websocket.py` | 1 | `Scripts/mcp-gdc.py` |
@@ -720,8 +720,8 @@ visible violation of the whole-or-nothing rule, not a presentation choice.
 | `_ws_sync_send` | `Scripts/_mcp_websocket.py` | 0 | no host |
 | `all 25 blocks (whole source)` | `Scripts/_mcp_zstd.py` | 5 | `Scripts/fetch.py`, `Scripts/mcp-search.py`, `Scripts/mcp-webfetch.py`, `Scripts/search_duckduckgo.py`, `Scripts/search_github.py` |
 
-27 hosts scanned; 407 canonical blocks, of which 403 are generated into at least one host; generated into no host: `_ws_sync_close`, `_ws_sync_connect`, `_ws_sync_recv`, `_ws_sync_send`.
-<!-- END MEASURED: 12dbff3c9a31 -->
+28 hosts scanned; 407 canonical blocks, of which 403 are generated into at least one host; generated into no host: `_ws_sync_close`, `_ws_sync_connect`, `_ws_sync_recv`, `_ws_sync_send`.
+<!-- END MEASURED: c1e648c01933 -->
 
 `DEFAULT_MAX_CHARS` is worth naming here because of the state its first hosts
 were found in when `0f05101` lifted it. `mcp-git.py`, `mcp-inspect.py` and
@@ -974,6 +974,18 @@ host `tests/test_generated_region.py:group_tabs`. In the tuple it sits before
 `gpu-router.py`, which arrived first `Scripts/amalgamate.py:DECLARED_HOSTS`;
 the ordinals on this page follow arrival, not tuple position ([[mcp-messagebox]]).
 
+`ClaudeCode/skills/pack/scripts/pack.py` is the seventh declared host, and the
+first outside `Scripts/`: the p:pack skill's board client, a stdlib script run by
+path. Its tuple entry is Scripts-relative, `../ClaudeCode/skills/pack/scripts/pack.py`,
+because the generator joins every entry onto `Scripts/`; the census resolves the
+path before it spells it repo-relative, so no generator change was needed. Like
+the hook it carries one region, `Scripts/_mcp_spool.py` whole, taken for the text
+rule (`unsafe_text_reason`, `_unsafe_label`) its board text must agree with; the
+owner-walk blocks ride along inert, and the script's own AST gate
+`tests/test_pack_apply.py` refuses any reach into them from outside the region. It
+is a space host `tests/test_generated_region.py:group_tabs`, and it sits before
+`gpu-router.py`, which a gpu-router suite row pins as the last entry.
+
 They are **not** in the `--census fleet` count, deliberately: that census is
 about the server fleet and says so in its first line, so its measured block above
 counts the servers only. A block generated only into a declared host, or into no
@@ -1026,10 +1038,11 @@ copy has gone:
 - `Scripts/mcp-webfetch.py`: `_error` -- declared: nothing measurable: byte-identical to the canonical once re-indented for a tab host, kept by hand only because every other server takes it co-listed with _result on one marker and this host cannot take _result
 - `Scripts/mcp-webfetch.py`: `_result` -- declared: annotates result as dict where the canonical says Any -- a body difference no re-indenting removes
 - `Scripts/mcp-webfetch.py`: `_rows_note` -- declared: excluded twice over: it is not tab-safe (its else aligns under an open paren) and its body diverged -- (start, shown, total) against the canonical (start, shown, total, exact), with no lower-bound branch
+- `Scripts/mcp-wiki.py`: `_int_param` -- UNDECLARED: no reason is on record for this copy
 
-19 hand-written copies of a canonical block name, bound at module level or as a direct class member outside every generated region, in 7 of the 27 hosts scanned; 19 carry a declared reason and 0 do not.
+20 hand-written copies of a canonical block name, bound at module level or as a direct class member outside every generated region, in 8 of the 28 hosts scanned; 19 carry a declared reason and 1 do not.
 Declared reasons with no hand copy left to explain: none.
-<!-- END MEASURED: 286c6cbd2c31 -->
+<!-- END MEASURED: ee70e50cb9c7 -->
 
 The `Scripts/mcp-skill.py` rows are the websearch sanitizer, and they follow the
 router's precedent for the same reason: `Scripts/_mcp_websearch.py` is a whole

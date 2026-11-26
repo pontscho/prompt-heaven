@@ -92,6 +92,24 @@ raises `Scripts/mcp-messagebox.py:config_from_env`:
   no one: `MESSAGEBOX_SESSIONS_DIR`, `MESSAGEBOX_ROOT` and `MESSAGEBOX_WALK_PID`.
   `MESSAGEBOX_POLL_MS_FOR_TEST` is honoured only when `MESSAGEBOX_SESSIONS_DIR` is
   also set `Scripts/mcp-messagebox.py`.
+- `CLAUDE_LOOP_ENTITY` — the requested peer name, see "The requested name" below.
+
+**The requested name.** The name sent at register is `CLAUDE_LOOP_ENTITY` when
+`Scripts/claude-loop.sh` runs with `--entity NAME` (it exports the variable, and
+unsets it without `--entity`), else the basename of the owner's cwd. The entity
+must match `[a-z0-9-]{1,64}` `Scripts/mcp-messagebox.py:_ENTITY_RE`; any other
+value is logged once and ignored, so the cwd basename is used
+`Scripts/mcp-messagebox.py:config_from_env`. This change is a deliberate
+exception to the ai-soul Pack spec's rule that existing scripts are not modified
+(operator decision 2): the Pack board keys a squad member by this permanent
+name, so a session restarted by claude-loop resolves to the same member (as
+`x` or `x-2`).
+Rows D14-D16 pin the three cases against the stub hub. They do **not** prove
+that Claude Code passes its environment to the MCP server it spawns; that
+inheritance is an unverified assumption, so check it by hand once per Claude
+Code release: run `Scripts/claude-loop.sh --entity x` from a repo with
+`.claude/tmp/checkpoint-x.md`, call `messagebox_call` `info`, and expect the
+name `x` (or `x-2` when a stale `x` is still live at the hub).
 
 **The server always starts and answers the protocol.** It registers and polls
 only when every condition holds, checked in this order
@@ -227,8 +245,8 @@ Every hub call is one JSON `POST` built by one method
 After activation a daemon thread runs one register-or-poll cycle per interval,
 with jitter `Scripts/mcp-messagebox.py:_cycle`:
 
-- **Register** sends an `instanceKey`, the requested name (the basename of the
-  owner's cwd, reduced to the name grammar) and the host. The hub assigns the
+- **Register** sends an `instanceKey`, the requested name (`CLAUDE_LOOP_ENTITY`,
+  else the basename of the owner's cwd, reduced to the name grammar) and the host. The hub assigns the
   final name and the poll interval. The server clamps that interval between
   `Scripts/mcp-messagebox.py:POLL_MIN_MS` and `Scripts/mcp-messagebox.py:POLL_MAX_MS`
   and writes `owner.json` into the spool `Scripts/mcp-messagebox.py:_register`.

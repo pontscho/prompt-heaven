@@ -106,8 +106,15 @@ CANONICAL_SOURCES = {name: SCRIPTS_DIR / name for name in CANONICAL_NAMES}
 # an MCP server. It takes Scripts/_mcp_spool.py WHOLE -- the owner walk, the
 # text rule and the record check it must share with the server it reads for --
 # and nothing else, and it must stay free of any network import.
+#
+# ClaudeCode/skills/pack/scripts/pack.py, the p:pack skill's board client, takes
+# Scripts/_mcp_spool.py WHOLE too, for its text rule: the first declared host
+# outside Scripts/ (the entry is Scripts-relative, so `..` leads out of it), a
+# space host. It is listed before gpu-router.py, which a gpu-router suite row
+# pins as the last entry.
 DECLARED_HOSTS = ("search_duckduckgo.py", "search_github.py",
                   "llm-router.py", "fetch.py", "messagebox-hook.py",
+                  "../ClaudeCode/skills/pack/scripts/pack.py",
                   "gpu-router.py")
 
 # Canonical sources a host takes WHOLE or not at all (G-c): the Chrome client

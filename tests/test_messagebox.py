@@ -31,7 +31,8 @@ Groups:
   B  the text rule -- every refused class, the allowed set, CRLF, NFC, limits
   C  the token file -- every rule in-process, and fail closed through info
   D  owner detection -- cli, sdk-cli, FORCE, DISABLE, no/invalid/ambiguous
-     sessions file, the parent-chain walk, the hub URL and the names
+     sessions file, the parent-chain walk, the hub URL and the names,
+     CLAUDE_LOOP_ENTITY as the requested name
   E  register, poll, spool and acks -- the whole sequence, duplicates, the
      404 re-register, send/list/reply/ack/status, name uniqueness
   F  secrets and redirects -- no redirect followed, 401 stops, the token and
@@ -326,7 +327,8 @@ class World:
         return os.path.join(self.root, "%d-%d" % (pid or self.pid, start_s))
 
     def env(self, **over):
-        env = {k: v for k, v in os.environ.items() if not k.startswith("MESSAGEBOX_")}
+        env = {k: v for k, v in os.environ.items()
+               if not k.startswith("MESSAGEBOX_") and k != "CLAUDE_LOOP_ENTITY"}
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         env.update(MESSAGEBOX_HUB=self.hub.url, MESSAGEBOX_TOKEN_FILE=self.token_path,
                    MESSAGEBOX_SESSIONS_DIR=self.sessions, MESSAGEBOX_ROOT=self.root,
@@ -1153,6 +1155,22 @@ def _run_d(suite, fx):
                 problems.append("%r -> %r breaks the grammar" % (raw, got))
         return problems, ()
     _guard(suite, GRP_D, "D13 names and hosts are restricted to [A-Za-z0-9._-], 1-64", labels)
+
+    def entity_name(label, over, want):
+        def check():
+            w = World(fx, label, cwd="/work/proj")
+            c = w.server(**over)
+            if not registered(w, c):
+                return ["did not register"], ["stderr: %r" % c.stderr_text()[-300:]]
+            name = w.hub.bodies("register")[0]["name"]
+            return ([] if name == want else ["register name %r, want %r" % (name, want)]), ()
+        return check
+    _guard(suite, GRP_D, "D14 CLAUDE_LOOP_ENTITY set: the register name is the entity",
+           entity_name("d14", {"CLAUDE_LOOP_ENTITY": "pack-x"}, "pack-x"))
+    _guard(suite, GRP_D, "D15 an invalid CLAUDE_LOOP_ENTITY (Foo Bar) falls back to the cwd basename",
+           entity_name("d15", {"CLAUDE_LOOP_ENTITY": "Foo Bar"}, "proj"))
+    _guard(suite, GRP_D, "D16 no CLAUDE_LOOP_ENTITY: the register name is the cwd basename",
+           entity_name("d16", {"CLAUDE_LOOP_ENTITY": None}, "proj"))
 
 
 # ---------------------------------------------------------------------------

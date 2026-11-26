@@ -158,6 +158,14 @@ def run_roadmap_board(opts):
     return run_python_suite("test_roadmap_board", opts)
 
 
+def run_pack_apply(opts):
+    return run_python_suite("test_pack_apply", opts)
+
+
+def run_pack_cli(opts):
+    return run_python_suite("test_pack", opts)
+
+
 def run_generated_region(opts):
     return run_python_suite("test_generated_region", opts)
 
@@ -573,6 +581,26 @@ SUITES = [
      "renders without v-html through one pinned Vue build, and --out held "
      "to the roadmap-board-*.html name and refused through a symlink",
      46),
+    ("pack_apply", run_pack_apply,
+     "pack.py's offline core: every repo event kind applied through the real "
+     "roadmap.py in a mkdtemp git repo, once and twice byte-identical, with "
+     "the WIP / state / lane / dropped pre-checks, the end-of-lane rank "
+     "expansion and the archive's sha winning a close; every hostile event "
+     "field refused before an argv; the text judge's parity rows with a "
+     "mutation; the export / task-YAML readers; the digest write site "
+     "fd-relative and O_EXCL; and the AST gates outside and inside the "
+     "generated region with a planted control group",
+     42),
+    ("pack_cli", run_pack_cli,
+     "pack.py's network client and sync against the stub pack hub on "
+     "loopback: the exact pack-sync/1 body with the server's marker rule, "
+     "workDir / yaml / toplevel path safety with no subprocess, the request "
+     "digest's H1 rules with three mutations that must go red, the plan-set "
+     "dedupe and cap, the 404 / 429 retries and Retry-After parsing through a "
+     "recorded sleep seam, refusals, redirect, oversize answer, config and "
+     "token-file refusals, member precedence, _label parity, and the token "
+     "in no output",
+     48),
     ("generated_region", run_generated_region,
      "generated regions match their canonical source, and the source named on "
      "a region's BEGIN line is the one its names resolve against; the "
@@ -1114,7 +1142,7 @@ SUITES = [
      "backoff and Retry-After, hostile hub payloads rejected without a spool "
      "write, spool hygiene and the second-server flock, bye on EOF and "
      "SIGTERM, the start-up sweep, the handler crash layers, and the stub "
-     "hub's own state machine", 171),
+     "hub's own state machine", 174),
     # TYPED: a fixed case table, written RED first (every row failed on the
     # missing hook). The hook is a stdlib script, not an MCP server, so no
     # fleet roster sees it.

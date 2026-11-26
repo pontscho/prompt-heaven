@@ -47,10 +47,12 @@ sanitizers shape output for a model, this one REFUSES input that would reach it.
 
 **It is a WHOLE source.** The blocks call one another (the record check reads the
 grammar, the text rule and the parser; the owner walk reads the file reader and
-the parser), so a host spells ONE marker naming every block in source order. Both
-hosts do. Hosts: `Scripts/mcp-messagebox.py` (matches the server glob) and
+the parser), so a host spells ONE marker naming every block in source order. All
+three hosts do. Hosts: `Scripts/mcp-messagebox.py` (matches the server glob),
 `Scripts/messagebox-hook.py`, a script that is not an MCP server and is named in
-`Scripts/amalgamate.py:DECLARED_HOSTS` by hand. The hook imports no socket,
+`Scripts/amalgamate.py:DECLARED_HOSTS` by hand, and
+`ClaudeCode/skills/pack/scripts/pack.py`, the p:pack board client, declared the
+same way for the text rule (its owner-walk blocks are inert). The hook imports no socket,
 `urllib`, `http` or `ssl` module, and no block here needs one; a suite row reads
 its imports to keep it so.
 
@@ -63,7 +65,7 @@ asserts stays empty, would need a `sys.path` entry the test harness's
 not import a sibling at all.
 
 The blocks read `json`, `os`, `re`, `stat`, `subprocess` and `unicodedata` and the
-typing names `Any`, `NamedTuple` and `Optional`, which both hosts import. Every
+typing names `Any`, `NamedTuple` and `Optional`, which all three hosts import. Every
 block is written with no line break inside a bracket and every indent a whole
 multiple of four, so the tab conversion of `Scripts/amalgamate.py` would accept
 them. Their behaviour is pinned by `tests/test_messagebox.py` and

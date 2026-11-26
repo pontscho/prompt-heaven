@@ -211,7 +211,8 @@ CANONICAL_NAMES = (BROTLI_CANONICAL_NAME, CHROME_CANONICAL_NAME,
 # `fleet-ok` gates these alongside the servers -- a declared host the gate did
 # not walk would be a target whose drift nothing reports.
 DECLARED_HOSTS = ("search_duckduckgo.py", "search_github.py", "llm-router.py",
-                  "fetch.py", "messagebox-hook.py", "gpu-router.py")
+                  "fetch.py", "messagebox-hook.py",
+                  "../ClaudeCode/skills/pack/scripts/pack.py", "gpu-router.py")
 
 # The sources a host takes WHOLE or not at all (G-c): the Chrome client and its
 # two decoders are one state machine whose blocks call one another, so a host
@@ -2449,7 +2450,7 @@ def group_tabs(suite, mod):
     )
     # The declared hosts are outside the glob above. The two search scripts are
     # tabs throughout -- the fleet's tab hosts that are not servers -- and
-    # llm-router.py and gpu-router.py are space hosts.
+    # llm-router.py, gpu-router.py, messagebox-hook.py and pack.py are space hosts.
     declared_styles = {name: mod.host_indent(Path(SCRIPTS, name).read_text(encoding="utf-8"))
                        for name in DECLARED_HOSTS}
     problems += problem_if(
@@ -2458,8 +2459,9 @@ def group_tabs(suite, mod):
                             "llm-router.py": "space",
                             "fetch.py": "tab",
                             "gpu-router.py": "space",
-                            "messagebox-hook.py": "space"},
-        "expected both search scripts and fetch.py to be tab hosts and both routers space hosts, got %s"
+                            "messagebox-hook.py": "space",
+                            "../ClaudeCode/skills/pack/scripts/pack.py": "space"},
+        "expected both search scripts and fetch.py to be tab hosts and both routers, messagebox-hook.py and pack.py space hosts, got %s"
         % declared_styles,
     )
     suite.record(GF, "host-indent-from-tokens", problems,
@@ -2821,6 +2823,13 @@ def group_census(suite, mod):
     # The oracle is the region walk again, keyed by (source, block) because a
     # region resolves its names against its OWN source -- a count keyed by the
     # bare name would agree with a census that credited the wrong domain.
+    # A host is spelled repo-relative with the path RESOLVED first, so a
+    # declared host outside Scripts/ (pack.py, `../ClaudeCode/...`) reads as the
+    # generator's census spells it, never as `Scripts/<basename>`.
+    def host_spelling(path):
+        return os.path.relpath(os.path.realpath(path),
+                               os.path.realpath(H.REPO_ROOT)).replace(os.sep, "/")
+
     def hosts_oracle(paths):
         found = {(src, block): set()
                  for src, blocks in sources.items() for block in blocks}
@@ -2828,7 +2837,7 @@ def group_census(suite, mod):
             for region in mod.audit(path, sources):
                 for block in region.names:
                     found.setdefault((region.source, block), set()).add(
-                        "Scripts/%s" % path.name)
+                        host_spelling(path))
         return found
 
     def hosts_rows(text):

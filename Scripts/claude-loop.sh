@@ -27,6 +27,7 @@ fi
 
 export CLAUDE_LOOP_PID=$$
 export CLAUDE_LOOP_FLAG="$PWD/.claude/tmp/loop-restart${ENTITY:+-$ENTITY}"
+if [ -n "$ENTITY" ]; then export CLAUDE_LOOP_ENTITY="$ENTITY"; else unset CLAUDE_LOOP_ENTITY; fi
 
 if [ $# -eq 0 ]; then
 	set -- --model opus \
@@ -36,7 +37,7 @@ if [ $# -eq 0 ]; then
 fi
 
 if [ -z "$ENTITY" ]; then
-	PROMPT='Restartable session (claude-loop). First run `python3 ~/.claude/skills/p/skills/checkpoint/scripts/checkpoint.py nexts` and resume the ai-soul work from the newest session: its STATE, NEXT and ACTIVATION block are authoritative. Continue the development along NEXT. When a CONTEXT GUARD message appears: finish the current atomic step (no half-applied edits), invoke the p:checkpoint skill, then run `~/.claude/scripts/loop-restart.sh` as your very last action. Never run that script for any other reason. If blocked on an operator decision, ask with AskUserQuestion and wait.'
+	PROMPT='Restartable session (claude-loop). First run `python3 ~/.claude/skills/p/skills/checkpoint/scripts/checkpoint.py nexts` and resume the work from the newest session: its STATE, NEXT and ACTIVATION block are authoritative. Continue the development along NEXT. When a CONTEXT GUARD message appears: finish the current atomic step (no half-applied edits), invoke the p:checkpoint skill, then run `~/.claude/scripts/loop-restart.sh` as your very last action. Never run that script for any other reason. If blocked on an operator decision, ask with AskUserQuestion and wait.'
 else
 	PROMPT='Restartable session (claude-loop, entity '"$ENTITY"'). Your checkpoint file is `'"$CKPT"'`; the shared .claude/tmp/checkpoint.md is a frozen archive. First run `python3 ~/.claude/skills/p/skills/checkpoint/scripts/checkpoint.py nexts --file '"$CKPT"'` and resume the work of the '"$ENTITY"' stream from its newest session: its STATE, NEXT and ACTIVATION block are authoritative. Continue the development along NEXT. When a CONTEXT GUARD message appears: finish the current atomic step (no half-applied edits), invoke the p:checkpoint skill and write ONLY to `'"$CKPT"'` (checkpoint.py prepend --file '"$CKPT"' --block-file .claude/tmp/session-block-'"$ENTITY"'.md), then run `~/.claude/scripts/loop-restart.sh` as your very last action. Never run that script for any other reason. If blocked on an operator decision, ask with AskUserQuestion and wait.'
 fi

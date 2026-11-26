@@ -643,6 +643,10 @@ class Config(NamedTuple):
     root: str
     walk_pid: Optional[int]
     poll_ms: Optional[int]          # the test override, else None
+    entity: Optional[str]           # CLAUDE_LOOP_ENTITY when valid, else None
+
+
+_ENTITY_RE = re.compile(r"[a-z0-9-]{1,64}\Z")
 
 
 def _check_hub_url(value: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
@@ -690,6 +694,10 @@ def config_from_env(env) -> Config:
     poll_ms = None
     if sessions_override is not None:
         poll_ms = _env_int(env, "MESSAGEBOX_POLL_MS_FOR_TEST", 20, 60000)
+    entity = env.get("CLAUDE_LOOP_ENTITY") or None
+    if entity is not None and not _ENTITY_RE.match(entity):
+        log.info("CLAUDE_LOOP_ENTITY is not a name of [a-z0-9-]; using the working directory name")
+        entity = None
     return Config(
         hub=hub, hub_problem=hub_problem,
         token_file=token_file, token_problem=token_problem,
@@ -699,6 +707,7 @@ def config_from_env(env) -> Config:
         root=env.get("MESSAGEBOX_ROOT") or os.path.join(home, ".claude", "messagebox"),
         walk_pid=_env_int(env, "MESSAGEBOX_WALK_PID", 2, 2 ** 31 - 1),
         poll_ms=poll_ms,
+        entity=entity,
     )
 
 
@@ -997,7 +1006,7 @@ class Messagebox:
         except OwnerRefused as exc:
             return str(exc)
         self.owner = owner
-        self.base_name = _label(os.path.basename(owner.cwd.rstrip("/")), "claude")
+        self.base_name = _label(cfg.entity or os.path.basename(owner.cwd.rstrip("/")), "claude")
         self.host = _label(socket.gethostname(), "host")
         self.name = self.base_name
         if owner.entrypoint != "cli" and not cfg.force:
