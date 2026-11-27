@@ -45,7 +45,7 @@ fi
 round=0
 while :; do
 	round=$((round + 1))
-	rm -f "$CLAUDE_LOOP_FLAG"
+	rm -f "$CLAUDE_LOOP_FLAG" "$CLAUDE_LOOP_FLAG.continue"
 	echo "claude-loop: round $round (context limit ${CLAUDE_CTX_LIMIT:-250000})" >&2
 	safranek "$@" -- "$PROMPT"
 	stty sane 2>/dev/null

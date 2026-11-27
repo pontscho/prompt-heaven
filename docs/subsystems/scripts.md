@@ -1629,21 +1629,46 @@ an undocumented internal format, which the script's header says in so many words
 call in the main session repeats the message.
 
 **What it injects.** Over the limit, it returns a PostToolUse `additionalContext`
-headed `CONTEXT GUARD (main session only; subagents and forks ignore this)` with
-the measured size and the limit, and an ordered instruction: finish the current
-atomic step; wait until every background minion and subagent the session launched
+headed `CONTEXT GUARD: STOP`, worded as a mandatory order that outranks the task in
+hand (sessions had been treating the softer first wording as advice and carrying
+on), saying it applies to the main session only, with the measured size, the
+limit and the overshoot, that it repeats after every tool call until obeyed, a ban
+on starting anything new, and an ordered instruction: finish the step already in
+flight; wait until every background minion and subagent the session launched
 has finished and reported, never checkpointing or restarting while one runs, and
 capture their results in the checkpoint; do not wait on background shell tasks,
 but stop one that never exits on its own (a server, watcher, `tail`, a command
 waiting for input) with `TaskStop` and record the command and output file of any
 other in the checkpoint; then run the `p:checkpoint` skill; then run
-`~/.claude/scripts/loop-restart.sh` `Scripts/context-guard.sh`.
+`~/.claude/scripts/loop-restart.sh` `Scripts/context-guard.sh`. It also says the
+user alone can lift the order: only when the user has said so in so many words may
+the model create the override file named in the message, and when unsure it asks
+with `AskUserQuestion`.
 
-**What it refuses (PreToolUse).** When a subagent issues a command that names
-`loop-restart.sh`, the guard exits `2` with a stderr reason, so the tool call is
-blocked: only the main session may end the process `Scripts/context-guard.sh`. The
-main session's own call passes, and so does any command from a session not
-under the loop.
+**What it refuses (PreToolUse).** Two rules, both registered with matcher `*`.
+When a subagent issues a command that names `loop-restart.sh`, the guard exits `2`
+with a stderr reason, so the tool call is blocked: only the main session may end
+the process `Scripts/context-guard.sh`. The main session's own call passes, and so
+does any command from a session not under the loop.
+
+**The hard tier.** The soft message is advice a session can still ignore, so past
+`CLAUDE_CTX_HARD` (default the limit plus 50000) the main session's PreToolUse
+calls are refused with exit `2` unless they are what a checkpoint and a restart
+need: the `p:checkpoint` skill, `Read`, `AskUserQuestion`, `TaskStop`,
+`TaskOutput`, `TodoWrite`, `ListAgents`, `SendMessage`, the mcp-git, mcp-inspect,
+ai-soul and messagebox tools, `Write` under `.claude/tmp/`, `purity_call`
+`create_text_file`, `find_file`, `list_dir`, `search_for_pattern` and `read_file`,
+and a `Bash` command naming `checkpoint.py`, `roadmap.py` or `loop-restart.sh`
+(a substring match, so it is a drift guard rather than a security boundary).
+Subagent calls are never refused by this tier. The soft message announces the hard
+limit, so the refusal is not a surprise.
+
+**The user override.** If the file `$CLAUDE_LOOP_FLAG.continue` exists, both tiers
+go silent. The user creates it, or tells the model to; `Scripts/claude-loop.sh`
+removes it together with the restart flag at the start of every round, so a fresh
+context never inherits it. The model can create the file too, and nothing stops
+it doing so on its own, which is why the message forbids that in words; the
+override is a matter of trust, not enforcement.
 
 **Its partner.** `Scripts/loop-restart.sh` refuses to run without
 `CLAUDE_LOOP_PID`, walks up the process tree from its parent to the process whose

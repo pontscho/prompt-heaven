@@ -36,7 +36,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "Bash",
+        "matcher": "*",
         "hooks": [
           { "type": "command", "command": "~/.claude/scripts/context-guard.sh" }
         ]
