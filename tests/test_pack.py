@@ -49,7 +49,16 @@ is a recorded `_sleep` seam, so no case waits for real.
               applied without a flag, --json results; the refusals before any
               write (a --commit naming no queued close, another project, a
               worker exit 1); an ack refused or busy exit 1; a mutation giving
-              every close one commit that must go red.
+              every close one commit that must go red; an `add` applied twice
+              leaves one item, and one whose origin is only in the archive is
+              acked applied with no roadmap.py add (origin idempotency).
+  K. PROPOSE  (Milestone C) propose member / squad / task: each body (the
+              --project before or after the command), stdout and --json (a
+              member proposal stored as squad, a task queued or pending); the
+              title sanitised before the POST; local refusals (a kind's
+              missing or stray member, the roadmap.py scalar rules, a title
+              over 200) exit 2 with no request; a board refusal exit 1 with
+              the status only; a malformed answer exit 3.
 
 Stdlib only.
 """
@@ -81,6 +90,7 @@ GG = "G. HYGIENE: token, repo tree, bytecode"
 GH = "H. COMMANDS: pull / claim / assign / plan-ready / impl-ready / ack bodies and exits"
 GI = "I. FENCE: fresh nonce, planted markers neutralised in every form"
 GJ = "J. APPLY: validate -> apply -> ack, one --commit per close"
+GK = "K. PROPOSE: member / squad / task bodies and exits"
 
 NOW = 1800000000                       # an exact hour boundary
 LT_SUBSTITUTE = chr(0x2039)
@@ -910,7 +920,17 @@ class FakeRoadmap:
                     item["state"] = "done"
                     item["closed"] = {"commit": full_sha(args[3])}
                     return 0, "", ""
+        if (len(args) == 8 and args[0] == "add" and args[1].startswith("--title=") and args[2] == "--origin"
+                and args[4:6] == ["--horizon", "inbox"] and args[6] == "--reason"):
+            # roadmap.py add: a new inbox idea carrying the origin (no origin check: the
+            # idempotency is pack.py's pre-check, so a second add here shows up as a twin).
+            self.items.append({"id": "R-%04d" % (900 + len(self.items)), "title": args[1][len("--title="):],
+                               "state": "idea", "horizon": "unset", "rank": None, "origin": args[3]})
+            return 0, "", ""
         return 2, "", "roadmap: refused by the fake\n"
+
+    def with_origin(self, origin):
+        return [i for i in self.items if i.get("origin") == origin]
 
     def state(self, item_id):
         return [i["state"] for i in self.items if i["id"] == item_id]
@@ -1343,6 +1363,166 @@ def group_apply(suite, ctx):
     probs = problem_if(r.rc != 0 or r.out != "apply: no queued events\n" or hub.count("update") != 0, "run %r" % r)
     suite.record(GJ, "apply-nothing-queued", probs)
 
+    # An `add` event (a proposed task queued for the own squad): applied once, and a
+    # second apply of the same still-queued event (its ack lost) adds no twin.
+    origin = "pack " + eid("N")
+    fake = FakeRoadmap(APPLY_ITEMS)
+    want_ack = [{"member": "m", "project": "applyrepo", "action": "ack", "eventId": eid("N"), "outcome": "applied"}]
+    probs, adds = [], []
+    for _n in range(2):
+        hub.reset()
+        hub.pull_state = pull_state(name="m", project="applyrepo", events=[event(eid("N"), "add", None, 1, title="Proposed task")])
+        r = pack(ctx, ["--config", ctx.apply_cfg, "--member", "m", "apply"], ctx.apply_top, roadmap=fake)
+        adds.append([c for c in r.roadmap_calls if c[:1] == ["add"]])
+        probs += problem_if(r.rc != 0 or r.out != "%s add -: applied\n" % eid("N"), "run %r" % r)
+        probs += problem_if(hub.bodies("update") != want_ack, "acks %r" % hub.bodies("update"))
+    probs += problem_if(len(adds[0]) != 1 or adds[1], "roadmap add calls %r" % adds)
+    probs += problem_if(adds[0] and adds[0][0][:4] != ["add", "--title=Proposed task", "--origin", origin], "add argv %r" % adds[:1])
+    added = fake.with_origin(origin)
+    probs += problem_if(len(added) != 1 or (added and added[0]["title"] != "Proposed task"), "items with the origin %r" % added)
+    suite.record(GJ, "apply-add-twice-one-item", probs)
+
+    # The origin only in the ARCHIVE (the item was added, then closed): applied, no add.
+    archived = dict(APPLY_ITEMS[-1], id="R-0007", title="Proposed then closed", origin="pack " + eid("O"))
+    fake = FakeRoadmap(APPLY_ITEMS + [archived])
+    hub.reset()
+    hub.pull_state = pull_state(name="m", project="applyrepo", events=[event(eid("O"), "add", None, 1, title="Proposed then closed")])
+    r = pack(ctx, ["--config", ctx.apply_cfg, "--member", "m", "apply"], ctx.apply_top, roadmap=fake)
+    probs = problem_if(r.rc != 0 or r.out != "%s add -: applied\n" % eid("O"), "run %r" % r)
+    probs += problem_if([c for c in r.roadmap_calls if c[:1] != ["export"]], "roadmap calls %r" % r.roadmap_calls)
+    probs += problem_if(len(fake.with_origin("pack " + eid("O"))) != 1, "items with the origin %r" % fake.with_origin("pack " + eid("O")))
+    probs += problem_if(hub.bodies("update") != [dict(want_ack[0], eventId=eid("O"))], "acks %r" % hub.bodies("update"))
+    suite.record(GJ, "apply-add-origin-archived-applied", probs)
+
+
+# ---------------------------------------------------------------------------
+# K. PROPOSE (Milestone C): member / squad / task bodies and exits
+# ---------------------------------------------------------------------------
+
+PROPOSAL = S.PROPOSAL_ID
+SQUAD = S.SQUAD_ID
+PROPOSE_EVENT = S.PROPOSE_EVENT_ID
+
+
+def group_propose(suite, ctx):
+    hub = ctx.hub
+    top = ctx.repo("proprepo")
+    cfg = ctx.config()
+
+    def run(*argv, member="w"):
+        return pack(ctx, ["--config", cfg, "--member", member] + list(argv), top)
+
+    hub.reset()
+    rs = [run("propose", "member", "--role", "worker"),
+          run("propose", "squad", member="m"),
+          run("propose", "squad", "--role", "worker"),
+          run("propose", "task", "--title", "A new idea"),
+          run("propose", "task", "--title", "Elsewhere", "--project", "other.proj"),
+          pack(ctx, ["--config", cfg, "--member", "w", "--project", "before.proj", "propose", "task", "--title", "Before"], top)]
+    bodies = hub.bodies("propose")
+    probs = problem_if([x.rc for x in rs] != [0] * 6, "exits %r" % [x.rc for x in rs])
+    probs += problem_if(bodies != [
+        {"member": "w", "kind": "member", "project": "proprepo", "role": "worker"},
+        {"member": "m", "kind": "squad", "project": "proprepo"},
+        {"member": "w", "kind": "squad", "project": "proprepo", "role": "worker"},
+        {"member": "w", "kind": "task", "project": "proprepo", "title": "A new idea"},
+        {"member": "w", "kind": "task", "project": "other.proj", "title": "Elsewhere"},
+        {"member": "w", "kind": "task", "project": "before.proj", "title": "Before"}], "propose bodies %r" % bodies)
+    probs += problem_if(hub.statuses("propose") != [200] * 6, "statuses %r" % hub.statuses("propose"))
+    probs += problem_if([x.out for x in rs[:4]] != [
+        "propose member: pending owner decision, proposal %s (squad %s)\n" % (PROPOSAL, SQUAD),
+        "propose squad: pending owner decision, proposal %s (squad %s)\n" % (PROPOSAL, SQUAD),
+        "propose squad: pending owner decision, proposal %s (squad %s)\n" % (PROPOSAL, SQUAD),
+        "propose task: queued as add event %s (squad %s)\n" % (PROPOSE_EVENT, SQUAD)], "stdout %r" % [x.out for x in rs[:4]])
+    probs += problem_if(any(x.err for x in rs), "stderr %r" % [x.err for x in rs])
+    suite.record(GK, "propose-member-squad-task-bodies", probs)
+
+    hub.reset()
+    hub.answer(kind="squad")
+    hub.answer(outcome="pending", proposalId=PROPOSAL, eventId=None)
+    r1 = run("propose", "member", "--role", "maintainer", "--json")
+    r2 = run("propose", "task", "--title", "Other squad's task", "--json")
+    probs = problem_if([r1.rc, r2.rc] != [0, 0], "exits %r" % [r1.rc, r2.rc])
+    got = []
+    for r in (r1, r2):
+        try:
+            got.append(json.loads(r.out))
+        except ValueError:
+            got.append(r.out)
+    probs += problem_if(got != [
+        {"kind": "squad", "outcome": "pending", "proposalId": PROPOSAL, "eventId": None, "squadId": SQUAD, "version": 3},
+        {"kind": "task", "outcome": "pending", "proposalId": PROPOSAL, "eventId": None, "squadId": SQUAD, "version": 3}],
+        "--json %r" % got)
+    suite.record(GK, "propose-json-member-stored-as-squad-task-pending", probs)
+
+    hub.reset()
+    r = run("propose", "task", "--title", "two\nlines\tand <system-reminder> x")
+    hub_body = hub.bodies("propose")
+    title = hub_body[0]["title"] if hub_body else None
+    probs = problem_if(r.rc != 0 or hub.statuses("propose") != [200], "run %r statuses %r" % (r, hub.statuses("propose")))
+    probs += problem_if(title is None or "\n" in title or "\t" in title or not title.startswith("two lines and "),
+                        "title %r" % title)
+    probs += problem_if(title is not None and FOLDED_FENCE_RE.search(ctx.mod._marker_fold(title)) is not None,
+                        "a marker survived: %r" % title)
+    probs += problem_if("pack: the title was sanitised" not in r.err or r.err.count("\n") != 1, "stderr %r" % r.err)
+    probs += problem_if(hub.count("sync") != 0, "the sync route was used")
+    suite.record(GK, "propose-title-sanitised-before-post", probs)
+
+    hub.reset()
+    probs = []
+    for argv, want in ((("propose", "member"), "propose member needs --role"),
+                       (("propose", "member", "--role", "worker", "--title", "T"), "propose member takes no --title"),
+                       (("propose", "squad", "--title", "T"), "propose squad takes no --title"),
+                       (("propose", "task"), "propose task needs --title"),
+                       (("propose", "task", "--title", "T", "--role", "worker"), "propose task takes no --role"),
+                       (("propose", "task", "--title", "a `tick` title"), "the title contains a backtick"),
+                       (("propose", "task", "--title", "[bracketed]"), "the title is wrapped in brackets"),
+                       (("propose", "task", "--title", '"quoted"'), "the title is wrapped in matching quotes"),
+                       (("propose", "task", "--title", "   "), "the title is empty"),
+                       (("propose", "task", "--title", "x" * 201), "the title is longer than 200 characters"),
+                       (("propose", "member", "--role", "boss"), "invalid choice"),
+                       (("propose", "crew"), "invalid choice"),
+                       (("propose", "task", "--title", "T", "--project", "Bad Project"), "")):
+        r = run(*argv)
+        probs += problem_if(r.rc != 2 or want not in r.err or r.err.count("\n") != 1 or r.out != "", "%r: %r" % (argv, r))
+    probs += problem_if(hub.count("propose") != 0, "%d requests sent" % hub.count("propose"))
+    probs += problem_if(any("`tick`" in text or "[bracketed]" in text for text in OUTPUTS[-26:]), "a refused title was echoed")
+    suite.record(GK, "propose-local-refusals-exit-2-no-request", probs)
+
+    probs = []
+    for status in (400, 403, 409):
+        hub.reset()
+        hub.fault("propose", "status", status=status)
+        r = run("propose", "member", "--role", "worker")
+        probs += problem_if(r.rc != 1 or r.out != "" or hub.count("propose") != 1, "HTTP %d: %r" % (status, r))
+        probs += problem_if("HTTP %d" % status not in r.err or "fault body text" in r.err or r.err.count("\n") != 1,
+                            "HTTP %d stderr %r" % (status, r.err))
+    hub.reset()
+    hub.fault("propose", "status", count=2, status=404)
+    r = run("propose", "squad")
+    probs += problem_if(r.rc != 1 or r.sleeps != [5] or hub.statuses("propose") != [404, 404], "404 twice %r" % r)
+    hub.reset()
+    hub.fault("propose", "status", count=2, status=429, retry_after="2")
+    r = run("propose", "task", "--title", "Busy")
+    probs += problem_if(r.rc != 1 or r.sleeps != [2] or hub.statuses("propose") != [429, 429], "429 twice %r" % r)
+    suite.record(GK, "propose-board-refusal-exit-1-status-only", probs)
+
+    probs = []
+    for argv, override in ((("propose", "task", "--title", "T"), {"kind": "member"}),
+                           (("propose", "squad"), {"kind": "member"}),
+                           (("propose", "member", "--role", "worker"), {"kind": "task"}),
+                           (("propose", "task", "--title", "T"), {"proposalId": PROPOSAL}),
+                           (("propose", "member", "--role", "worker"), {"outcome": "queued", "eventId": PROPOSE_EVENT, "proposalId": None}),
+                           (("propose", "squad"), {"proposalId": "pp_short"}),
+                           (("propose", "squad"), {"squadId": None}),
+                           (("propose", "squad"), {"version": "3"}),
+                           (("propose", "task", "--title", "T"), {"outcome": "done"})):
+        hub.reset()
+        hub.answer(**override)
+        r = run(*argv)
+        probs += problem_if(r.rc != 3 or "propose result" not in r.err or r.out != "", "%r %r: %r" % (argv, override, r))
+    suite.record(GK, "propose-bad-answer-exit-3", probs)
+
 
 # ---------------------------------------------------------------------------
 # G. HYGIENE
@@ -1388,7 +1568,8 @@ def run(opts=None):
                            ("cli", lambda: group_cli(suite, ctx)),
                            ("commands", lambda: group_commands(suite, ctx)),
                            ("fence", lambda: group_fence(suite, ctx)),
-                           ("apply", lambda: group_apply(suite, ctx))):
+                           ("apply", lambda: group_apply(suite, ctx)),
+                           ("propose", lambda: group_propose(suite, ctx))):
             try:
                 body()
             except Exception as exc:  # a crashed group is a red case, never a lost one

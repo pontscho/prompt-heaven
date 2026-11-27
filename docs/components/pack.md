@@ -3,7 +3,7 @@ name: pack
 type: component
 status: active
 title: pack — the p:pack skill and pack.py, the Pack board client of one repo
-description: The p:pack skill and its stdlib client ClaudeCode/skills/pack/scripts/pack.py, which projects a repo's live roadmap items and requirements-*.yaml plans onto the ai-soul Pack board (POST /pack/sync), reads a member's cards and queued events fenced as data (/pack/pull), claims and moves cards (/pack/claim, /pack/update), and applies the board's decided roadmap events back through roadmap.py with a validate, pre-check, apply, verify and ack loop; the pack.json and token file rules, member and project resolution, the sync digest that is the script's one file write, the exit codes, the worker and maintainer loops, the hand-registered hook lines, how it is tested against the stub hub, and what it declares rather than gates.
+description: The p:pack skill and its stdlib client ClaudeCode/skills/pack/scripts/pack.py, which projects a repo's live roadmap items and requirements-*.yaml plans onto the ai-soul Pack board (POST /pack/sync), reads a member's cards and queued events fenced as data (/pack/pull), claims and moves cards (/pack/claim, /pack/update), proposes a membership, a squad or a task (/pack/propose), and applies the board's decided roadmap events back through roadmap.py with a validate, pre-check, apply, verify and ack loop; the pack.json and token file rules, member and project resolution, the sync digest that is the script's one file write, the exit codes, the worker and maintainer loops, the hand-registered hook lines, how it is tested against the stub hub, and what it declares rather than gates.
 sources:
   - ClaudeCode/skills/pack/SKILL.md
   - ClaudeCode/skills/pack/scripts/pack.py
@@ -44,7 +44,7 @@ standard-library Python ([[0024-pure-python-39-and-the-stdlib]]).
 
 ## Commands
 
-`HANDLERS` maps eight commands to their functions
+`HANDLERS` maps nine commands to their functions
 `ClaudeCode/skills/pack/scripts/pack.py:HANDLERS`; every one but `pull` changes
 the board `ClaudeCode/skills/pack/scripts/pack.py:WRITE_COMMANDS`. The global
 flags `--config`, `--member` and `--project` come before the command
@@ -60,9 +60,10 @@ flags `--config`, `--member` and `--project` come before the command
 | `impl-ready R-NNNN` | `/pack/update` | the implementation awaits closing `ClaudeCode/skills/pack/scripts/pack.py:cmd_impl_ready` |
 | `ack pv_... applied\|failed` | `/pack/update` | one event acked by hand, `--code` for a failure, `--commit` for an applied close `ClaudeCode/skills/pack/scripts/pack.py:_ack_fields` |
 | `apply [--commit pv_...=SHA]...` | `/pack/pull`, `/pack/update` | every queued event applied and acked `ClaudeCode/skills/pack/scripts/pack.py:cmd_apply` |
+| `propose member\|squad\|task` | `/pack/propose` | a membership (`--role`), a squad (optional `--role`) or a task (`--title`) for the owner to decide `ClaudeCode/skills/pack/scripts/pack.py:cmd_propose` |
 
-`claim`, `assign`, `plan-ready`, `impl-ready`, `ack`, `apply` and `pull` take
-`--json`. The board's hub-session routes (the board view, card acts, squads) are
+`claim`, `assign`, `plan-ready`, `impl-ready`, `ack`, `apply`, `propose` and
+`pull` take `--json`. The board's hub-session routes (the board view, card acts, squads) are
 not the client's: every owner act happens in the hub.
 
 **Exit codes.** 0 ok; 1 refused by the board, any HTTP error status, printed as
@@ -209,6 +210,12 @@ pre-check, run `roadmap.py`, verify and ack
   idempotent `ClaudeCode/skills/pack/scripts/pack.py:_apply_add`.
 - **Verify.** After the run a fresh export must show the change, else `verify`.
 
+**Drag on the board = `rank` / `move` events you apply.** The owner's drag and
+drop on the hub's board writes nothing to the repo: a drop inside one lane
+queues a `rank` event, a drop into another lane a `move` event, end of lane
+included, and `apply` runs them like any other event. A proposed task the board
+queued (see propose) is an `add` event.
+
 So a crash between `roadmap.py` and the ack is repaired by running `apply` again:
 the second run's pre-check sees the effect and acks it, and `roadmap.md` stays
 byte-identical to one application.
@@ -219,6 +226,27 @@ times out is a fixed refusal `ClaudeCode/skills/pack/scripts/pack.py:_roadmap`.
 The script is the installed skill's
 `ClaudeCode/skills/pack/scripts/pack.py:ROADMAP_PY`; `PACK_ROADMAP_PY` replaces it
 for tests only `ClaudeCode/skills/pack/scripts/pack.py:_roadmap_py`.
+
+## propose
+
+`propose` sends one `{member, kind, project, role?, title?}` body
+`ClaudeCode/skills/pack/scripts/pack.py:cmd_propose`. The kind's members are
+judged locally first, the board's own rule restated: `member` needs `--role`,
+`squad` takes an optional one (the board defaults it to `maintainer`), `task`
+needs `--title` and takes no role, and only `task` takes a title
+`ClaudeCode/skills/pack/scripts/pack.py:_propose_fields`. The title is NFC, at
+most 200 code points (a longer one is refused, never clipped), then
+`sanitise_row` and the `roadmap.py` scalar mirror (ai-soul `packTitleProblem`);
+a change by the sanitiser is a note, a refusal a fixed reason that never echoes
+the title `ClaudeCode/skills/pack/scripts/pack.py:_propose_title`.
+
+The answer `{kind, outcome, proposalId, eventId, squadId, version}` is judged
+against its closed values: `outcome` `queued` (a task in the member's own squad,
+an `eventId`, no proposal) or `pending` (a `pp_` proposal, no event); a `member`
+proposal may come back as `squad` (it created the pending squad); anything else
+is exit 3 `ClaudeCode/skills/pack/scripts/pack.py:_propose_answer`. Who may
+propose what, the 64 pending proposals cap and the shared 600 client writes per
+hour are the board's; their refusals are exit 1 with the status only.
 
 ## The generated region
 
@@ -254,12 +282,13 @@ Two suites, case counts in `tests/run.py:SUITES` ([[tests]]):
   loopback, in a temp sandbox, with a fake export and a recorded sleep
   `tests/test_pack.py`: the exact sync body, paths, the digest rules, retries and
   `Retry-After`, exit codes, pack.json and token refusals, member precedence, the
-  fence and the token in no output.
+  fence, the propose bodies, refusals and answers, an `add` applied twice
+  leaving one item (live and archived origin), and the token in no output.
 
 The stub hub takes the sync body as strictly as the board: bearer check, 2 MiB
 cap, strict JSON, exact keys, at most 8 plans per item, the server's raw and
-folded marker rule on every row; plus minimal pull, claim and update routes and
-per-route fault injection `tests/_stub_pack_hub.py:StubPackHub`.
+folded marker rule on every row; plus minimal pull, claim, update and propose
+routes and per-route fault injection `tests/_stub_pack_hub.py:StubPackHub`.
 
 ## Declared, not gated
 

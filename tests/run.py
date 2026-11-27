@@ -603,8 +603,10 @@ SUITES = [
      "/ impl-ready / ack bodies and exits, the fresh-nonce pack-data fence "
      "with planted markers neutralised in every form, and apply's "
      "validate -> apply -> ack with one --commit per close, with three "
-     "more mutations that must go red",
-     68),
+     "more mutations that must go red, an add applied twice leaving one "
+     "item (live and archived origin), and (Milestone C) the propose "
+     "member / squad / task bodies, local refusals and exits",
+     76),
     ("generated_region", run_generated_region,
      "generated regions match their canonical source, and the source named on "
      "a region's BEGIN line is the one its names resolve against; the "

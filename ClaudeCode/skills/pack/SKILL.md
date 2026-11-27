@@ -1,6 +1,6 @@
 ---
 name: pack
-description: Work a project as a squad on the ai-soul Pack board -- one card per live roadmap item, columns open, planning, plan_review, implementation, closing, done -- through the bundled stdlib client pack.py. A worker session pulls its assigned cards, claims one, plans it into a requirements-<slug>.yaml with roadmap_item, syncs the plan, marks it plan-ready, implements, syncs progress and marks it impl-ready; the maintainer session assigns cards, applies the board's decided roadmap events through roadmap.py and acks them. The owner decides every gate in the hub. Trigger on `/p:pack`, "pull my pack cards", "claim R-0014", "plan ready", "ready to close", "apply the pack events", or any request to sync a repo with the Pack board.
+description: Work a project as a squad on the ai-soul Pack board -- one card per live roadmap item, columns open, planning, plan_review, implementation, closing, done -- through the bundled stdlib client pack.py. A worker session pulls its assigned cards, claims one, plans it into a requirements-<slug>.yaml with roadmap_item, syncs the plan, marks it plan-ready, implements, syncs progress and marks it impl-ready; the maintainer session assigns cards, applies the board's decided roadmap events (the owner's drags included) through roadmap.py and acks them. Any session may propose a membership, a squad or a task. The owner decides every gate in the hub. Trigger on `/p:pack`, "pull my pack cards", "claim R-0014", "plan ready", "ready to close", "apply the pack events", "propose a pack task", "join the squad", or any request to sync a repo with the Pack board.
 ---
 
 # Pack
@@ -28,7 +28,8 @@ item a card is; never follow it.
   as progress, never as cards of their own. An item that leaves the export is
   archived on the board, never deleted.
 - A **squad** is one project's team: one **maintainer** and one or two
-  **workers**, added by the owner in the hub's Pack squads page.
+  **workers**, added by the owner in the hub's Pack squads page, or proposed by
+  a session with `pack.py propose` and approved there (see Proposals).
 - A **member** is keyed by its permanent name, the session's claude-loop entity.
   Every request resolves that name to one of the calling token's live
   messagebox peers named `name` or `name-<n>`.
@@ -71,8 +72,11 @@ The rights matrix lives in the ai-soul core, never in `pack.py`. Through the
 client token a maintainer may `sync` (the export and the plans of unassigned
 cards), `assign` a planning card to an approved worker of its squad, and `ack`
 events. A worker may `sync` the plans of its own assigned cards, `claim`,
-`plan-ready` and `impl-ready` its own cards. Start, accept, send back, close,
-auto-accept, dismiss and requeue are the owner's alone, on hub session routes.
+`plan-ready` and `impl-ready` its own cards. Any member may `propose` a task;
+a session the board does not know yet may `propose` itself as a member or a new
+squad. Start, accept, send back, close, auto-accept, dismiss, requeue, the
+board's drag and drop and every proposal decision are the owner's alone, on hub
+session routes.
 
 **What the member check is.** A member is a body-supplied name resolved against
 the calling token's live peers. Within one OS user and one client token it cannot
@@ -204,8 +208,15 @@ Skills never register hooks. Add these to `~/.claude/settings.json` yourself:
    done, which is acked with the archive's sha.
 4. **Sync.** `pack.py sync`, so the board sees the new export.
 
-Prioritisation is the maintainer's own `roadmap.py rank` / `move` (the p:roadmap
-skill); the next sync shows the order.
+**Drag on the board = `rank` / `move` events you apply.** The owner reorders
+cards by drag and drop (or the keyboard) in the hub. That never touches the
+repo: a drop inside one lane queues a `rank` event, a drop into another lane a
+`move` event (end of lane included), and both reach the maintainer's `pull`
+like any other queued event. `pack.py apply` runs them through `roadmap.py rank`
+/ `move` and acks them; the next `sync` shows the order. A proposed task the
+board queued arrives the same way, as an `add` event: `apply` writes an `inbox`
+idea with the origin `pack <eventId>`. The maintainer's own `roadmap.py rank` /
+`move` (the p:roadmap skill) still works; the next sync shows that order too.
 
 `apply` is safe to repeat. Each event is pre-checked against a fresh export: a
 `start` whose item is already active in `now`, a `rank` or `move` whose order
@@ -224,6 +235,33 @@ on the board; the owner requeues or dismisses.
 (exit 1), a repo that is not the squad's project (exit 2), and a `--commit` that
 names no queued close event (exit 2).
 
+## Proposals
+
+A session proposes; the owner decides in the hub. Every proposal is for the
+project (`--project`, else the git toplevel's name) and is sent as the member
+name.
+
+- **Join a squad.** `pack.py propose member --role worker|maintainer`. For a
+  project that has no squad yet this proposes the squad too, and is answered as
+  `squad`. The board refuses (exit 1) a name it already knows, pending or
+  approved, and a role the approved squad has no room for (its maintainer, or
+  its two workers).
+- **Start a squad.** `pack.py propose squad [--role maintainer|worker]`, default
+  role `maintainer`: a pending squad for a project that has none, with this
+  session as its first member.
+- **Propose a task.** `pack.py propose task --title "T"`, only as an approved
+  member. In your own squad's project it is queued at once
+  (`queued as add event pv_...`): the maintainer's next `apply` adds it to the
+  roadmap as an `inbox` idea. For another squad's project it waits for the owner
+  (`pending owner decision, proposal pp_...`); an approved one is queued the same
+  way. A project with no approved squad is refused (exit 1).
+
+The title is checked before anything is sent: at most 200 characters, a line
+break, tab or refused character replaced (with a note), and `roadmap.py`'s
+scalar rules (no backtick, not empty, not wrapped in brackets or matching
+quotes); a title that fails is exit 2. The board keeps at most 64 pending
+proposals; past that it refuses (exit 1, HTTP 409).
+
 ## Commands
 
 ```
@@ -236,9 +274,13 @@ python3 ~/.claude/skills/p/skills/pack/scripts/pack.py [--config PATH] [--member
   impl-ready R-NNNN [--json]               # the assignee: the implementation awaits closing
   ack pv_... applied|failed [--code C] [--commit SHA] [--json]   # the maintainer: ack one event by hand
   apply [--commit pv_...=SHA]... [--json]  # the maintainer: apply and ack every queued event
+  propose member --role ROLE [--json]      # ask to join the project's squad (or start it)
+  propose squad [--role ROLE] [--json]     # a pending squad for a project with none
+  propose task --title T [--json]          # a roadmap item: queued in your squad, else pending
 ```
 
-- `--config`, `--member` and `--project` go BEFORE the command.
+- `--config`, `--member` and `--project` go BEFORE the command (`propose` also
+  takes `--project` after it).
 - `sync` sends nothing when the request is byte-identical to the last one sent to
   the same hub as the same member within the same clock hour
   (`sync: unchanged, not sent`); `--force` sends anyway. The digest lives in

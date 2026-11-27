@@ -6,7 +6,8 @@ task YAMLs onto it and applies the board's decided roadmap events back through
 roadmap.py. Standard library only.
 
 Commands: sync, pull (fenced board text), claim, assign, plan-ready,
-impl-ready, ack, apply (the maintainer's validate -> apply -> ack loop).
+impl-ready, ack, apply (the maintainer's validate -> apply -> ack loop),
+propose (a membership, a squad or a task, for the owner to decide).
 
 Safety rules (each pinned by tests/test_pack_apply.py's AST gate):
   - `_roadmap` is the ONLY subprocess site: roadmap.py run by this Python,
@@ -2200,14 +2201,109 @@ def _print_apply(args, results):
 
 
 # ---------------------------------------------------------------------------
+# propose: a member's proposal (Milestone C, POST /pack/propose)
+#
+# `member` and `squad` ask the owner to let this session in (a squad proposal
+# also creates the pending squad); `task` asks for a roadmap item: in the
+# member's own squad it is queued at once as an `add` event the maintainer's
+# `apply` writes, else it waits for the owner as a pending proposal.
+# ---------------------------------------------------------------------------
+
+PROPOSE_ROUTE = "/pack/propose"
+PROPOSE_KINDS = ("member", "squad", "task")
+PROPOSE_OUTCOMES = ("pending", "queued")
+_PROPOSAL_ID_RE = re.compile(r"pp_[A-Za-z0-9_-]{22}\Z")
+_SQUAD_ID_RE = re.compile(r"sq_[A-Za-z0-9_-]{22}\Z")
+
+
+def _propose_title(raw):
+    """The task title the board will take: NFC, at most PACK_TITLE_MAX code
+    points (a longer one is refused, never clipped), through sanitise_row and
+    the roadmap.py scalar mirror (ai-soul packTitleProblem); or die() with a
+    fixed reason, never the title."""
+    text = unicodedata.normalize("NFC", raw)
+    if len(text) > PACK_TITLE_MAX:
+        die("the title is longer than %d characters" % PACK_TITLE_MAX)
+    clean = sanitise_row(text, PACK_TITLE_MAX)
+    problem = _title_problem(clean) or _text_problem(clean)
+    if problem is not None:
+        die("the title %s" % problem)
+    if clean != text:
+        note("the title was sanitised (a line break, tab or refused character replaced)")
+    return clean
+
+
+def _propose_fields(kind, role, title):
+    """The kind's optional body members judged locally (the board's rule), or
+    die(): `member` needs --role, `squad` takes an optional --role (the board's
+    default maintainer), `task` needs --title; nothing off its kind."""
+    if kind == "task":
+        if role is not None:
+            die("propose task takes no --role")
+        if title is None:
+            die("propose task needs --title")
+        return {"title": _propose_title(title)}
+    if title is not None:
+        die("propose %s takes no --title" % kind)
+    if kind == "member" and role is None:
+        die("propose member needs --role, one of %s" % ", ".join(PACK_ROLES))
+    return {"role": role} if role is not None else {}
+
+
+def _propose_answer(answer, kind):
+    """The propose answer's closed members judged, or HubError. A `member`
+    proposal for a project with no squad is stored (and answered) as `squad`."""
+    got, outcome = answer.get("kind"), answer.get("outcome")
+    allowed = ("member", "squad") if kind == "member" else (kind,)
+    if got not in allowed or outcome not in PROPOSE_OUTCOMES or type(answer.get("version")) is not int:
+        raise _bad_answer("propose")
+    proposal_id, event_id, squad_id = answer.get("proposalId"), answer.get("eventId"), answer.get("squadId")
+    if not (isinstance(squad_id, str) and _SQUAD_ID_RE.match(squad_id)):
+        raise _bad_answer("propose")
+    if outcome == "queued":
+        ok = got == "task" and proposal_id is None and isinstance(event_id, str) and _EVENT_ID_RE.match(event_id)
+    else:
+        ok = event_id is None and isinstance(proposal_id, str) and _PROPOSAL_ID_RE.match(proposal_id)
+    if not ok:
+        raise _bad_answer("propose")
+    return answer
+
+
+def cmd_propose(args):
+    """`propose member --role R`, `propose squad [--role R]`, `propose task
+    --title T`: one POST /pack/propose for the project (`--project`, else the
+    git toplevel's name)."""
+    fields = _propose_fields(args.kind, args.role, args.title)
+    cfg = load_config(args.config)
+    member = resolve_member(args.member, cfg)
+    project = _project_of_args(args)
+    body = {"member": member, "kind": args.kind, "project": project}
+    body.update(fields)
+    try:
+        answer = _propose_answer(_post_retrying(cfg, PROPOSE_ROUTE, encode_body(body)), args.kind)
+    except HubError as exc:
+        return hub_exit(exc)
+    if args.json:
+        print(json.dumps({key: answer[key] for key in ("kind", "outcome", "proposalId", "eventId", "squadId", "version")},
+                         sort_keys=True))
+    elif answer["outcome"] == "queued":
+        print("propose task: queued as add event %s (squad %s)" % (answer["eventId"], answer["squadId"]))
+    else:
+        print("propose %s: pending owner decision, proposal %s (squad %s)"
+              % (answer["kind"], answer["proposalId"], answer["squadId"]))
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
 HANDLERS = {"sync": cmd_sync, "pull": cmd_pull, "claim": cmd_claim, "assign": cmd_assign,
-            "plan-ready": cmd_plan_ready, "impl-ready": cmd_impl_ready, "ack": cmd_ack, "apply": cmd_apply}
-# The commands that change the board (each posts /pack/sync, /pack/claim or
-# /pack/update); `pull` alone only reads.
-WRITE_COMMANDS = ("sync", "claim", "assign", "plan-ready", "impl-ready", "ack", "apply")
+            "plan-ready": cmd_plan_ready, "impl-ready": cmd_impl_ready, "ack": cmd_ack, "apply": cmd_apply,
+            "propose": cmd_propose}
+# The commands that change the board (each posts /pack/sync, /pack/claim,
+# /pack/update or /pack/propose); `pull` alone only reads.
+WRITE_COMMANDS = ("sync", "claim", "assign", "plan-ready", "impl-ready", "ack", "apply", "propose")
 
 
 def build_parser():
@@ -2240,7 +2336,13 @@ def build_parser():
     apply = commands.add_parser("apply", help="apply and ack every queued repo event (the maintainer)")
     apply.add_argument("--commit", action="append", default=None, metavar="pv_...=SHA",
                        help="the commit of one close event (repeat once per close)")
-    for sub in (pull, claim, assign, plan_ready, impl_ready, ack, apply):
+    propose = commands.add_parser("propose", help="propose a membership, a squad or a task to the owner")
+    propose.add_argument("kind", choices=PROPOSE_KINDS)
+    propose.add_argument("--role", default=None, choices=PACK_ROLES, help="member (required) / squad (optional): the role")
+    propose.add_argument("--title", default=None, metavar="T", help="task (required): the roadmap item title")
+    propose.add_argument("--project", default=argparse.SUPPRESS,
+                         help="the project name (also accepted before the command)")
+    for sub in (pull, claim, assign, plan_ready, impl_ready, ack, apply, propose):
         sub.add_argument("--json", action="store_true", help="print the result as JSON")
     return parser
 

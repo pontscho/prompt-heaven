@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """An in-memory stand-in for the ai-soul hub's POST /pack/sync route (and,
-for Milestone B, minimal /pack/pull, /pack/claim and /pack/update).
+for Milestone B, minimal /pack/pull, /pack/claim and /pack/update; for
+Milestone C, /pack/propose).
 
 Used by tests/test_pack.py. Stdlib only; one ThreadingHTTPServer on
 127.0.0.1:0; every state lives in memory. It takes the pack-sync/1 body as
@@ -40,8 +41,13 @@ import threading
 import unicodedata
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-ROUTES = ("sync", "pull", "claim", "update")
+ROUTES = ("sync", "pull", "claim", "update", "propose")
 UPDATE_ACTIONS = ("assign", "plan-ready", "impl-ready", "ack")
+PROPOSE_KINDS = ("member", "squad", "task")
+ROLES = ("maintainer", "worker")
+PROPOSAL_ID = "pp_" + "P" * 22
+PROPOSE_EVENT_ID = "pv_" + "Q" * 22
+SQUAD_ID = "sq_" + "S" * 22
 FAILURE_CODES = ("wip", "verify", "refused", "missing", "lane", "state", "dropped")
 EVENT_ID_RE = re.compile(r"pv_[A-Za-z0-9_-]{22}\Z")
 COMMIT_RE = re.compile(r"[0-9a-f]{7,64}\Z")
@@ -281,6 +287,39 @@ class StubPackHub:
                 raise Bad(400, "outcome")
         out = {"version": 2, "changed": True, "action": body["action"], "itemId": body.get("itemId"),
                "column": None if body["action"] == "ack" else "planning", "plansDeleted": 0}
+        if self.answers:
+            out.update(self.answers.pop(0))
+        return out
+
+    # -- Milestone C: /pack/propose ---------------------------------------------
+    # pack-routes.ts packProposePreflight's strict body, then the core's
+    # judgePropose kind rule (member needs a role, task needs a title and takes
+    # no role, only task takes a title) and its title rule (the display-row
+    # rule, at most 200, not empty). A task answers `queued` (the own-squad
+    # case), the other kinds `pending`; `answer` overrides, like the others.
+
+    def _r_propose(self, body):
+        allowed = {"member", "kind", "project", "role", "title"}
+        if not isinstance(body, dict) or not {"member", "kind", "project"} <= set(body) <= allowed:
+            raise Bad(400, "keys")
+        if not (MEMBER_RE.match(str(body["member"])) and PROJECT_RE.match(str(body["project"]))):
+            raise Bad(400, "grammar")
+        kind = body["kind"]
+        if kind not in PROPOSE_KINDS:
+            raise Bad(400, "kind")
+        if "role" in body and body["role"] not in ROLES:
+            raise Bad(400, "role")
+        if kind == "task":
+            title = body.get("title")
+            if "role" in body or not isinstance(title, str) or title.strip() == "" or row_problem(title, 200) is not None:
+                raise Bad(400, "title")
+        elif "title" in body or (kind == "member" and "role" not in body):
+            raise Bad(400, "kind members")
+        if kind == "task":
+            out = {"kind": "task", "outcome": "queued", "proposalId": None, "eventId": PROPOSE_EVENT_ID}
+        else:
+            out = {"kind": kind, "outcome": "pending", "proposalId": PROPOSAL_ID, "eventId": None}
+        out.update({"squadId": SQUAD_ID, "version": 3})
         if self.answers:
             out.update(self.answers.pop(0))
         return out
